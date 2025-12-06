@@ -1,1 +1,33 @@
+"""
+DBSI Core Module - Basis Functions and Solvers
 
+Contains the mathematical core of the DBSI implementation:
+- Design matrix construction (cylinder model)
+- Fiber direction generation (hemisphere)
+- NNLS solver with coordinate descent
+- Step 2 diffusivity refinement
+- Fiber FA computation
+"""
+
+from .basis import (
+    build_design_matrix,
+    generate_fibonacci_sphere_hemisphere,
+    generate_fibonacci_sphere,  # deprecated, kept for compatibility
+)
+
+from .solvers import (
+    nnls_coordinate_descent,
+    step2_refine_diffusivities,
+    compute_weighted_centroids,
+    compute_fiber_fa,
+)
+
+__all__ = [
+    "build_design_matrix",
+    "generate_fibonacci_sphere_hemisphere",
+    "generate_fibonacci_sphere",
+    "nnls_coordinate_descent",
+    "step2_refine_diffusivities",
+    "compute_weighted_centroids",
+    "compute_fiber_fa",
+]

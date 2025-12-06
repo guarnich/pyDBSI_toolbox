@@ -83,7 +83,7 @@ def estimate_snr_robust(data, bvals, mask, verbose=True):
             print("  Method: TEMPORAL (Voxel-wise variance over time)")
             
         b0_data = data[..., b0_idx]
-        mean_b0 = np.median(b0_data, axis=-1)
+        mean_b0 = np.mean(b0_data, axis=-1)
         # MAD (Median Absolute Deviation) for robust noise estimation
         mad = np.median(np.abs(b0_data - mean_b0[..., None]), axis=-1)
         sigma_map = mad * 1.4826

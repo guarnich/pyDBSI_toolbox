@@ -88,14 +88,12 @@ def estimate_snr_robust(data, bvals, mask, verbose=True):
         
         # 1. Calculate temporal statistics
         mean_b0 = np.mean(b0_data, axis=-1)
-        # Use standard deviation (unbiased estimator) instead of MAD
-        # MAD * 1.4826 overestimates noise for small N (e.g. N=3)
         std_b0 = np.std(b0_data, axis=-1, ddof=1)
         std_b0[std_b0 == 0] = 1e-10
         
         # 2. Initial Apparent SNR
         # Only compute on valid mask to save memory/time
-        valid_mask = mask & (mean_b0 > 0)
+        valid_mask = mask
         if np.sum(valid_mask) == 0:
             if verbose: print("  ! No valid voxels. Defaulting to 20.0")
             return 20.0, 1.0

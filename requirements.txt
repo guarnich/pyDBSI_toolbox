@@ -4,3 +4,4 @@ numba
 nibabel
 tqdm
 matplotlib
+pandas

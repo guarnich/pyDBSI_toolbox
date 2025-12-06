@@ -14,5 +14,6 @@ setup(
         'nibabel>=3.2.0',
         'tqdm>=4.60.0',
         'matplotlib>=3.4.0',
+        'pandas>=1.3.0'
     ],
 )

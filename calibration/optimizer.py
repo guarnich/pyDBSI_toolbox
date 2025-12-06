@@ -12,7 +12,6 @@ from ..core.basis import build_design_matrix, generate_fibonacci_sphere_hemisphe
 from ..core.solvers import nnls_coordinate_descent
 
 
-# CORRECTED: Literature-standard thresholds
 THRESH_RESTRICTED = 0.3e-3
 THRESH_FREE = 3.0e-3
 
@@ -72,7 +71,7 @@ def generate_synthetic_signal(bvals, bvecs, snr, f_fiber=0.5, f_cell=0.3):
     return np.sqrt((s + n1)**2 + n2**2)
 
 
-def optimize_hyperparameters(bvals, bvecs, snr, n_mc=500):
+def optimize_hyperparameters(bvals, bvecs, snr, n_mc=1000):
     """
     Monte Carlo optimization to find best (n_iso, lambda) hyperparameters.
     
@@ -105,8 +104,8 @@ def optimize_hyperparameters(bvals, bvecs, snr, n_mc=500):
     print("-" * 65)
     
     # Grid of hyperparameters to test
-    bases_grid = [30, 50, 75, 100]
-    lambdas_grid = [0.01, 0.05, 0.1, 0.5, 1.0]
+    bases_grid = [25, 50, 75, 100, 125, 150]
+    lambdas_grid = [0.01, 0.1, 0.5, 1.0, 2.0]
     
     results = []
     

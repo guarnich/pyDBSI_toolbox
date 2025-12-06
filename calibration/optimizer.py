@@ -100,7 +100,7 @@ def optimize_hyperparameters(bvals, bvecs, snr, n_mc=1000):
     print(f"  Target: Minimize error in Restricted Fraction estimation")
     print(f"  Configuration: SNR={snr:.1f}, MC_Iterations={n_mc}")
     print("-" * 65)
-    print(f"{'Bases':<6} | {'Lambda':<8} | {'Estimated':+8.4f} | {'Ground Truth':+8.4f} | {'MAE':<8} | {'MSE':<8} | {'Bias':+8.4f}")
+    print(f"{'Bases':<6} | {'Lambda':<8} | {'Estimated':+8.4} | {'Ground Truth':+8.4} | {'MAE':<8} | {'MSE':<8} | {'Bias':+8.4}")
     print("-" * 65)
     
     # Grid of hyperparameters to test

@@ -64,7 +64,9 @@ def load_data(dwi_path, bval_path, bvec_path, mask_path=None, verbose=True):
 
 def estimate_snr_robust(data, bvals, mask, verbose=True):
     """
-    Robust SNR estimation with detailed reporting.
+    Estimates SNR using Temporal Variance with Iterative Rician Bias Correction.
+    This restores the logic from the original 'twostep' toolbox which is more accurate
+    for protocols with few b0 volumes.
     """
     if verbose:
         print("\n[SNR ESTIMATION REPORT]")
@@ -77,32 +79,67 @@ def estimate_snr_robust(data, bvals, mask, verbose=True):
     if verbose:
         print(f"  Number of b0 volumes found: {n_b0}")
 
+    # --- TEMPORAL METHOD (Standard Deviation + Rician Correction) ---
     if n_b0 >= 2:
-        # Temporal method
         if verbose:
-            print("  Method: TEMPORAL (Voxel-wise variance over time)")
+            print("  Method: TEMPORAL (Voxel-wise STD + Iterative Correction)")
             
         b0_data = data[..., b0_idx]
-        mean_b0 = np.mean(b0_data, axis=-1)
-        # MAD (Median Absolute Deviation) for robust noise estimation
-        mad = np.median(np.abs(b0_data - mean_b0[..., None]), axis=-1)
-        sigma_map = mad * 1.4826
         
-        valid = mask & (sigma_map > 0)
-        if np.sum(valid) == 0:
-            if verbose: print("  ! No valid voxels for calculation. Returning default.")
-            return 20.0, 1.0 
+        # 1. Calculate temporal statistics
+        mean_b0 = np.mean(b0_data, axis=-1)
+        # Use standard deviation (unbiased estimator) instead of MAD
+        # MAD * 1.4826 overestimates noise for small N (e.g. N=3)
+        std_b0 = np.std(b0_data, axis=-1, ddof=1)
+        std_b0[std_b0 == 0] = 1e-10
+        
+        # 2. Initial Apparent SNR
+        # Only compute on valid mask to save memory/time
+        valid_mask = mask & (mean_b0 > 0)
+        if np.sum(valid_mask) == 0:
+            if verbose: print("  ! No valid voxels. Defaulting to 20.0")
+            return 20.0, 1.0
+
+        mean_masked = mean_b0[valid_mask]
+        std_masked = std_b0[valid_mask]
+        snr_apparent = mean_masked / std_masked
+        
+        # 3. Iterative Rician Correction
+        # Removing the Rician bias from the variance estimate
+        snr_corrected = snr_apparent.copy()
+        
+        for i in range(5): # 5 iterations usually sufficient
+            snr_old = snr_corrected.copy()
             
-        snr = np.nanmedian(mean_b0[valid] / sigma_map[valid])
-        sigma = np.nanmedian(sigma_map[valid])
+            # Bias term for variance in Rician distribution
+            # Var_observed approx Var_true + Bias
+            bias_term = mean_masked**2 / (2 * snr_corrected**2 + 1e-10)
+            
+            # Corrected variance
+            var_corrected = std_masked**2 - bias_term
+            var_corrected[var_corrected < 0] = 1e-10
+            
+            # Update SNR
+            snr_corrected = mean_masked / np.sqrt(var_corrected)
+            
+            # Convergence check
+            diff = np.mean(np.abs(snr_corrected - snr_old))
+            if diff < 0.01:
+                break
+        
+        final_snr = np.nanmedian(snr_corrected)
+        
+        # Estimate Sigma from the corrected SNR relation: Sigma = Signal / SNR
+        final_sigma = np.nanmedian(mean_masked / snr_corrected)
         
         if verbose:
-            print(f"  Estimated SNR: {snr:.2f}")
-            print(f"  Estimated Noise Sigma: {sigma:.4f}")
+            print(f"  Estimated SNR: {final_snr:.2f}")
+            print(f"  Estimated Noise Sigma: {final_sigma:.4f}")
             
-        return snr, sigma
+        return float(final_snr), float(final_sigma)
+
+    # --- SPATIAL FALLBACK ---
     else:
-        # Background fallback
         if verbose:
             print("  Method: SPATIAL (Signal vs Background Air)")
             print("  ! Warning: Less accurate than temporal method.")
@@ -112,6 +149,7 @@ def estimate_snr_robust(data, bvals, mask, verbose=True):
              return 20.0, 1.0 
              
         bg_signal = data[..., 0][bg_mask]
+        # Sigma from Rayleigh background mean
         sigma = np.mean(bg_signal) / 1.253 
         mean_signal = np.median(data[..., 0][mask])
         
@@ -121,7 +159,7 @@ def estimate_snr_robust(data, bvals, mask, verbose=True):
             print(f"  Estimated SNR: {snr:.2f}")
             print(f"  Estimated Noise Sigma: {sigma:.4f}")
             
-        return snr, sigma
+        return float(snr), float(sigma)
 
 def correct_rician_bias(signal, sigma):
     """

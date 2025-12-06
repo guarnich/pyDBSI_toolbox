@@ -27,7 +27,7 @@ def generate_synthetic_signal(bvals, bvecs, snr, f_fiber=0.5, f_cell=0.3):
     n2 = np.random.normal(0, sigma, N)
     return np.sqrt((s+n1)**2 + n2**2)
 
-def optimize_hyperparameters(bvals, bvecs, snr, n_mc=300):
+def optimize_hyperparameters(bvals, bvecs, snr, n_mc=700):
     """
     Monte Carlo optimization to find best (n_iso, lambda).
     """
@@ -38,8 +38,8 @@ def optimize_hyperparameters(bvals, bvecs, snr, n_mc=300):
     print(f"{'Bases':<6} | {'Lambda':<8} | {'MAE':<8} | {'MSE':<8} | {'Bias':<8}")
     print("-" * 65)
     
-    bases_grid = [20, 40, 60]
-    lambdas_grid = [0.01, 0.1, 0.5, 1.0]
+    bases_grid = [25, 50, 75, 100, 125, 150]
+    lambdas_grid = [0.01, 0.1, 0.5, 1.0, 2.0]
     
     results = []
     

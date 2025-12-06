@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 from ..core.basis import build_design_matrix, generate_fibonacci_sphere
 from ..core.solvers import nnls_coordinate_descent
 
@@ -29,24 +30,18 @@ def generate_synthetic_signal(bvals, bvecs, snr, f_fiber=0.5, f_cell=0.3):
 def optimize_hyperparameters(bvals, bvecs, snr, n_mc=300):
     """
     Monte Carlo optimization to find best (n_iso, lambda).
-    Target: Minimize error in estimating Restricted Fraction (Cellularity).
-    
-    Args:
-        bvals: Acquisition b-values
-        bvecs: Acquisition b-vectors
-        snr: Estimated SNR
-        n_mc: Number of Monte Carlo iterations
-        
-    Returns:
-        tuple: (optimal_n_iso, optimal_lambda)
     """
-    print(f"\n[Calibration] Running Monte Carlo Optimization (SNR={snr:.1f})...")
+    print(f"\n[CALIBRATION REPORT]")
+    print(f"  Target: Minimize error in Restricted Fraction estimation")
+    print(f"  Configuration: SNR={snr:.1f}, MC_Iterations={n_mc}")
+    print("-" * 65)
+    print(f"{'Bases':<6} | {'Lambda':<8} | {'MAE':<8} | {'MSE':<8} | {'Bias':<8}")
+    print("-" * 65)
     
     bases_grid = [20, 40, 60]
     lambdas_grid = [0.01, 0.1, 0.5, 1.0]
     
-    best_mae = np.inf
-    best_config = (50, 0.1) # Default
+    results = []
     
     fiber_dirs = generate_fibonacci_sphere(150)
     
@@ -63,23 +58,48 @@ def optimize_hyperparameters(bvals, bvecs, snr, n_mc=300):
         
         for reg in lambdas_grid:
             errors = []
+            raw_errors = []
+            
             for i in range(n_mc):
                 y = signals[i]
                 w, _ = nnls_coordinate_descent(AtA, At @ y, reg)
                 
-                # Parse restricted fraction (D <= 0.3)
-                # 150 fiber bases come first
                 iso_w = w[150:] 
                 f_res = np.sum(iso_w[iso_grid <= 0.3e-3])
                 f_tot = np.sum(w)
                 if f_tot > 0: f_res /= f_tot
                 
+                raw_errors.append(f_res - gt_cell)
                 errors.append(abs(f_res - gt_cell))
             
             mae = np.mean(errors)
-            if mae < best_mae:
-                best_mae = mae
-                best_config = (n_iso, reg)
-                
-    print(f"[Calibration] Optimal Parameters: n_iso={best_config[0]}, lambda={best_config[1]}")
-    return best_config
+            mse = np.mean(np.array(raw_errors)**2)
+            bias = np.mean(raw_errors)
+            
+            print(f"{n_iso:<6} | {reg:<8.2f} | {mae:<8.4f} | {mse:<8.4f} | {bias:<8.4f}")
+            
+            results.append({
+                'n_iso': n_iso,
+                'lambda': reg,
+                'mae': mae,
+                'mse': mse
+            })
+            
+    # Selection Logic
+    best_res = min(results, key=lambda x: x['mae'])
+    
+    # "Efficient" selection: prefer fewer bases if performance is close (within 5%)
+    efficient_res = best_res
+    threshold = best_res['mae'] * 1.05
+    for res in sorted(results, key=lambda x: x['n_iso']): # sort by complexity
+        if res['mae'] <= threshold:
+            efficient_res = res
+            break
+            
+    print("-" * 65)
+    print(f"  ABSOLUTE BEST:  n_iso={best_res['n_iso']}, lambda={best_res['lambda']} (MAE={best_res['mae']:.4f})")
+    print(f"  EFFICIENT BEST: n_iso={efficient_res['n_iso']}, lambda={efficient_res['lambda']} (MAE={efficient_res['mae']:.4f})")
+    print("  -> Using Efficient Best configuration.")
+    print("=" * 65 + "\n")
+    
+    return efficient_res['n_iso'], efficient_res['lambda']

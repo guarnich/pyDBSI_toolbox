@@ -1,6 +1,7 @@
 import numpy as np
 from numba import njit, prange
 import time
+from tqdm import tqdm
 
 from .core.basis import build_design_matrix, generate_fibonacci_sphere
 from .core.solvers import nnls_coordinate_descent, step2_refine_diffusivities
@@ -12,12 +13,6 @@ class DBSI_Fused:
     Main DBSI Model orchestrating Preprocessing, Basis Construction and Fitting.
     """
     def __init__(self, n_iso=None, reg_lambda=None, enable_step2=True):
-        """
-        Args:
-            n_iso (int): Number of isotropic bases.
-            reg_lambda (float): Regularization parameter.
-            enable_step2 (bool): Enable non-linear refinement of diffusivities.
-        """
         self.n_iso = n_iso
         self.reg_lambda = reg_lambda
         self.enable_step2 = enable_step2
@@ -27,33 +22,21 @@ class DBSI_Fused:
     def fit(self, data, bvals, bvecs, mask, run_calibration=True):
         """
         Fits the model to the provided data.
-        
-        Args:
-            data (4D array): DWI Volume
-            bvals (1D array): B-values
-            bvecs (Nx3 array): Gradient directions
-            mask (3D array): Brain mask
-            run_calibration (bool): If True and parameters are None, runs MC calibration.
-            
-        Returns:
-            np.ndarray: 4D array containing parameter maps.
-                        Channels: [f_fiber, f_rest, f_hind, f_water, AD, RD]
         """
         print(">>> Starting DBSI Pipeline")
         
         # 1. SNR Estimation
-        snr, sigma = estimate_snr_robust(data, bvals, mask)
-        print(f"1. SNR Estimated: {snr:.2f}")
+        snr, sigma = estimate_snr_robust(data, bvals, mask, verbose=True)
         
         # 2. Calibration (if needed)
         if run_calibration and (self.n_iso is None or self.reg_lambda is None):
             self.n_iso, self.reg_lambda = optimize_hyperparameters(bvals, bvecs, snr)
         
-        # Default fallbacks if calibration skipped/failed and no inputs
+        # Default fallbacks
         if self.n_iso is None: self.n_iso = 50
         if self.reg_lambda is None: self.reg_lambda = 0.1
             
-        # 3. Data Preprocessing (Rician Correction)
+        # 3. Data Preprocessing
         print("2. Applying Rician Bias Correction...")
         data_corr = np.zeros_like(data)
         data_corr[mask] = correct_rician_bias(data[mask], sigma)
@@ -67,27 +50,39 @@ class DBSI_Fused:
         AtA = A.T @ A
         At = A.T
         
-        # 5. Parallel Fitting
-        print(f"4. Fitting {np.sum(mask)} voxels (Two-Step)...")
-        t0 = time.time()
+        # 5. Parallel Fitting with Progress Bar
+        mask_coords = np.argwhere(mask)
+        n_total = len(mask_coords)
+        print(f"4. Fitting {n_total} voxels (Two-Step)...")
         
-        coords = np.argwhere(mask)
-        # Result layout: 6 channels
         results = np.zeros(data.shape[:3] + (6,), dtype=np.float32)
         
-        self._fit_batch(
-            data_corr, coords, A, AtA, At, bvals, bvecs,
-            fiber_dirs, iso_grid, self.reg_lambda, self.enable_step2, results
-        )
+        # Process in chunks to update tqdm
+        batch_size = 10000 
+        n_batches = int(np.ceil(n_total / batch_size))
+        
+        t0 = time.time()
+        
+        with tqdm(total=n_total, desc="  Fitting Progress", unit="vox") as pbar:
+            for i in range(n_batches):
+                start_idx = i * batch_size
+                end_idx = min((i + 1) * batch_size, n_total)
+                batch_coords = mask_coords[start_idx:end_idx]
+                
+                self._fit_batch_kernel(
+                    data_corr, batch_coords, A, AtA, At, bvals, bvecs,
+                    fiber_dirs, iso_grid, self.reg_lambda, self.enable_step2, results
+                )
+                pbar.update(len(batch_coords))
         
         print(f"   Done in {time.time()-t0:.1f}s")
         return results
 
     @staticmethod
     @njit(parallel=True)
-    def _fit_batch(data, coords, A, AtA, At, bvals, bvecs, 
-                   fiber_dirs, iso_grid, reg, do_step2, out):
-        """Numba-accelerated batch fitting kernel."""
+    def _fit_batch_kernel(data, coords, A, AtA, At, bvals, bvecs, 
+                          fiber_dirs, iso_grid, reg, do_step2, out):
+        """Numba-accelerated fitting kernel for a chunk of voxels."""
         n_voxels = coords.shape[0]
         n_dirs = len(fiber_dirs)
         
@@ -95,7 +90,7 @@ class DBSI_Fused:
             x, y, z = coords[i]
             sig = data[x, y, z]
             
-            # S0 Normalization (mean of b < 50)
+            # S0 Normalization
             s0 = 0.0
             cnt = 0
             for k in range(len(bvals)):
@@ -116,7 +111,6 @@ class DBSI_Fused:
                 
             w, _ = nnls_coordinate_descent(AtA, Aty, reg)
             
-            # Parse weights
             w_fib = w[:n_dirs]
             w_iso = w[n_dirs:]
             
@@ -131,15 +125,12 @@ class DBSI_Fused:
                 elif adc <= 2.0e-3: f_hin += w_iso[k]
                 else: f_wat += w_iso[k]
             
-            # Normalize fractions
             ftot = f_fib + f_res + f_hin + f_wat
             if ftot > 0:
                 f_fib/=ftot; f_res/=ftot; f_hin/=ftot; f_wat/=ftot
             
-            # Step 2: Refine AD/RD if fiber present
-            AD, RD = 1.7e-3, 0.3e-3 # Defaults
+            AD, RD = 1.7e-3, 0.3e-3 
             if do_step2 and f_fib > 0.1:
-                # Find dominant direction
                 idx_max = 0
                 val_max = -1.0
                 for k in range(n_dirs):

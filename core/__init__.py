@@ -12,7 +12,7 @@ Contains the mathematical core of the DBSI implementation:
 from .basis import (
     build_design_matrix,
     generate_fibonacci_sphere_hemisphere,
-    generate_fibonacci_sphere,  # deprecated, kept for compatibility
+    generate_fibonacci_sphere, 
 )
 
 from .solvers import (

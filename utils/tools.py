@@ -88,6 +88,7 @@ def estimate_snr_robust(data, bvals, mask):
     Method 1 (Preferred): Temporal variance across b0 volumes (if >= 2).
     Method 2 (Fallback): Signal / Background Noise (Rayleigh distribution).
     """
+    bvals = np.array(bvals).flatten()
     b0_idx = np.where(bvals < 50)[0]
     
     if len(b0_idx) >= 2:

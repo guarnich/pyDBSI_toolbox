@@ -8,3 +8,6 @@ env/
 env_/
 venv/
 venv_*/
+__pycache__/
+build/
+dist/

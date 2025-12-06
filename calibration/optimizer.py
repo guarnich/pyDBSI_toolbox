@@ -100,7 +100,7 @@ def optimize_hyperparameters(bvals, bvecs, snr, n_mc=1000):
     print(f"  Target: Minimize error in Restricted Fraction estimation")
     print(f"  Configuration: SNR={snr:.1f}, MC_Iterations={n_mc}")
     print("-" * 65)
-    print(f"{'Bases':<6} | {'Lambda':<8} | {'Estimated':<8} | {'Ground Truth':<8} | {'MAE':<8} | {'MSE':<8} | {'Bias':<8}")
+    print(f"{'Bases':<6} | {'Lambda':<8} | {'Estimated':+8.4f} | {'Ground Truth':+8.4f} | {'MAE':<8} | {'MSE':<8} | {'Bias':+8.4f}")
     print("-" * 65)
     
     # Grid of hyperparameters to test
@@ -156,7 +156,7 @@ def optimize_hyperparameters(bvals, bvecs, snr, n_mc=1000):
             mse = np.mean(np.array(raw_errors)**2)
             bias = np.mean(raw_errors)
             
-            print(f"{n_iso:<6} | {reg:<8.2f} | {f_res:<8.4f} | {gt_cell:<8.4f} | {mae:<8.4f} | {mse:<8.4f} | {bias:+8.4f}")
+            print(f"{n_iso:<6} | {reg:<8.2f} | {f_res:+8.4f} | {gt_cell:+8.4f} | {mae:<8f} | {mse:<8f} | {bias:+8.4f}")
             
             results.append({
                 'n_iso': n_iso,

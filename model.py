@@ -1,20 +1,22 @@
 """
-DBSI Fusion Model v3.0 - Faithful Implementation
+DBSI Fusion Model - Balanced Final Implementation
 
-Based on Wang et al. (2011) Brain 134:3587-3598
+Key design principles:
+1. Linear NNLS Step 1 for robustness
+2. Non-linear Step 2 refinement for accuracy
+3. FA scaled by fiber fraction to avoid artifacts
+4. Extended parameter ranges for all tissue types
+5. Proper handling of CSF and GM regions
 
-Key principles:
-1. Joint optimization of AD, RD and fractions using iterative refinement
-2. Continuous isotropic spectrum f(D) without hard boundaries during fitting
-3. Thresholds (0.3, 3.0 µm²/ms) only for post-hoc interpretation
-4. Data-driven parameter estimation
-5. Multiple random restarts to avoid local minima
-
-The model:
-    S_k = Σ f_i * exp(-b_k * D_perp_i) * exp(-b_k * (D_par_i - D_perp_i) * cos²θ_ik)
-        + ∫ f(D) * exp(-b_k * D) dD
-
-Where the integral is discretized as a sum over L isotropic basis functions.
+Outputs (8 channels):
+    0: Fiber Fraction
+    1: Restricted Fraction (ADC ≤ 0.3 µm²/ms) - cellularity
+    2: Hindered Fraction (0.3 < ADC ≤ 3.0 µm²/ms) - edema
+    3: Water Fraction (ADC > 3.0 µm²/ms) - CSF
+    4: Fiber AD (axial diffusivity)
+    5: Fiber RD (radial diffusivity)  
+    6: Fiber FA (fractional anisotropy, scaled by fiber fraction)
+    7: Mean Isotropic ADC (weighted mean of isotropic spectrum)
 """
 
 import numpy as np
@@ -23,112 +25,78 @@ import time
 from tqdm import tqdm
 
 from .core.basis import build_design_matrix, generate_fibonacci_sphere_hemisphere
-from .core.solvers_v3 import (
+from .core.solvers import (
     nnls_coordinate_descent,
-    joint_optimization,
-    compute_fiber_metrics,
-    parse_isotropic_spectrum
+    step2_refine_diffusivities,
+    compute_weighted_centroids,
+    compute_fiber_fa
 )
 from .calibration.optimizer import optimize_hyperparameters
 from .utils.tools import estimate_snr_robust, correct_rician_bias
 
 
 class DBSI_Fused:
-    """
-    Main DBSI Model - Faithful Implementation
+    """Main DBSI Model - Balanced Implementation."""
     
-    This version implements the DBSI algorithm as described in the original
-    papers, with joint optimization of fiber diffusivities and fractions.
-    
-    Key improvements over simplified versions:
-    1. AD and RD are optimized jointly with fractions, not separately
-    2. Isotropic spectrum is continuous, thresholds are only for interpretation
-    3. Multiple random restarts to find global minimum
-    4. Tissue-adaptive initialization based on signal characteristics
-    
-    Outputs (8 channels):
-        0: Fiber Fraction - apparent axonal/fiber density
-        1: Restricted Fraction - cellularity (ADC ≤ 0.3 µm²/ms)
-        2: Hindered Fraction - edema/demyelination (0.3 < ADC ≤ 3.0 µm²/ms)
-        3: Water Fraction - CSF/free water (ADC > 3.0 µm²/ms)
-        4: Fiber AD - axial diffusivity of fiber component
-        5: Fiber RD - radial diffusivity of fiber component
-        6: Fiber FA - fractional anisotropy
-        7: Mean Isotropic ADC - weighted mean of isotropic spectrum
-    """
-    
-    def __init__(self, n_iso=None, reg_lambda=None, n_dirs=100, 
-                 iso_range=(0.0, 4.0e-3), n_restarts=3):
-        """
-        Parameters
-        ----------
-        n_iso : int
-            Number of isotropic basis functions (default: auto)
-        reg_lambda : float
-            Regularization strength (default: auto)
-        n_dirs : int
-            Number of fiber directions on hemisphere
-        iso_range : tuple
-            (min, max) ADC range for isotropic spectrum
-        n_restarts : int
-            Number of random restarts for optimization
-        """
+    def __init__(self, n_iso=None, reg_lambda=None, enable_step2=True,
+                 n_dirs=100, iso_range=(0.0, 4.0e-3)):
         self.n_iso = n_iso
         self.reg_lambda = reg_lambda
+        self.enable_step2 = enable_step2
         self.n_dirs = n_dirs
         self.iso_range = iso_range
-        self.n_restarts = n_restarts
         
     def fit(self, data, bvals, bvecs, mask, run_calibration=True):
-        """
-        Fits the DBSI model to 4D diffusion MRI data.
-        """
-        print(">>> Starting DBSI Pipeline v3.0 (Faithful Implementation)")
-        print("    Based on Wang et al. (2011) Brain")
+        """Fit DBSI model to 4D diffusion MRI data."""
+        print(">>> Starting DBSI Pipeline (Balanced Final Version)")
         
-        # Normalize bvecs
         bvecs = np.asarray(bvecs, dtype=np.float64)
         norms = np.linalg.norm(bvecs, axis=1, keepdims=True)
         norms[norms == 0] = 1.0
         bvecs = bvecs / norms
-        bvals = np.asarray(bvals, dtype=np.float64)
         
-        # 1. SNR Estimation
         snr, sigma = estimate_snr_robust(data, bvals, mask, verbose=True)
         
-        # 2. Calibration
         if run_calibration and (self.n_iso is None or self.reg_lambda is None):
             self.n_iso, self.reg_lambda = optimize_hyperparameters(bvals, bvecs, snr)
         
-        if self.n_iso is None: 
-            self.n_iso = 50
-        if self.reg_lambda is None: 
-            self.reg_lambda = 0.01  # Lower regularization for more data fidelity
+        if self.n_iso is None:
+            self.n_iso = 60
+        if self.reg_lambda is None:
+            self.reg_lambda = 0.05
             
         print(f"   Using n_iso={self.n_iso}, lambda={self.reg_lambda:.4f}")
         
-        # 3. Data Preprocessing
         print("2. Applying Rician Bias Correction...")
         data_corr = np.zeros_like(data)
         data_corr[mask] = correct_rician_bias(data[mask], sigma)
         
-        # 4. Build fiber direction basis
-        print("3. Building Basis Functions...")
+        print("3. Building Design Matrix...")
         fiber_dirs = generate_fibonacci_sphere_hemisphere(self.n_dirs)
         iso_grid = np.linspace(self.iso_range[0], self.iso_range[1], self.n_iso)
         
-        print(f"   Fiber directions: {self.n_dirs}")
-        print(f"   Isotropic grid: {self.n_iso} points from 0 to {self.iso_range[1]*1e3:.1f} µm²/ms")
+        # Use tissue-adaptive AD/RD for initial design matrix
+        # These are refined in Step 2
+        init_AD, init_RD = 1.5e-3, 0.4e-3
+        A = build_design_matrix(bvals, bvecs, fiber_dirs, iso_grid, 
+                                 ad=init_AD, rd=init_RD)
         
-        # 5. Fit
+        AtA = A.T @ A
+        reg_diag = self.reg_lambda * np.eye(AtA.shape[0])
+        AtA_reg = AtA + reg_diag
+        At = A.T
+        
+        cond_number = np.linalg.cond(AtA_reg)
+        print(f"   Matrix conditioning: {cond_number:.2e}")
+        
         mask_coords = np.argwhere(mask)
         n_total = len(mask_coords)
-        print(f"4. Fitting {n_total:,} voxels with joint optimization...")
+        print(f"4. Fitting {n_total:,} voxels...")
         
         # 8 output channels
         results = np.zeros(data.shape[:3] + (8,), dtype=np.float32)
         
-        batch_size = 5000
+        batch_size = 10000
         n_batches = int(np.ceil(n_total / batch_size))
         
         t0 = time.time()
@@ -139,36 +107,27 @@ class DBSI_Fused:
                 end_idx = min((i + 1) * batch_size, n_total)
                 batch_coords = mask_coords[start_idx:end_idx]
                 
-                self._fit_batch(
-                    data_corr, batch_coords, bvals, bvecs,
-                    fiber_dirs, iso_grid, self.reg_lambda, 
-                    self.n_restarts, results
+                self._fit_batch_kernel(
+                    data_corr, batch_coords, A, AtA_reg, At, bvals, bvecs,
+                    fiber_dirs, iso_grid, self.reg_lambda, self.enable_step2, results
                 )
                 pbar.update(len(batch_coords))
         
         print(f"   Done in {time.time()-t0:.1f}s")
-        
-        # Statistics
-        valid_mask = results[..., 0] > 0
-        print("\n   Summary Statistics (valid voxels):")
-        print(f"   Fiber Fraction: {results[valid_mask, 0].mean():.3f} ± {results[valid_mask, 0].std():.3f}")
-        print(f"   Fiber AD: {results[valid_mask, 4].mean()*1e3:.2f} ± {results[valid_mask, 4].std()*1e3:.2f} µm²/ms")
-        print(f"   Fiber RD: {results[valid_mask, 5].mean()*1e3:.2f} ± {results[valid_mask, 5].std()*1e3:.2f} µm²/ms")
-        print(f"   Fiber FA: {results[valid_mask, 6].mean():.3f} ± {results[valid_mask, 6].std():.3f}")
-        
         return results
 
     @staticmethod
     @njit(parallel=True)
-    def _fit_batch(data, coords, bvals, bvecs, fiber_dirs, iso_grid, 
-                   reg_lambda, n_restarts, out):
-        """
-        Parallel batch fitting with joint optimization.
-        """
+    def _fit_batch_kernel(data, coords, A, AtA, At, bvals, bvecs,
+                          fiber_dirs, iso_grid, reg, do_step2, out):
+        """Parallel fitting kernel."""
         n_voxels = coords.shape[0]
         n_dirs = len(fiber_dirs)
         n_iso = len(iso_grid)
-        n_meas = len(bvals)
+        
+        THRESH_RES = 0.3e-3
+        THRESH_WAT = 3.0e-3
+        MIN_FIBER_FOR_STEP2 = 0.10
         
         for i in prange(n_voxels):
             x, y, z = coords[i]
@@ -177,55 +136,103 @@ class DBSI_Fused:
             # S0 normalization
             s0 = 0.0
             cnt = 0
-            for k in range(n_meas):
+            for k in range(len(bvals)):
                 if bvals[k] < 50:
                     s0 += sig[k]
                     cnt += 1
-            
             if cnt > 0:
                 s0 /= cnt
             if s0 < 1e-6:
                 continue
-                
+            
             sig_norm = sig / s0
             
-            # Estimate tissue type from signal for initialization
-            # High signal at high b = restricted, Low signal = free water
-            mean_high_b = 0.0
-            cnt_high_b = 0
-            for k in range(n_meas):
-                if bvals[k] > 800:
-                    mean_high_b += sig_norm[k]
-                    cnt_high_b += 1
-            if cnt_high_b > 0:
-                mean_high_b /= cnt_high_b
+            # Step 1: NNLS
+            Aty = np.zeros(AtA.shape[0])
+            for r in range(AtA.shape[0]):
+                val = 0.0
+                for c in range(len(sig_norm)):
+                    val += At[r, c] * sig_norm[c]
+                Aty[r] = val
             
-            # Joint optimization with multiple restarts
-            best_cost = 1e20
-            best_result = np.zeros(8)
+            w, _ = nnls_coordinate_descent(AtA, Aty, reg)
             
-            for restart in range(n_restarts):
-                # Tissue-adaptive initialization
-                if mean_high_b > 0.5:  # Likely WM or restricted
-                    ad_init = 1.5e-3 + restart * 0.2e-3
-                    rd_init = 0.3e-3 + restart * 0.1e-3
-                elif mean_high_b > 0.2:  # Likely GM or mixed
-                    ad_init = 1.0e-3 + restart * 0.15e-3
-                    rd_init = 0.5e-3 + restart * 0.1e-3
-                else:  # Likely CSF
-                    ad_init = 2.0e-3 + restart * 0.2e-3
-                    rd_init = 1.5e-3 + restart * 0.2e-3
+            # Parse fractions
+            w_fib = w[:n_dirs]
+            w_iso = w[n_dirs:]
+            
+            f_fib = np.sum(w_fib)
+            f_res = 0.0
+            f_hin = 0.0
+            f_wat = 0.0
+            sum_w_iso = 0.0
+            sum_wd_iso = 0.0
+            
+            for k in range(n_iso):
+                adc = iso_grid[k]
+                wk = w_iso[k]
                 
-                result, cost = joint_optimization(
-                    bvals, bvecs, sig_norm, fiber_dirs, iso_grid,
-                    ad_init, rd_init, reg_lambda
+                if adc <= THRESH_RES:
+                    f_res += wk
+                elif adc <= THRESH_WAT:
+                    f_hin += wk
+                else:
+                    f_wat += wk
+                
+                sum_w_iso += wk
+                sum_wd_iso += wk * adc
+            
+            # Mean isotropic ADC
+            mean_iso_adc = sum_wd_iso / sum_w_iso if sum_w_iso > 1e-10 else 0.0
+            
+            # Normalize
+            ftot = f_fib + f_res + f_hin + f_wat
+            if ftot > 1e-10:
+                f_fib /= ftot
+                f_res /= ftot
+                f_hin /= ftot
+                f_wat /= ftot
+            
+            # Compute centroids
+            D_res, D_hin, D_wat = compute_weighted_centroids(w_iso, iso_grid)
+            
+            # Step 2: Refine diffusivities
+            AD = 1.5e-3  # default
+            RD = 0.4e-3
+            
+            if do_step2 and f_fib > MIN_FIBER_FOR_STEP2:
+                # Find dominant direction
+                idx_max = 0
+                val_max = -1.0
+                for k in range(n_dirs):
+                    if w_fib[k] > val_max:
+                        val_max = w_fib[k]
+                        idx_max = k
+                
+                f_dir = fiber_dirs[idx_max]
+                
+                AD, RD = step2_refine_diffusivities(
+                    bvals, bvecs, sig_norm, f_dir,
+                    f_fib, f_res, f_hin, f_wat,
+                    D_res, D_hin, D_wat
                 )
-                
-                if cost < best_cost:
-                    best_cost = cost
-                    for j in range(8):
-                        best_result[j] = result[j]
             
-            # Store results
-            for j in range(8):
-                out[x, y, z, j] = best_result[j]
+            # Compute FA scaled by fiber fraction
+            FA = compute_fiber_fa(AD, RD, f_fib)
+            
+            # If fiber fraction is very low, set diffusivities to 0
+            # to indicate they are not meaningful
+            if f_fib < MIN_FIBER_FOR_STEP2:
+                AD = 0.0
+                RD = 0.0
+                FA = 0.0
+            
+            # Store
+            out[x, y, z, 0] = f_fib
+            out[x, y, z, 1] = f_res
+            out[x, y, z, 2] = f_hin
+            out[x, y, z, 3] = f_wat
+            out[x, y, z, 4] = AD
+            out[x, y, z, 5] = RD
+            out[x, y, z, 6] = FA
+            out[x, y, z, 7] = mean_iso_adc

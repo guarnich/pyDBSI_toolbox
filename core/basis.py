@@ -1,165 +1,113 @@
 """
-DBSI Core: Basis Functions and Design Matrix Construction
+DBSI Basis Functions
 
-Corrected Version:
-- Extended isotropic range to 4.0e-3 for proper free water capture
-- Hemisphere constraint for fiber directions (antipodal symmetry)
-- Improved numerical stability
+Implements:
+- Fibonacci sphere for fiber directions (hemisphere)
+- Design matrix construction with cylinder model
 """
 
 import numpy as np
 from numba import njit
 
+
+def generate_fibonacci_sphere_hemisphere(n_points):
+    """
+    Generate uniformly distributed points on hemisphere using Fibonacci spiral.
+    
+    Only returns points with z >= 0 to exploit antipodal symmetry.
+    """
+    # Generate more points and filter to hemisphere
+    n_full = n_points * 2 + 10
+    
+    golden_ratio = (1 + np.sqrt(5)) / 2
+    indices = np.arange(n_full)
+    
+    theta = 2 * np.pi * indices / golden_ratio
+    phi = np.arccos(1 - 2 * (indices + 0.5) / n_full)
+    
+    x = np.sin(phi) * np.cos(theta)
+    y = np.sin(phi) * np.sin(theta)
+    z = np.cos(phi)
+    
+    # Keep only hemisphere (z >= 0)
+    mask = z >= 0
+    x, y, z = x[mask], y[mask], z[mask]
+    
+    # Take exactly n_points
+    dirs = np.column_stack([x[:n_points], y[:n_points], z[:n_points]])
+    
+    # Normalize
+    norms = np.linalg.norm(dirs, axis=1, keepdims=True)
+    dirs = dirs / norms
+    
+    return dirs.astype(np.float64)
+
+
+def generate_fibonacci_sphere(n_points):
+    """Full sphere (deprecated, kept for compatibility)."""
+    golden_ratio = (1 + np.sqrt(5)) / 2
+    indices = np.arange(n_points)
+    
+    theta = 2 * np.pi * indices / golden_ratio
+    phi = np.arccos(1 - 2 * (indices + 0.5) / n_points)
+    
+    x = np.sin(phi) * np.cos(theta)
+    y = np.sin(phi) * np.sin(theta)
+    z = np.cos(phi)
+    
+    return np.column_stack([x, y, z]).astype(np.float64)
+
+
 @njit(cache=True, fastmath=True)
-def build_design_matrix(bvals, bvecs, fiber_dirs, iso_grid, 
-                        D_ax=1.7e-3, D_rad=0.3e-3):
+def build_design_matrix(bvals, bvecs, fiber_dirs, iso_grid, ad=1.5e-3, rd=0.4e-3):
     """
-    Constructs the DBSI Design Matrix A.
-    
-    The design matrix A models the diffusion-weighted signal as:
-    S(b,g) = Σ_i f_i * exp(-b * D_app_i(g)) + Σ_j f_j * exp(-b * D_iso_j)
-    
-    where D_app = D_rad + (D_ax - D_rad) * cos²(θ) for cylinder model.
+    Build DBSI design matrix.
     
     Parameters
     ----------
-    bvals : ndarray (N_meas,)
+    bvals : array (N,)
         B-values in s/mm²
-    bvecs : ndarray (N_meas, 3)
+    bvecs : array (N, 3)
         Normalized gradient directions
-    fiber_dirs : ndarray (N_dirs, 3)
-        Unit vectors for discrete fiber directions (hemisphere)
-    iso_grid : ndarray (N_iso,)
-        Discrete ADC values for isotropic spectrum in mm²/s
-    D_ax : float
-        Initial axial diffusivity for fiber basis (mm²/s)
-    D_rad : float
-        Initial radial diffusivity for fiber basis (mm²/s)
+    fiber_dirs : array (M, 3)
+        Fiber direction candidates
+    iso_grid : array (L,)
+        Isotropic ADC values
+    ad : float
+        Axial diffusivity for fiber basis (default 1.5e-3)
+    rd : float
+        Radial diffusivity for fiber basis (default 0.4e-3)
         
     Returns
     -------
-    A : ndarray (N_meas, N_dirs + N_iso)
-        Design matrix [Anisotropic_Basis | Isotropic_Basis]
+    A : array (N, M+L)
+        Design matrix
     """
-    N_meas = len(bvals)
-    N_dirs = len(fiber_dirs)
-    N_iso = len(iso_grid)
+    n_meas = len(bvals)
+    n_dirs = len(fiber_dirs)
+    n_iso = len(iso_grid)
     
-    A = np.zeros((N_meas, N_dirs + N_iso), dtype=np.float64)
+    A = np.zeros((n_meas, n_dirs + n_iso), dtype=np.float64)
     
-    # 1. Anisotropic Basis (Fibers) - Cylinder Model
-    for j in range(N_dirs):
-        f_dir = fiber_dirs[j]
-        for i in range(N_meas):
-            # cos(theta) between gradient and fiber direction
-            cos_t = bvecs[i, 0]*f_dir[0] + bvecs[i, 1]*f_dir[1] + bvecs[i, 2]*f_dir[2]
+    # Anisotropic columns (cylinder model)
+    for j in range(n_dirs):
+        fdir = fiber_dirs[j]
+        for i in range(n_meas):
+            b = bvals[i]
+            g = bvecs[i]
             
-            # Cylinder model: D_app = D_rad + (D_ax - D_rad) * cos²(θ)
-            # When gradient parallel to fiber: D_app = D_ax (fast diffusion)
-            # When gradient perpendicular: D_app = D_rad (slow diffusion)
-            D_app = D_rad + (D_ax - D_rad) * cos_t * cos_t
-            A[i, j] = np.exp(-bvals[i] * D_app)
+            # cos(theta) = g · fdir
+            cos_t = g[0]*fdir[0] + g[1]*fdir[1] + g[2]*fdir[2]
             
-    # 2. Isotropic Basis (Spectrum of ADC values)
-    for k in range(N_iso):
-        D_iso = iso_grid[k]
-        for i in range(N_meas):
-            A[i, N_dirs + k] = np.exp(-bvals[i] * D_iso)
+            # D_apparent = RD + (AD - RD) * cos²θ
+            D_app = rd + (ad - rd) * cos_t * cos_t
             
+            A[i, j] = np.exp(-b * D_app)
+    
+    # Isotropic columns
+    for j in range(n_iso):
+        D_iso = iso_grid[j]
+        for i in range(n_meas):
+            A[i, n_dirs + j] = np.exp(-bvals[i] * D_iso)
+    
     return A
-
-
-def generate_fibonacci_sphere_hemisphere(samples=150):
-    """
-    Generates uniform direction vectors on the UPPER HEMISPHERE.
-    
-    Uses Fibonacci lattice for optimal coverage, then constrains to z >= 0.
-    This accounts for antipodal symmetry in diffusion MRI (g ≡ -g).
-    
-    Parameters
-    ----------
-    samples : int
-        Number of directions to generate (will produce ~samples directions)
-        
-    Returns
-    -------
-    points : ndarray (N, 3)
-        Unit vectors on the upper hemisphere
-    """
-    # Generate twice as many points on full sphere, then take hemisphere
-    full_samples = samples * 2
-    points = []
-    phi = np.pi * (3. - np.sqrt(5.))  # Golden angle
-    
-    for i in range(full_samples):
-        y = 1 - (i / float(full_samples - 1)) * 2  # y goes from 1 to -1
-        radius = np.sqrt(1 - y * y)
-        theta = phi * i
-        x = np.cos(theta) * radius
-        z = np.sin(theta) * radius
-        
-        # Only keep upper hemisphere (z >= 0) or flip to upper
-        if z < 0:
-            # Flip to upper hemisphere
-            x, y, z = -x, -y, -z
-            
-        # Add if not already present (avoid duplicates at equator)
-        point = np.array([x, y, z])
-        
-        # Normalize for safety
-        norm = np.sqrt(x*x + y*y + z*z)
-        if norm > 0:
-            point = point / norm
-            
-        points.append(point)
-    
-    # Remove near-duplicates
-    points = np.array(points)
-    unique_points = [points[0]]
-    
-    for i in range(1, len(points)):
-        is_duplicate = False
-        for up in unique_points:
-            if np.abs(np.dot(points[i], up)) > 0.99:  # ~8 degrees tolerance
-                is_duplicate = True
-                break
-        if not is_duplicate:
-            unique_points.append(points[i])
-            
-        if len(unique_points) >= samples:
-            break
-            
-    return np.array(unique_points[:samples])
-
-
-def generate_fibonacci_sphere(samples=150):
-    """
-    Generates uniform direction vectors on a unit sphere.
-    
-    DEPRECATED: Use generate_fibonacci_sphere_hemisphere() for DBSI
-    to properly handle antipodal symmetry and improve matrix conditioning.
-    
-    This function is kept for backward compatibility.
-    
-    Parameters
-    ----------
-    samples : int
-        Number of points to generate
-        
-    Returns
-    -------
-    points : ndarray (samples, 3)
-        Unit vectors distributed on the sphere
-    """
-    points = []
-    phi = np.pi * (3. - np.sqrt(5.))  # Golden angle
-    
-    for i in range(samples):
-        y = 1 - (i / float(samples - 1)) * 2
-        radius = np.sqrt(1 - y * y)
-        theta = phi * i
-        x = np.cos(theta) * radius
-        z = np.sin(theta) * radius
-        points.append([x, y, z])
-        
-    return np.array(points)

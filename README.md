@@ -72,6 +72,44 @@ python -m scripts.run_dbsi \
 | 4 | Axial Diffusivity | Diffusion along fiber (mm²/s) | ↓ = axonal injury |
 | 5 | Radial Diffusivity | Diffusion perpendicular (mm²/s) | ↑ = demyelination |
 | 6 | Fiber FA | Fractional anisotropy | ↓ = WM damage |
+| 7 | Mean Iso ADC | Weighted mean isotropic ADC | Tissue characterization |
+
+## Validation Module
+
+The toolbox includes a comprehensive validation module for assessing fitting quality:
+
+```python
+from dbsi_toolbox.validation import generate_validation_report
+
+# After DBSI fitting
+report = generate_validation_report(
+    data_normalized,    # Signal S/S0
+    predicted_signal,   # Model prediction
+    dbsi_results,       # 8-channel output
+    mask,
+    verbose=True
+)
+
+# Access metrics
+print(f"Mean R²: {report['r2']['mean']:.4f}")
+print(f"Overall Quality Score: {report['overall_quality_score']:.1f}/100")
+```
+
+### Quality Metrics
+
+- **R² (Coefficient of Determination)**: Voxel-wise fitting quality
+  - > 0.9: Excellent
+  - > 0.8: Good
+  - > 0.7: Acceptable
+
+- **RMSE/NRMSE**: Root Mean Square Error (normalized by signal range)
+
+- **Physiological Plausibility Checks**:
+  - Fraction sum ≈ 1.0
+  - AD > RD for fiber voxels
+  - Diffusivities in physiological range
+  - FA in [0, 1]
+  - CSF-like voxels have low fiber content
 
 ## Algorithm Details
 

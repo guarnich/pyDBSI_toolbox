@@ -13,10 +13,25 @@ Outputs (8 channels):
     1: Restricted Fraction (ADC ≤ 0.3 µm²/ms) - cellularity
     2: Hindered Fraction (0.3 < ADC ≤ 3.0 µm²/ms) - edema
     3: Water Fraction (ADC > 3.0 µm²/ms) - CSF
-    4: Fiber AD (axial diffusivity)
-    5: Fiber RD (radial diffusivity)  
+    4: Fiber AD (axial diffusivity, mm²/s)
+    5: Fiber RD (radial diffusivity, mm²/s)  
     6: Fiber FA (fractional anisotropy, scaled by fiber fraction)
-    7: Mean Isotropic ADC (weighted mean of isotropic spectrum)
+    7: Mean Isotropic ADC (weighted mean of isotropic spectrum, mm²/s)
+
+ADC Thresholds (from Ye et al. 2020, Wang et al. 2011):
+    - Restricted: ADC ≤ 0.3 µm²/ms (0.3e-3 mm²/s) - cells, inflammation
+    - Hindered: 0.3 < ADC ≤ 3.0 µm²/ms - edema, tissue disorganization
+    - Free/Water: ADC > 3.0 µm²/ms - CSF
+
+FA Computation Note:
+    The FA is computed using the cylindrically symmetric tensor assumption
+    (λ₂ = λ₃ = RD), consistent with the DBSI anisotropic model. This differs 
+    from standard DTI FA which uses full eigenvalue decomposition.
+
+References:
+    - Wang Y et al. (2011) Brain 134:3590-3601
+    - Ye Z et al. (2020) Ann Clin Transl Neurol 7:695-706
+    - Cross AH, Song SK (2017) J Neuroimmunol 304:81-85
 """
 
 import numpy as np

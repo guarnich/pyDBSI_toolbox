@@ -6,6 +6,15 @@ Key principles:
 2. Step 2: Refine AD/RD only if fiber fraction is significant
 3. FA scaled by fiber fraction to avoid artifacts
 4. Extended parameter ranges to handle all tissue types
+
+ADC Thresholds (Literature Standard):
+    - Restricted: ≤ 0.3 µm²/ms (Ye et al. 2020)
+    - Hindered: 0.3-3.0 µm²/ms (Wang et al. 2011)  
+    - Free/Water: > 3.0 µm²/ms (CSF reference)
+
+References:
+    Wang Y et al. (2011) Brain 134:3590-3601
+    Ye Z et al. (2020) Ann Clin Transl Neurol 7:695-706
 """
 
 import numpy as np
@@ -186,8 +195,33 @@ def compute_fiber_fa(AD, RD, fiber_fraction):
     """
     Compute FA scaled by fiber fraction.
     
-    When fiber fraction is low, FA is less meaningful,
-    so we scale it to avoid misleading values.
+    Uses the cylindrically symmetric tensor formula:
+        FA = sqrt(0.5) * (AD - RD) / sqrt(AD² + 2*RD²)
+    
+    This assumes λ₁ = AD and λ₂ = λ₃ = RD (cylindrical symmetry),
+    which is consistent with the DBSI anisotropic tensor model.
+    
+    Note: This differs from standard DTI FA which uses full eigenvalue
+    decomposition. For DBSI, this formula is appropriate as the model
+    explicitly assumes cylindrically symmetric tensors.
+    
+    The FA is scaled by fiber fraction because when fiber content is low,
+    the estimated diffusivities become unreliable, so we attenuate FA
+    to avoid misleading high FA values in non-fiber regions (e.g., CSF).
+    
+    Parameters
+    ----------
+    AD : float
+        Axial diffusivity (mm²/s)
+    RD : float
+        Radial diffusivity (mm²/s)
+    fiber_fraction : float
+        Fiber signal fraction (0-1)
+        
+    Returns
+    -------
+    FA : float
+        Fractional anisotropy (0-1), scaled by fiber fraction
     """
     if AD < 1e-10 or RD < 1e-10:
         return 0.0

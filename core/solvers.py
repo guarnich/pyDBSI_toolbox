@@ -244,4 +244,4 @@ def compute_fiber_fa(AD, RD, fiber_fraction):
     # Smooth transition from 0 at f=0 to full FA at f>=0.3
     # scale = min(1.0, fiber_fraction / 0.3)
     
-    return FA_raw * scale
+    return FA_raw

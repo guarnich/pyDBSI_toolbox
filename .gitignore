@@ -11,3 +11,4 @@ venv_*/
 __pycache__/
 build/
 dist/
+.Rhistory

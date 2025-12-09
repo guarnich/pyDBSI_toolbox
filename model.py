@@ -8,16 +8,17 @@ Key design principles:
 4. Extended parameter ranges for all tissue types
 5. Proper handling of CSF and GM regions
 
-Outputs (8 channels):
+Outputs (9 channels):
     0: Fiber Fraction
-    1: Restricted Fraction (ADC ≤ 0.3 µm²/ms) - cellularity
-    2: Hindered Fraction (0.3 < ADC ≤ 3.0 µm²/ms) - edema
-    3: Water Fraction (ADC > 3.0 µm²/ms) - CSF
-    4: Fiber AD (axial diffusivity, mm²/s)
-    5: Fiber RD (radial diffusivity, mm²/s)  
-    6: Fiber FA (fractional anisotropy, scaled by fiber fraction)
-    7: Mean Isotropic ADC (weighted mean of isotropic spectrum, mm²/s)
-
+    1: Restricted Fraction
+    2: Hindered Fraction
+    3: Water Fraction
+    4: Fiber AD
+    5: Fiber RD
+    6: Fiber FA Intrinsic (pure tensor anisotropy)
+    7: Fiber FA Weighted  (scaled by fiber fraction)
+    8: Mean Isotropic ADC
+    
 ADC Thresholds (from Ye et al. 2020, Wang et al. 2011):
     - Restricted: ADC ≤ 0.3 µm²/ms (0.3e-3 mm²/s) - cells, inflammation
     - Hindered: 0.3 < ADC ≤ 3.0 µm²/ms - edema, tissue disorganization
@@ -109,7 +110,7 @@ class DBSI_Fused:
         print(f"4. Fitting {n_total:,} voxels...")
         
         # 8 output channels
-        results = np.zeros(data.shape[:3] + (8,), dtype=np.float32)
+        results = np.zeros(data.shape[:3] + (9,), dtype=np.float32)
         
         batch_size = 10000
         n_batches = int(np.ceil(n_total / batch_size))
@@ -233,7 +234,13 @@ class DBSI_Fused:
                 )
             
             # Compute FA scaled by fiber fraction
-            FA = compute_fiber_fa(AD, RD, f_fib)
+            FA_int = compute_fiber_fa(AD, RD)
+
+            scale = 1.0
+            if f_fib < 0.3:
+                scale = f_fib / 0.3
+
+            FA_wgt = FA_int * scale
             
             # If fiber fraction is very low, set diffusivities to 0
             # to indicate they are not meaningful
@@ -249,5 +256,6 @@ class DBSI_Fused:
             out[x, y, z, 3] = f_wat
             out[x, y, z, 4] = AD
             out[x, y, z, 5] = RD
-            out[x, y, z, 6] = FA
-            out[x, y, z, 7] = mean_iso_adc
+            out[x, y, z, 6] = FA_int  # Intrinsic
+            out[x, y, z, 7] = FA_wgt  # Weighted
+            out[x, y, z, 8] = mean_iso_adc 

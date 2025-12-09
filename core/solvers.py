@@ -242,6 +242,6 @@ def compute_fiber_fa(AD, RD, fiber_fraction):
     
     # Scale by fiber fraction: if f_fiber < 0.2, FA is questionable
     # Smooth transition from 0 at f=0 to full FA at f>=0.3
-    scale = min(1.0, fiber_fraction / 0.3)
+    # scale = min(1.0, fiber_fraction / 0.3)
     
     return FA_raw * scale

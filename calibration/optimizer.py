@@ -105,8 +105,8 @@ def optimize_hyperparameters(bvals, bvecs, snr, n_mc=1000):
     print("-" * 95)
     
     # Grid of hyperparameters to test
-    bases_grid = [25, 50, 75, 100, 125, 150]
-    lambdas_grid = [0.01, 0.1, 0.5, 1.0, 2.0]
+    bases_grid = [25, 50, 75, 100, 125, 150, 200]
+    lambdas_grid = [0.01, 0.1, 0.5, 1.0, 2.0, 3.0]
     
     results = []
     

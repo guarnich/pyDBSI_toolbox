@@ -10,7 +10,6 @@ Outputs (8 channels):
 - axial_diffusivity.nii.gz  : Fiber AD
 - radial_diffusivity.nii.gz : Fiber RD
 - fiber_fa_intrinsic.nii.gz : Fiber FA (intrinsic)
-- fiber_fa_weighted.nii.gz  : Fiber FA (scaled by fiber fraction)
 - mean_iso_adc.nii.gz       : Mean isotropic ADC
 """
 
@@ -68,7 +67,6 @@ def main():
         'axial_diffusivity', 
         'radial_diffusivity',
         'fiber_fa_intrinsic', 
-        'fiber_fa_weighted', 
         'mean_iso_adc'
     ]
     

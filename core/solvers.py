@@ -240,8 +240,5 @@ def compute_fiber_fa(AD, RD):
     FA_raw = np.sqrt(0.5) * diff / denom
     FA_raw = min(1.0, max(0.0, FA_raw))
     
-    # Scale by fiber fraction: if f_fiber < 0.2, FA is questionable
-    # Smooth transition from 0 at f=0 to full FA at f>=0.3
-    # scale = min(1.0, fiber_fraction / 0.3)
     
     return FA_raw

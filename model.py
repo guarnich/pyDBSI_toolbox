@@ -233,21 +233,16 @@ class DBSI_Fused:
                     D_res, D_hin, D_wat
                 )
             
-            # Compute FA scaled by fiber fraction
+            # Compute FA 
             FA_int = compute_fiber_fa(AD, RD)
 
-            scale = 1.0
-            if f_fib < 0.3:
-                scale = f_fib / 0.3
-            FA_wgt = FA_int * scale
-            
             # If fiber fraction is very low, set diffusivities to 0
             # to indicate they are not meaningful
             if f_fib < MIN_FIBER_FOR_STEP2:
                 AD = 0.0
                 RD = 0.0
                 FA_int = 0.0
-                FA_wgt = 0.0
+            
             
             # Store
             out[x, y, z, 0] = f_fib
@@ -257,5 +252,4 @@ class DBSI_Fused:
             out[x, y, z, 4] = AD
             out[x, y, z, 5] = RD
             out[x, y, z, 6] = FA_int  # Intrinsic
-            out[x, y, z, 7] = FA_wgt  # Weighted
-            out[x, y, z, 8] = mean_iso_adc 
+            out[x, y, z, 7] = mean_iso_adc 

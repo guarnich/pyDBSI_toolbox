@@ -191,7 +191,7 @@ def step2_refine_diffusivities(bvals, bvecs, y_norm, fiber_dir,
 
 
 @njit(cache=True, fastmath=True)
-def compute_fiber_fa(AD, RD, fiber_fraction):
+def compute_fiber_fa(AD, RD):
     """
     Compute FA scaled by fiber fraction.
     

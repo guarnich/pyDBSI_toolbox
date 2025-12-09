@@ -246,7 +246,8 @@ class DBSI_Fused:
             if f_fib < MIN_FIBER_FOR_STEP2:
                 AD = 0.0
                 RD = 0.0
-                FA = 0.0
+                FA_int = 0.0
+                FA_wgt = 0.0
             
             # Store
             out[x, y, z, 0] = f_fib

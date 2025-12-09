@@ -18,7 +18,7 @@ Outputs (9 channels):
     6: Fiber FA Intrinsic (pure tensor anisotropy)
     7: Fiber FA Weighted  (scaled by fiber fraction)
     8: Mean Isotropic ADC
-    
+
 ADC Thresholds (from Ye et al. 2020, Wang et al. 2011):
     - Restricted: ADC ≤ 0.3 µm²/ms (0.3e-3 mm²/s) - cells, inflammation
     - Hindered: 0.3 < ADC ≤ 3.0 µm²/ms - edema, tissue disorganization
@@ -239,7 +239,6 @@ class DBSI_Fused:
             scale = 1.0
             if f_fib < 0.3:
                 scale = f_fib / 0.3
-
             FA_wgt = FA_int * scale
             
             # If fiber fraction is very low, set diffusivities to 0

@@ -145,16 +145,3 @@ print(f"Overall Quality Score: {report['overall_quality_score']:.1f}/100")
 ## License
 
 MIT License - see LICENSE file for details.
-
-## Version History
-
-- **v2.0.0** (December 2025): Corrected version
-  - Fixed ADC thresholds (2.0 → 3.0 µm²/ms for hindered/water boundary)
-  - Extended isotropic range to 4.0 µm²/ms
-  - Hemisphere fiber directions (antipodal symmetry)
-  - Improved matrix conditioning (~10¹⁴× better)
-  - Added Fiber FA output
-  - Finer Step 2 grid search (10×10)
-  - Dynamic isotropic centroids
-
-- **v1.0.0**: Initial implementation

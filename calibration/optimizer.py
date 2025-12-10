@@ -8,8 +8,8 @@ Corrected Version:
 """
 
 import numpy as np
-from ..core.basis import build_design_matrix, generate_fibonacci_sphere_hemisphere
-from ..core.solvers import nnls_coordinate_descent
+from core.basis import build_design_matrix, generate_fibonacci_sphere_hemisphere
+from core.solvers import nnls_coordinate_descent
 
 
 THRESH_RESTRICTED = 0.3e-3

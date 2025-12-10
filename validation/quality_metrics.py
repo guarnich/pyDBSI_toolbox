@@ -700,7 +700,7 @@ def quick_r2_check(dbsi_results: np.ndarray,
     Returns mean R² across all masked voxels.
     """
     if fiber_dirs is None:
-        from ..core.basis import generate_fibonacci_sphere_hemisphere
+        from core.basis import generate_fibonacci_sphere_hemisphere
         fiber_dirs = generate_fibonacci_sphere_hemisphere(100)
     
     predicted = predict_signal_volume(bvals, bvecs, dbsi_results, mask, fiber_dirs)

@@ -8,16 +8,15 @@ Key design principles:
 4. Extended parameter ranges for all tissue types
 5. Proper handling of CSF and GM regions
 
-Outputs (9 channels):
-    0: Fiber Fraction
-    1: Restricted Fraction
-    2: Hindered Fraction
-    3: Water Fraction
-    4: Fiber AD
-    5: Fiber RD
-    6: Fiber FA Intrinsic (pure tensor anisotropy)
-    7: Fiber FA Weighted  (scaled by fiber fraction)
-    8: Mean Isotropic ADC
+Outputs (8 channels):
+    0: Fiber Fraction - apparent axonal density
+    1: Restricted Fraction - cellularity marker (ADC ≤ 0.3 µm²/ms)
+    2: Hindered Fraction - edema/tissue loss (0.3 < ADC ≤ 3.0 µm²/ms)
+    3: Water Fraction - CSF contamination (ADC > 3.0 µm²/ms)
+    4: Fiber AD - axial diffusivity along fiber axis (mm²/s)
+    5: Fiber RD - radial diffusivity perpendicular to fiber (mm²/s)
+    6: Fiber FA - fractional anisotropy (cylindrically symmetric tensor)
+    7: Mean Isotropic ADC - weighted mean of isotropic ADC spectrum
 
 ADC Thresholds (from Ye et al. 2020, Wang et al. 2011):
     - Restricted: ADC ≤ 0.3 µm²/ms (0.3e-3 mm²/s) - cells, inflammation
@@ -110,7 +109,7 @@ class DBSI_Fused:
         print(f"4. Fitting {n_total:,} voxels...")
         
         # 8 output channels
-        results = np.zeros(data.shape[:3] + (9,), dtype=np.float32)
+        results = np.zeros(data.shape[:3] + (8,), dtype=np.float32)
         
         batch_size = 10000
         n_batches = int(np.ceil(n_total / batch_size))
@@ -243,6 +242,8 @@ class DBSI_Fused:
                 RD = 0.0
                 FA_int = 0.0
             
+            # FA weighted by fiber fraction (avoids artifacts in non-fiber regions)
+            FA_weighted = FA_int * f_fib
             
             # Store
             out[x, y, z, 0] = f_fib
@@ -251,5 +252,6 @@ class DBSI_Fused:
             out[x, y, z, 3] = f_wat
             out[x, y, z, 4] = AD
             out[x, y, z, 5] = RD
-            out[x, y, z, 6] = FA_int  # Intrinsic
-            out[x, y, z, 7] = mean_iso_adc 
+            out[x, y, z, 6] = FA_int      # Intrinsic (pure tensor FA)
+            out[x, y, z, 7] = FA_weighted  # Weighted by fiber fraction
+            out[x, y, z, 8] = mean_iso_adc 

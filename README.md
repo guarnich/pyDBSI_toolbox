@@ -72,7 +72,8 @@ python -m scripts.run_dbsi \
 | 4 | Axial Diffusivity | Diffusion along fiber (mm²/s) | ↓ = axonal injury |
 | 5 | Radial Diffusivity | Diffusion perpendicular (mm²/s) | ↑ = demyelination |
 | 6 | Fiber FA | Fractional anisotropy | ↓ = WM damage |
-| 7 | Mean Iso ADC | Weighted mean isotropic ADC | Tissue characterization |
+| 7 | Fiber Fraction FA | Fiber FA weighted by Fiber Fraction | ↓ = WM damage |
+| 8 | Mean Iso ADC | Weighted mean isotropic ADC | Tissue characterization |
 
 ## Validation Module
 

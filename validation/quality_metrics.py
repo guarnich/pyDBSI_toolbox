@@ -30,7 +30,7 @@ THRESH_FREE = 3.0e-3        # mm²/s
 # Physiological bounds for diffusivities (mm²/s)
 # Based on literature values from Wang et al. 2011, Lavadi et al. 2025
 AD_PHYSIOLOGICAL_RANGE = (0.5e-3, 2.5e-3)  # Typical WM: 1.0-2.0
-RD_PHYSIOLOGICAL_RANGE = (0.1e-3, 1.5e-3)  # Typical WM: 0.2-0.6
+RD_PHYSIOLOGICAL_RANGE = (0.1e-3, 1.2e-3)  # Typical WM: 0.2-0.6
 FA_PHYSIOLOGICAL_RANGE = (0.0, 1.0)
 
 

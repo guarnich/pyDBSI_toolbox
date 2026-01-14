@@ -243,4 +243,4 @@ class DBSI_Fused:
             out[x, y, z, 4] = AD
             out[x, y, z, 5] = RD
             out[x, y, z, 6] = FA_int      
-            out[x, y, z, 8] = mean_iso_adc 
+            out[x, y, z, 7] = mean_iso_adc 

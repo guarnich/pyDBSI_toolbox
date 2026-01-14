@@ -234,16 +234,6 @@ class DBSI_Fused:
             
             # Compute FA 
             FA_int = compute_fiber_fa(AD, RD)
-
-            # If fiber fraction is very low, set diffusivities to 0
-            # to indicate they are not meaningful
-            if f_fib < MIN_FIBER_FOR_STEP2:
-                AD = 0.0
-                RD = 0.0
-                FA_int = 0.0
-            
-            # FA weighted by fiber fraction (avoids artifacts in non-fiber regions)
-            FA_weighted = FA_int * f_fib
             
             # Store
             out[x, y, z, 0] = f_fib
@@ -252,6 +242,5 @@ class DBSI_Fused:
             out[x, y, z, 3] = f_wat
             out[x, y, z, 4] = AD
             out[x, y, z, 5] = RD
-            out[x, y, z, 6] = FA_int      # Intrinsic (pure tensor FA)
-            out[x, y, z, 7] = FA_weighted  # Weighted by fiber fraction
+            out[x, y, z, 6] = FA_int      
             out[x, y, z, 8] = mean_iso_adc 

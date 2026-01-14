@@ -205,10 +205,6 @@ def compute_fiber_fa(AD, RD):
     decomposition. For DBSI, this formula is appropriate as the model
     explicitly assumes cylindrically symmetric tensors.
     
-    The FA is scaled by fiber fraction because when fiber content is low,
-    the estimated diffusivities become unreliable, so we attenuate FA
-    to avoid misleading high FA values in non-fiber regions (e.g., CSF).
-    
     Parameters
     ----------
     AD : float

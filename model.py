@@ -233,7 +233,7 @@ class DBSI_Fused:
                 )
             
             # Compute FA 
-            FA_int = compute_fiber_fa(AD, RD)
+            FA = compute_fiber_fa(AD, RD)
             
             # Store
             out[x, y, z, 0] = f_fib
@@ -242,5 +242,5 @@ class DBSI_Fused:
             out[x, y, z, 3] = f_wat
             out[x, y, z, 4] = AD
             out[x, y, z, 5] = RD
-            out[x, y, z, 6] = FA_int      
+            out[x, y, z, 6] = FA      
             out[x, y, z, 7] = mean_iso_adc 

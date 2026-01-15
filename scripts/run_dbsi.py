@@ -9,8 +9,7 @@ Outputs (9 channels):
 - water_fraction.nii.gz      : CSF (ADC > 3.0)
 - axial_diffusivity.nii.gz   : Fiber AD
 - radial_diffusivity.nii.gz  : Fiber RD
-- fiber_fa_intrinsic.nii.gz  : Fiber FA (pure tensor anisotropy)
-- fiber_fa_weighted.nii.gz   : Fiber FA weighted by fiber fraction
+- fiber_fa_intrinsic.nii.gz  : Fiber FA
 - mean_iso_adc.nii.gz        : Mean isotropic ADC
 """
 
@@ -67,8 +66,7 @@ def main():
         'water_fraction', 
         'axial_diffusivity', 
         'radial_diffusivity',
-        'fiber_fa_intrinsic',
-        'fiber_fa_weighted',
+        'fiber_fa',
         'mean_iso_adc'
     ]
     

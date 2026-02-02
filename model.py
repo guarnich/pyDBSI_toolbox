@@ -215,7 +215,7 @@ class DBSI_Fused:
             AD = 1.5e-3  # default
             RD = 0.4e-3
             
-            if do_step2:
+            if do_step2 and f_fib >= MIN_FIBER_FOR_STEP2:
                 # Find dominant direction
                 idx_max = 0
                 val_max = -1.0

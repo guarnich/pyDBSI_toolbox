@@ -1,21 +1,8 @@
 """
 DBSI Fusion Model - Tissue-Adaptive Implementation
 
-Key improvement: AD/RD initialization from Step 1 for ALL voxels,
-including MS lesions with low fiber fraction.
-
-This ensures that even voxels with low fiber content (e.g., MS lesions)
-get appropriate diffusivity estimates instead of defaulting to healthy WM values.
-
-Outputs (8 channels):
-    0: Fiber Fraction - apparent axonal density
-    1: Restricted Fraction - cellularity marker (ADC ≤ 0.3 µm²/ms)
-    2: Hindered Fraction - edema/tissue loss (0.3 < ADC ≤ 3.0 µm²/ms)
-    3: Water Fraction - CSF contamination (ADC > 3.0 µm²/ms)
-    4: Fiber AD - axial diffusivity along fiber axis (mm²/s)
-    5: Fiber RD - radial diffusivity perpendicular to fiber (mm²/s)
-    6: Fiber FA - fractional anisotropy (cylindrically symmetric tensor)
-    7: Mean Isotropic ADC - weighted mean of isotropic ADC spectrum
+Version with ABSOLUTE imports for robust deployment.
+Works everywhere: local dev, pip install, GitHub, Docker, servers.
 """
 
 import numpy as np
@@ -23,16 +10,16 @@ from numba import njit, prange
 import time
 from tqdm import tqdm
 
-from core.basis import build_design_matrix, generate_fibonacci_sphere_hemisphere
-from core.solvers import (
+# ABSOLUTE IMPORTS - Work everywhere, including GitHub/server deployments
+from dbsi_toolbox.core.basis import build_design_matrix, generate_fibonacci_sphere_hemisphere
+from dbsi_toolbox.core.solvers import (
     nnls_coordinate_descent,
-    step2_refine_diffusivities,
     step2_refine_diffusivities_adaptive,
     compute_weighted_centroids,
     compute_fiber_fa
 )
-from calibration.optimizer import optimize_hyperparameters
-from utils.tools import estimate_snr_robust, correct_rician_bias
+from dbsi_toolbox.calibration.optimizer import optimize_hyperparameters
+from dbsi_toolbox.utils.tools import estimate_snr_robust, correct_rician_bias
 
 
 # =============================================================================

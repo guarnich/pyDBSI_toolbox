@@ -34,6 +34,225 @@ from calibration.optimizer import optimize_hyperparameters
 from utils.tools import estimate_snr_robust, correct_rician_bias
 
 
+# =============================================================================
+# JIT-compiled helper functions (must be standalone for Numba)
+# =============================================================================
+
+@njit(cache=True, fastmath=True)
+def _estimate_initial_diffusivities_jit(bvals, bvecs, sig_norm, fiber_dir,
+                                        f_fib, f_res, f_hin, f_wat,
+                                        D_res, D_hin, D_wat):
+    """
+    Estimate initial AD/RD from Step 1 linear fit using coarse grid search.
+    
+    This provides tissue-adaptive initialization for ALL voxels,
+    including MS lesions with low fiber fraction, avoiding the bias
+    of defaulting to healthy WM values.
+    
+    Parameters
+    ----------
+    bvals, bvecs : arrays
+        Diffusion protocol
+    sig_norm : array
+        Normalized signal (S/S0)
+    fiber_dir : array (3,)
+        Dominant fiber direction from Step 1
+    f_fib, f_res, f_hin, f_wat : float
+        Fraction estimates from Step 1
+    D_res, D_hin, D_wat : float
+        Isotropic diffusivity centroids
+        
+    Returns
+    -------
+    AD_init : float
+        Initial axial diffusivity estimate
+    RD_init : float
+        Initial radial diffusivity estimate
+    """
+    best_sse = 1e20
+    best_ax = 1.5e-3
+    best_rad = 0.4e-3
+    
+    ftot = f_fib + f_res + f_hin + f_wat + 1e-12
+    ff = f_fib / ftot
+    fr = f_res / ftot
+    fh = f_hin / ftot
+    fw = f_wat / ftot
+    
+    # Grid for initial estimate 
+    n_ax, n_rad = 6, 5
+    ax_min, ax_max = 0.5e-3, 2.5e-3
+    rad_min, rad_max = 0.1e-3, 1.2e-3
+    
+    ax_step = (ax_max - ax_min) / (n_ax - 1)
+    rad_step = (rad_max - rad_min) / (n_rad - 1)
+    
+    for i_ax in range(n_ax):
+        ax = ax_min + i_ax * ax_step
+        
+        for i_rad in range(n_rad):
+            rad = rad_min + i_rad * rad_step
+            
+            # Soft constraint: AD should be > RD
+            if ax < rad * 1.1:
+                continue
+            
+            sse = 0.0
+            for i in range(len(bvals)):
+                b = bvals[i]
+                if b < 50:
+                    continue
+                    
+                g = bvecs[i]
+                cos_t = g[0]*fiber_dir[0] + g[1]*fiber_dir[1] + g[2]*fiber_dir[2]
+                D_app = rad + (ax - rad) * cos_t * cos_t
+                
+                s_pred = (ff * np.exp(-b * D_app) +
+                          fr * np.exp(-b * D_res) +
+                          fh * np.exp(-b * D_hin) +
+                          fw * np.exp(-b * D_wat))
+                
+                diff = sig_norm[i] - s_pred
+                sse += diff * diff
+            
+            if sse < best_sse:
+                best_sse = sse
+                best_ax = ax
+                best_rad = rad
+    
+    return best_ax, best_rad
+
+
+@njit(parallel=True)
+def _fit_batch_kernel_jit(data, coords, A, AtA, At, bvals, bvecs,
+                          fiber_dirs, iso_grid, reg, do_step2, out):
+    """
+    Parallel fitting kernel with tissue-adaptive AD/RD initialization.
+    
+    Key improvement: AD/RD are now initialized from Step 1 for ALL voxels,
+    then optionally refined in Step 2. No more hard-coded defaults.
+    """
+    n_voxels = coords.shape[0]
+    n_dirs = len(fiber_dirs)
+    n_iso = len(iso_grid)
+    
+    THRESH_RES = 0.3e-3
+    THRESH_WAT = 3.0e-3
+    
+    for i in prange(n_voxels):
+        x, y, z = coords[i]
+        sig = data[x, y, z]
+        
+        # S0 normalization
+        s0 = 0.0
+        cnt = 0
+        for k in range(len(bvals)):
+            if bvals[k] < 50:
+                s0 += sig[k]
+                cnt += 1
+        if cnt > 0:
+            s0 /= cnt
+        if s0 < 1e-6:
+            continue
+        
+        sig_norm = sig / s0
+        
+        # Step 1: NNLS
+        Aty = np.zeros(AtA.shape[0])
+        for r in range(AtA.shape[0]):
+            val = 0.0
+            for c in range(len(sig_norm)):
+                val += At[r, c] * sig_norm[c]
+            Aty[r] = val
+        
+        w, _ = nnls_coordinate_descent(AtA, Aty, reg)
+        
+        # Parse fractions
+        w_fib = w[:n_dirs]
+        w_iso = w[n_dirs:]
+        
+        f_fib = np.sum(w_fib)
+        f_res = 0.0
+        f_hin = 0.0
+        f_wat = 0.0
+        sum_w_iso = 0.0
+        sum_wd_iso = 0.0
+        
+        for k in range(n_iso):
+            adc = iso_grid[k]
+            wk = w_iso[k]
+            
+            if adc <= THRESH_RES:
+                f_res += wk
+            elif adc <= THRESH_WAT:
+                f_hin += wk
+            else:
+                f_wat += wk
+            
+            sum_w_iso += wk
+            sum_wd_iso += wk * adc
+        
+        # Mean isotropic ADC
+        mean_iso_adc = sum_wd_iso / sum_w_iso if sum_w_iso > 1e-10 else 0.0
+        
+        # Normalize fractions
+        ftot = f_fib + f_res + f_hin + f_wat
+        if ftot > 1e-10:
+            f_fib /= ftot
+            f_res /= ftot
+            f_hin /= ftot
+            f_wat /= ftot
+        
+        # Compute centroids for isotropic components
+        D_res, D_hin, D_wat = compute_weighted_centroids(w_iso, iso_grid)
+        
+        # Find dominant fiber direction (needed for AD/RD estimation)
+        idx_max = 0
+        val_max = -1.0
+        for k in range(n_dirs):
+            if w_fib[k] > val_max:
+                val_max = w_fib[k]
+                idx_max = k
+        
+        f_dir = fiber_dirs[idx_max]
+        
+        # === Initialize AD/RD from Step 1 for ALL voxels
+        
+        AD, RD = _estimate_initial_diffusivities_jit(
+            bvals, bvecs, sig_norm, f_dir,
+            f_fib, f_res, f_hin, f_wat,
+            D_res, D_hin, D_wat
+        )
+        
+        # Step 2: refine with finer grid
+        
+        if do_step2:
+            AD, RD = step2_refine_diffusivities(
+                bvals, bvecs, sig_norm, f_dir,
+                f_fib, f_res, f_hin, f_wat,
+                D_res, D_hin, D_wat,
+                AD_init=AD,  
+                RD_init=RD
+            )
+        
+        # Compute FA
+        FA = compute_fiber_fa(AD, RD)
+        
+        # Store results
+        out[x, y, z, 0] = f_fib
+        out[x, y, z, 1] = f_res
+        out[x, y, z, 2] = f_hin
+        out[x, y, z, 3] = f_wat
+        out[x, y, z, 4] = AD
+        out[x, y, z, 5] = RD
+        out[x, y, z, 6] = FA      
+        out[x, y, z, 7] = mean_iso_adc
+
+
+# =============================================================================
+# Main Model Class
+# =============================================================================
+
 class DBSI_Fused:
     """Main DBSI Model - Tissue-Adaptive Implementation."""
     
@@ -106,7 +325,7 @@ class DBSI_Fused:
                 end_idx = min((i + 1) * batch_size, n_total)
                 batch_coords = mask_coords[start_idx:end_idx]
                 
-                self._fit_batch_kernel(
+                _fit_batch_kernel_jit(
                     data_corr, batch_coords, A, AtA_reg, At, bvals, bvecs,
                     fiber_dirs, iso_grid, self.reg_lambda, self.enable_step2, results
                 )
@@ -114,197 +333,3 @@ class DBSI_Fused:
         
         print(f"   Done in {time.time()-t0:.1f}s")
         return results
-
-    @staticmethod
-    @njit(cache=True, fastmath=True)
-    def _estimate_initial_diffusivities(bvals, bvecs, sig_norm, fiber_dir,
-                                        f_fib, f_res, f_hin, f_wat,
-                                        D_res, D_hin, D_wat):
-        """
-        Estimate initial AD/RD from Step 1 linear fit using coarse grid search.
-        
-        This provides tissue-adaptive initialization for ALL voxels,
-        including MS lesions with low fiber fraction, avoiding the bias
-        of defaulting to healthy WM values.
-        
-        Returns
-        -------
-        AD_init : float
-            Initial axial diffusivity estimate
-        RD_init : float
-            Initial radial diffusivity estimate
-        """
-        best_sse = 1e20
-        best_ax = 1.5e-3
-        best_rad = 0.4e-3
-        
-        ftot = f_fib + f_res + f_hin + f_wat + 1e-12
-        ff = f_fib / ftot
-        fr = f_res / ftot
-        fh = f_hin / ftot
-        fw = f_wat / ftot
-        
-        
-        n_ax, n_rad = 6, 5
-        ax_min, ax_max = 0.5e-3, 2.5e-3
-        rad_min, rad_max = 0.1e-3, 1.2e-3
-        
-        ax_step = (ax_max - ax_min) / (n_ax - 1)
-        rad_step = (rad_max - rad_min) / (n_rad - 1)
-        
-        for i_ax in range(n_ax):
-            ax = ax_min + i_ax * ax_step
-            
-            for i_rad in range(n_rad):
-                rad = rad_min + i_rad * rad_step
-                
-                # Soft constraint: AD should be > RD
-                if ax < rad * 1.1:
-                    continue
-                
-                sse = 0.0
-                for i in range(len(bvals)):
-                    b = bvals[i]
-                    if b < 50:
-                        continue
-                        
-                    g = bvecs[i]
-                    cos_t = g[0]*fiber_dir[0] + g[1]*fiber_dir[1] + g[2]*fiber_dir[2]
-                    D_app = rad + (ax - rad) * cos_t * cos_t
-                    
-                    s_pred = (ff * np.exp(-b * D_app) +
-                              fr * np.exp(-b * D_res) +
-                              fh * np.exp(-b * D_hin) +
-                              fw * np.exp(-b * D_wat))
-                    
-                    diff = sig_norm[i] - s_pred
-                    sse += diff * diff
-                
-                if sse < best_sse:
-                    best_sse = sse
-                    best_ax = ax
-                    best_rad = rad
-        
-        return best_ax, best_rad
-
-    @staticmethod
-    @njit(parallel=True)
-    def _fit_batch_kernel(data, coords, A, AtA, At, bvals, bvecs,
-                          fiber_dirs, iso_grid, reg, do_step2, out):
-        """
-        Parallel fitting kernel with tissue-adaptive AD/RD initialization.
-        
-        Key improvement: AD/RD are now initialized from Step 1 for ALL voxels,
-        then optionally refined in Step 2. No more hard-coded defaults.
-        """
-        n_voxels = coords.shape[0]
-        n_dirs = len(fiber_dirs)
-        n_iso = len(iso_grid)
-        
-        THRESH_RES = 0.3e-3
-        THRESH_WAT = 3.0e-3
-        
-        for i in prange(n_voxels):
-            x, y, z = coords[i]
-            sig = data[x, y, z]
-            
-            # S0 normalization
-            s0 = 0.0
-            cnt = 0
-            for k in range(len(bvals)):
-                if bvals[k] < 50:
-                    s0 += sig[k]
-                    cnt += 1
-            if cnt > 0:
-                s0 /= cnt
-            if s0 < 1e-6:
-                continue
-            
-            sig_norm = sig / s0
-            
-            # Step 1: NNLS
-            Aty = np.zeros(AtA.shape[0])
-            for r in range(AtA.shape[0]):
-                val = 0.0
-                for c in range(len(sig_norm)):
-                    val += At[r, c] * sig_norm[c]
-                Aty[r] = val
-            
-            w, _ = nnls_coordinate_descent(AtA, Aty, reg)
-            
-            # Parse fractions
-            w_fib = w[:n_dirs]
-            w_iso = w[n_dirs:]
-            
-            f_fib = np.sum(w_fib)
-            f_res = 0.0
-            f_hin = 0.0
-            f_wat = 0.0
-            sum_w_iso = 0.0
-            sum_wd_iso = 0.0
-            
-            for k in range(n_iso):
-                adc = iso_grid[k]
-                wk = w_iso[k]
-                
-                if adc <= THRESH_RES:
-                    f_res += wk
-                elif adc <= THRESH_WAT:
-                    f_hin += wk
-                else:
-                    f_wat += wk
-                
-                sum_w_iso += wk
-                sum_wd_iso += wk * adc
-            
-            # Mean isotropic ADC
-            mean_iso_adc = sum_wd_iso / sum_w_iso if sum_w_iso > 1e-10 else 0.0
-            
-            # Normalize fractions
-            ftot = f_fib + f_res + f_hin + f_wat
-            if ftot > 1e-10:
-                f_fib /= ftot
-                f_res /= ftot
-                f_hin /= ftot
-                f_wat /= ftot
-            
-            # Compute centroids for isotropic components
-            D_res, D_hin, D_wat = compute_weighted_centroids(w_iso, iso_grid)
-            
-            # Find dominant fiber direction (needed for AD/RD estimation)
-            idx_max = 0
-            val_max = -1.0
-            for k in range(n_dirs):
-                if w_fib[k] > val_max:
-                    val_max = w_fib[k]
-                    idx_max = k
-            
-            f_dir = fiber_dirs[idx_max]
-            
-            AD, RD = DBSI_Fused._estimate_initial_diffusivities(
-                bvals, bvecs, sig_norm, f_dir,
-                f_fib, f_res, f_hin, f_wat,
-                D_res, D_hin, D_wat
-            )
-             
-            if do_step2:
-                AD, RD = step2_refine_diffusivities(
-                    bvals, bvecs, sig_norm, f_dir,
-                    f_fib, f_res, f_hin, f_wat,
-                    D_res, D_hin, D_wat,
-                    AD_init=AD,  # Pass initialization
-                    RD_init=RD
-                )
-            
-            # Compute FA
-            FA = compute_fiber_fa(AD, RD)
-            
-            # Store results
-            out[x, y, z, 0] = f_fib
-            out[x, y, z, 1] = f_res
-            out[x, y, z, 2] = f_hin
-            out[x, y, z, 3] = f_wat
-            out[x, y, z, 4] = AD
-            out[x, y, z, 5] = RD
-            out[x, y, z, 6] = FA      
-            out[x, y, z, 7] = mean_iso_adc

@@ -18,6 +18,7 @@ from .basis import (
 from .solvers import (
     nnls_coordinate_descent,
     step2_refine_diffusivities,
+    step2_refine_diffusivities_adaptive,
     compute_weighted_centroids,
     compute_fiber_fa,
 )
@@ -28,6 +29,7 @@ __all__ = [
     "generate_fibonacci_sphere",
     "nnls_coordinate_descent",
     "step2_refine_diffusivities",
+    "step2_refine_diffusivities_adaptive",
     "compute_weighted_centroids",
     "compute_fiber_fa",
 ]

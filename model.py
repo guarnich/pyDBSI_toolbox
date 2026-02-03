@@ -1,12 +1,11 @@
 """
-DBSI Fusion Model - Balanced Final Implementation
+DBSI Fusion Model - Tissue-Adaptive Implementation
 
-Key design principles:
-1. Linear NNLS Step 1 for robustness
-2. Non-linear Step 2 refinement for accuracy
-3. FA scaled by fiber fraction to avoid artifacts
-4. Extended parameter ranges for all tissue types
-5. Proper handling of CSF and GM regions
+Key improvement: AD/RD initialization from Step 1 for ALL voxels,
+including MS lesions with low fiber fraction.
+
+This ensures that even voxels with low fiber content (e.g., MS lesions)
+get appropriate diffusivity estimates instead of defaulting to healthy WM values.
 
 Outputs (8 channels):
     0: Fiber Fraction - apparent axonal density
@@ -17,21 +16,6 @@ Outputs (8 channels):
     5: Fiber RD - radial diffusivity perpendicular to fiber (mm²/s)
     6: Fiber FA - fractional anisotropy (cylindrically symmetric tensor)
     7: Mean Isotropic ADC - weighted mean of isotropic ADC spectrum
-
-ADC Thresholds (from Ye et al. 2020, Wang et al. 2011):
-    - Restricted: ADC ≤ 0.3 µm²/ms (0.3e-3 mm²/s) - cells, inflammation
-    - Hindered: 0.3 < ADC ≤ 3.0 µm²/ms - edema, tissue disorganization
-    - Free/Water: ADC > 3.0 µm²/ms - CSF
-
-FA Computation Note:
-    The FA is computed using the cylindrically symmetric tensor assumption
-    (λ₂ = λ₃ = RD), consistent with the DBSI anisotropic model. This differs 
-    from standard DTI FA which uses full eigenvalue decomposition.
-
-References:
-    - Wang Y et al. (2011) Brain 134:3590-3601
-    - Ye Z et al. (2020) Ann Clin Transl Neurol 7:695-706
-    - Cross AH, Song SK (2017) J Neuroimmunol 304:81-85
 """
 
 import numpy as np
@@ -51,7 +35,7 @@ from utils.tools import estimate_snr_robust, correct_rician_bias
 
 
 class DBSI_Fused:
-    """Main DBSI Model - Balanced Implementation."""
+    """Main DBSI Model - Tissue-Adaptive Implementation."""
     
     def __init__(self, n_iso=None, reg_lambda=None, enable_step2=True,
                  n_dirs=100, iso_range=(0.0, 4.0e-3)):
@@ -63,7 +47,7 @@ class DBSI_Fused:
         
     def fit(self, data, bvals, bvecs, mask, run_calibration=True):
         """Fit DBSI model to 4D diffusion MRI data."""
-        print(">>> Starting DBSI Pipeline (Balanced Final Version)")
+        print(">>> Starting DBSI Pipeline (Tissue-Adaptive Version)")
         
         bvecs = np.asarray(bvecs, dtype=np.float64)
         norms = np.linalg.norm(bvecs, axis=1, keepdims=True)
@@ -91,7 +75,7 @@ class DBSI_Fused:
         iso_grid = np.linspace(self.iso_range[0], self.iso_range[1], self.n_iso)
         
         # Use tissue-adaptive AD/RD for initial design matrix
-        # These are refined in Step 2
+        # These are refined in Step 2 for ALL voxels
         init_AD, init_RD = 1.5e-3, 0.4e-3
         A = build_design_matrix(bvals, bvecs, fiber_dirs, iso_grid, 
                                  ad=init_AD, rd=init_RD)
@@ -132,17 +116,93 @@ class DBSI_Fused:
         return results
 
     @staticmethod
+    @njit(cache=True, fastmath=True)
+    def _estimate_initial_diffusivities(bvals, bvecs, sig_norm, fiber_dir,
+                                        f_fib, f_res, f_hin, f_wat,
+                                        D_res, D_hin, D_wat):
+        """
+        Estimate initial AD/RD from Step 1 linear fit using coarse grid search.
+        
+        This provides tissue-adaptive initialization for ALL voxels,
+        including MS lesions with low fiber fraction, avoiding the bias
+        of defaulting to healthy WM values.
+        
+        Returns
+        -------
+        AD_init : float
+            Initial axial diffusivity estimate
+        RD_init : float
+            Initial radial diffusivity estimate
+        """
+        best_sse = 1e20
+        best_ax = 1.5e-3
+        best_rad = 0.4e-3
+        
+        ftot = f_fib + f_res + f_hin + f_wat + 1e-12
+        ff = f_fib / ftot
+        fr = f_res / ftot
+        fh = f_hin / ftot
+        fw = f_wat / ftot
+        
+        
+        n_ax, n_rad = 6, 5
+        ax_min, ax_max = 0.5e-3, 2.5e-3
+        rad_min, rad_max = 0.1e-3, 1.2e-3
+        
+        ax_step = (ax_max - ax_min) / (n_ax - 1)
+        rad_step = (rad_max - rad_min) / (n_rad - 1)
+        
+        for i_ax in range(n_ax):
+            ax = ax_min + i_ax * ax_step
+            
+            for i_rad in range(n_rad):
+                rad = rad_min + i_rad * rad_step
+                
+                # Soft constraint: AD should be > RD
+                if ax < rad * 1.1:
+                    continue
+                
+                sse = 0.0
+                for i in range(len(bvals)):
+                    b = bvals[i]
+                    if b < 50:
+                        continue
+                        
+                    g = bvecs[i]
+                    cos_t = g[0]*fiber_dir[0] + g[1]*fiber_dir[1] + g[2]*fiber_dir[2]
+                    D_app = rad + (ax - rad) * cos_t * cos_t
+                    
+                    s_pred = (ff * np.exp(-b * D_app) +
+                              fr * np.exp(-b * D_res) +
+                              fh * np.exp(-b * D_hin) +
+                              fw * np.exp(-b * D_wat))
+                    
+                    diff = sig_norm[i] - s_pred
+                    sse += diff * diff
+                
+                if sse < best_sse:
+                    best_sse = sse
+                    best_ax = ax
+                    best_rad = rad
+        
+        return best_ax, best_rad
+
+    @staticmethod
     @njit(parallel=True)
     def _fit_batch_kernel(data, coords, A, AtA, At, bvals, bvecs,
                           fiber_dirs, iso_grid, reg, do_step2, out):
-        """Parallel fitting kernel."""
+        """
+        Parallel fitting kernel with tissue-adaptive AD/RD initialization.
+        
+        Key improvement: AD/RD are now initialized from Step 1 for ALL voxels,
+        then optionally refined in Step 2. No more hard-coded defaults.
+        """
         n_voxels = coords.shape[0]
         n_dirs = len(fiber_dirs)
         n_iso = len(iso_grid)
         
         THRESH_RES = 0.3e-3
         THRESH_WAT = 3.0e-3
-        MIN_FIBER_FOR_STEP2 = 0.10
         
         for i in prange(n_voxels):
             x, y, z = coords[i]
@@ -200,7 +260,7 @@ class DBSI_Fused:
             # Mean isotropic ADC
             mean_iso_adc = sum_wd_iso / sum_w_iso if sum_w_iso > 1e-10 else 0.0
             
-            # Normalize
+            # Normalize fractions
             ftot = f_fib + f_res + f_hin + f_wat
             if ftot > 1e-10:
                 f_fib /= ftot
@@ -208,34 +268,38 @@ class DBSI_Fused:
                 f_hin /= ftot
                 f_wat /= ftot
             
-            # Compute centroids
+            # Compute centroids for isotropic components
             D_res, D_hin, D_wat = compute_weighted_centroids(w_iso, iso_grid)
             
-            # Step 2: Refine diffusivities
-            AD = 1.5e-3  # default
-            RD = 0.4e-3
+            # Find dominant fiber direction (needed for AD/RD estimation)
+            idx_max = 0
+            val_max = -1.0
+            for k in range(n_dirs):
+                if w_fib[k] > val_max:
+                    val_max = w_fib[k]
+                    idx_max = k
             
-            if do_step2 and f_fib >= MIN_FIBER_FOR_STEP2: # only for significant fibers
-                
-                idx_max = 0
-                val_max = -1.0
-                for k in range(n_dirs):
-                    if w_fib[k] > val_max:
-                        val_max = w_fib[k]
-                        idx_max = k
-                
-                f_dir = fiber_dirs[idx_max]
-                
+            f_dir = fiber_dirs[idx_max]
+            
+            AD, RD = DBSI_Fused._estimate_initial_diffusivities(
+                bvals, bvecs, sig_norm, f_dir,
+                f_fib, f_res, f_hin, f_wat,
+                D_res, D_hin, D_wat
+            )
+             
+            if do_step2:
                 AD, RD = step2_refine_diffusivities(
                     bvals, bvecs, sig_norm, f_dir,
                     f_fib, f_res, f_hin, f_wat,
-                    D_res, D_hin, D_wat
+                    D_res, D_hin, D_wat,
+                    AD_init=AD,  # Pass initialization
+                    RD_init=RD
                 )
             
-            # Compute FA 
+            # Compute FA
             FA = compute_fiber_fa(AD, RD)
             
-            # Store
+            # Store results
             out[x, y, z, 0] = f_fib
             out[x, y, z, 1] = f_res
             out[x, y, z, 2] = f_hin
@@ -243,4 +307,4 @@ class DBSI_Fused:
             out[x, y, z, 4] = AD
             out[x, y, z, 5] = RD
             out[x, y, z, 6] = FA      
-            out[x, y, z, 7] = mean_iso_adc 
+            out[x, y, z, 7] = mean_iso_adc

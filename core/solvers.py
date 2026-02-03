@@ -1,20 +1,8 @@
 """
-DBSI Core Solvers - Balanced Final Implementation
+DBSI Core Solvers - Updated for Tissue-Adaptive Initialization
 
-Key principles:
-1. Step 1: Linear NNLS to get fractions (fixed diffusivities, tissue-adaptive)
-2. Step 2: Refine AD/RD only if fiber fraction is significant
-3. FA scaled by fiber fraction to avoid artifacts
-4. Extended parameter ranges to handle all tissue types
-
-ADC Thresholds (Literature Standard):
-    - Restricted: ≤ 0.3 µm²/ms (Ye et al. 2020)
-    - Hindered: 0.3-3.0 µm²/ms (Wang et al. 2011)  
-    - Free/Water: > 3.0 µm²/ms (CSF reference)
-
-References:
-    Wang Y et al. (2011) Brain 134:3590-3601
-    Ye Z et al. (2020) Ann Clin Transl Neurol 7:695-706
+Key change: step2_refine_diffusivities now accepts AD_init/RD_init parameters
+to center the grid search around tissue-specific estimates from Step 1.
 """
 
 import numpy as np
@@ -91,15 +79,34 @@ def compute_weighted_centroids(w_iso, iso_grid):
 @njit(cache=True, fastmath=True)
 def step2_refine_diffusivities(bvals, bvecs, y_norm, fiber_dir,
                                f_fiber, f_res, f_hin, f_wat,
-                               D_res, D_hin, D_wat):
+                               D_res, D_hin, D_wat,
+                               AD_init=None, RD_init=None):
     """
-    Step 2: Refine fiber AD/RD using grid search.
+    Step 2: Refine fiber AD/RD using grid search centered on initialization.
     
-    Extended range to handle various tissue types.
+    Parameters
+    ----------
+    AD_init : float, optional
+        Initial AD estimate from Step 1 coarse search
+    RD_init : float, optional
+        Initial RD estimate from Step 1 coarse search
+        
+    If not provided, uses default WM values (backward compatible).
     """
+    # Use initialization if provided, otherwise defaults
+    if AD_init is None:
+        center_ax = 1.5e-3
+    else:
+        center_ax = AD_init
+        
+    if RD_init is None:
+        center_rad = 0.4e-3
+    else:
+        center_rad = RD_init
+    
     best_sse = 1e20
-    best_ax = 1.5e-3
-    best_rad = 0.4e-3
+    best_ax = center_ax
+    best_rad = center_rad
     
     ftot = f_fiber + f_res + f_hin + f_wat + 1e-12
     ff = f_fiber / ftot
@@ -107,10 +114,12 @@ def step2_refine_diffusivities(bvals, bvecs, y_norm, fiber_dir,
     fh = f_hin / ftot
     fw = f_wat / ftot
     
-    # Extended grid for all tissue types
     n_ax, n_rad = 12, 10
-    ax_min, ax_max = 0.5e-3, 2.5e-3
-    rad_min, rad_max = 0.1e-3, 1.2e-3
+    
+    ax_min = max(0.5e-3, center_ax * 0.5)
+    ax_max = min(2.5e-3, center_ax * 1.5)
+    rad_min = max(0.1e-3, center_rad * 0.5)
+    rad_max = min(1.2e-3, center_rad * 1.5)
     
     ax_step = (ax_max - ax_min) / (n_ax - 1)
     rad_step = (rad_max - rad_min) / (n_rad - 1)
@@ -193,31 +202,9 @@ def step2_refine_diffusivities(bvals, bvecs, y_norm, fiber_dir,
 @njit(cache=True, fastmath=True)
 def compute_fiber_fa(AD, RD):
     """
-    Compute FA scaled by fiber fraction.
+    Compute FA for cylindrically symmetric tensor.
     
-    Uses the cylindrically symmetric tensor formula:
-        FA = sqrt(0.5) * (AD - RD) / sqrt(AD² + 2*RD²)
-    
-    This assumes λ₁ = AD and λ₂ = λ₃ = RD (cylindrical symmetry),
-    which is consistent with the DBSI anisotropic tensor model.
-    
-    Note: This differs from standard DTI FA which uses full eigenvalue
-    decomposition. For DBSI, this formula is appropriate as the model
-    explicitly assumes cylindrically symmetric tensors.
-    
-    Parameters
-    ----------
-    AD : float
-        Axial diffusivity (mm²/s)
-    RD : float
-        Radial diffusivity (mm²/s)
-    fiber_fraction : float
-        Fiber signal fraction (0-1)
-        
-    Returns
-    -------
-    FA : float
-        Fractional anisotropy (0-1), scaled by fiber fraction
+    Formula: FA = sqrt(0.5) * (AD - RD) / sqrt(AD² + 2*RD²)
     """
     if AD < 1e-10 or RD < 1e-10:
         return 0.0
@@ -235,6 +222,5 @@ def compute_fiber_fa(AD, RD):
     
     FA_raw = np.sqrt(0.5) * diff / denom
     FA_raw = min(1.0, max(0.0, FA_raw))
-    
     
     return FA_raw

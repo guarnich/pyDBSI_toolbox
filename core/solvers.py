@@ -1,8 +1,6 @@
 """
-DBSI Core Solvers - Updated for Tissue-Adaptive Initialization
+DBSI Core Solvers 
 
-Key change: step2_refine_diffusivities now accepts AD_init/RD_init parameters
-to center the grid search around tissue-specific estimates from Step 1.
 """
 
 import numpy as np
@@ -77,32 +75,43 @@ def compute_weighted_centroids(w_iso, iso_grid):
 
 
 @njit(cache=True, fastmath=True)
-def step2_refine_diffusivities(bvals, bvecs, y_norm, fiber_dir,
-                               f_fiber, f_res, f_hin, f_wat,
-                               D_res, D_hin, D_wat,
-                               AD_init=None, RD_init=None):
+def step2_refine_diffusivities_adaptive(bvals, bvecs, y_norm, fiber_dir,
+                                        f_fiber, f_res, f_hin, f_wat,
+                                        D_res, D_hin, D_wat,
+                                        AD_init, RD_init):
     """
-    Step 2: Refine fiber AD/RD using grid search centered on initialization.
+    Step 2: Refine fiber AD/RD with tissue-adaptive initialization.
+    
+    Grid search centers on AD_init/RD_init from Step 1 coarse estimate,
+    with adaptive range (±50% of initialized values).
     
     Parameters
     ----------
-    AD_init : float, optional
-        Initial AD estimate from Step 1 coarse search
-    RD_init : float, optional
-        Initial RD estimate from Step 1 coarse search
+    bvals, bvecs : arrays
+        Diffusion protocol
+    y_norm : array
+        Normalized signal
+    fiber_dir : array (3,)
+        Fiber direction
+    f_fiber, f_res, f_hin, f_wat : float
+        Fraction estimates
+    D_res, D_hin, D_wat : float
+        Isotropic diffusivity centroids
+    AD_init : float
+        Initial axial diffusivity (from coarse search)
+    RD_init : float
+        Initial radial diffusivity (from coarse search)
         
-    If not provided, uses default WM values (backward compatible).
+    Returns
+    -------
+    best_ax : float
+        Refined axial diffusivity
+    best_rad : float
+        Refined radial diffusivity
     """
-    # Use initialization if provided, otherwise defaults
-    if AD_init is None:
-        center_ax = 1.5e-3
-    else:
-        center_ax = AD_init
-        
-    if RD_init is None:
-        center_rad = 0.4e-3
-    else:
-        center_rad = RD_init
+    # Use initialization as starting point
+    center_ax = AD_init
+    center_rad = RD_init
     
     best_sse = 1e20
     best_ax = center_ax
@@ -114,6 +123,7 @@ def step2_refine_diffusivities(bvals, bvecs, y_norm, fiber_dir,
     fh = f_hin / ftot
     fw = f_wat / ftot
     
+    # Adaptive grid centered on initialization (±50%)
     n_ax, n_rad = 12, 10
     
     ax_min = max(0.5e-3, center_ax * 0.5)
@@ -121,16 +131,16 @@ def step2_refine_diffusivities(bvals, bvecs, y_norm, fiber_dir,
     rad_min = max(0.1e-3, center_rad * 0.5)
     rad_max = min(1.2e-3, center_rad * 1.5)
     
-    ax_step = (ax_max - ax_min) / (n_ax - 1)
-    rad_step = (rad_max - rad_min) / (n_rad - 1)
+    ax_step = (ax_max - ax_min) / (n_ax - 1) if n_ax > 1 else 0.0
+    rad_step = (rad_max - rad_min) / (n_rad - 1) if n_rad > 1 else 0.0
     
+    # Coarse grid search
     for i_ax in range(n_ax):
         ax = ax_min + i_ax * ax_step
         
         for i_rad in range(n_rad):
             rad = rad_min + i_rad * rad_step
             
-            # Soft constraint: AD should be > RD
             if ax < rad * 1.1:
                 continue
             
@@ -157,10 +167,10 @@ def step2_refine_diffusivities(bvals, bvecs, y_norm, fiber_dir,
                 best_ax = ax
                 best_rad = rad
     
-    # Local refinement
+    # Fine grid search (local refinement)
     ax_c, rad_c = best_ax, best_rad
-    fine_ax = ax_step / 4
-    fine_rad = rad_step / 4
+    fine_ax = ax_step / 4 if ax_step > 0 else 0.05e-3
+    fine_rad = rad_step / 4 if rad_step > 0 else 0.05e-3
     
     for di in range(-2, 3):
         ax = ax_c + di * fine_ax
@@ -197,6 +207,25 @@ def step2_refine_diffusivities(bvals, bvecs, y_norm, fiber_dir,
                 best_rad = rad
     
     return best_ax, best_rad
+
+
+@njit(cache=True, fastmath=True)
+def step2_refine_diffusivities(bvals, bvecs, y_norm, fiber_dir,
+                               f_fiber, f_res, f_hin, f_wat,
+                               D_res, D_hin, D_wat):
+    """
+    Step 2: Legacy version with fixed WM defaults.
+    
+    This version calls the adaptive version with hard-coded defaults.
+    Kept for backward compatibility with old code.
+    """
+    return step2_refine_diffusivities_adaptive(
+        bvals, bvecs, y_norm, fiber_dir,
+        f_fiber, f_res, f_hin, f_wat,
+        D_res, D_hin, D_wat,
+        1.5e-3,  # AD default
+        0.4e-3   # RD default
+    )
 
 
 @njit(cache=True, fastmath=True)

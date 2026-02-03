@@ -26,7 +26,7 @@ from tqdm import tqdm
 from core.basis import build_design_matrix, generate_fibonacci_sphere_hemisphere
 from core.solvers import (
     nnls_coordinate_descent,
-    step2_refine_diffusivities,
+    step2_refine_diffusivities_adaptive,  # Use adaptive version
     compute_weighted_centroids,
     compute_fiber_fa
 )
@@ -79,7 +79,7 @@ def _estimate_initial_diffusivities_jit(bvals, bvecs, sig_norm, fiber_dir,
     fh = f_hin / ftot
     fw = f_wat / ftot
     
-    # Grid for initial estimate 
+    # Coarse grid for initial estimate (faster than Step 2)
     n_ax, n_rad = 6, 5
     ax_min, ax_max = 0.5e-3, 2.5e-3
     rad_min, rad_max = 0.1e-3, 1.2e-3
@@ -216,7 +216,11 @@ def _fit_batch_kernel_jit(data, coords, A, AtA, At, bvals, bvecs,
         
         f_dir = fiber_dirs[idx_max]
         
-        # === Initialize AD/RD from Step 1 for ALL voxels
+        # ====================================================================
+        # KEY CHANGE: Initialize AD/RD from Step 1 for ALL voxels
+        # ====================================================================
+        # This replaces the hard-coded defaults and makes the model
+        # tissue-adaptive even for lesions with low fiber fraction
         
         AD, RD = _estimate_initial_diffusivities_jit(
             bvals, bvecs, sig_norm, f_dir,
@@ -224,15 +228,14 @@ def _fit_batch_kernel_jit(data, coords, A, AtA, At, bvals, bvecs,
             D_res, D_hin, D_wat
         )
         
-        # Step 2: refine with finer grid
-        
+        # Step 2: Optionally refine with finer grid
+        # Now this works on ALL voxels with good initialization
         if do_step2:
-            AD, RD = step2_refine_diffusivities(
+            AD, RD = step2_refine_diffusivities_adaptive(
                 bvals, bvecs, sig_norm, f_dir,
                 f_fib, f_res, f_hin, f_wat,
                 D_res, D_hin, D_wat,
-                AD_init=AD,  
-                RD_init=RD
+                AD, RD  # Pass init as positional args (Numba requires this)
             )
         
         # Compute FA

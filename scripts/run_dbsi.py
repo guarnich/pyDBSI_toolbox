@@ -2,7 +2,7 @@
 """
 DBSI Fusion CLI
 
-Outputs (9 channels):
+Outputs (8 channels):
 - fiber_fraction.nii.gz      : Apparent axonal density
 - restricted_fraction.nii.gz : Cellularity (ADC ≤ 0.3)
 - hindered_fraction.nii.gz   : Edema (0.3 < ADC ≤ 3.0)

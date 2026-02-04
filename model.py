@@ -28,27 +28,12 @@ from calibration.optimizer import optimize_hyperparameters
 from utils.tools import estimate_snr_robust, correct_rician_bias
 
 
-# =============================================================================
-# CRITICAL FIX #1: STEP 1 DESIGN MATRIX SHOULD USE MEAN TISSUE VALUES
-# =============================================================================
-# 
-# ISSUE: If Step 1 uses AD=1.5, RD=0.4 in design matrix, fractions are biased
-# SOLUTION: Use MEAN of physiological range for initial decomposition
-#
-# Rationale:
-# - AD_mean = (0.5 + 2.5) / 2 = 1.5e-3  ← OK for WM, lesions, edema
-# - RD_mean = (0.1 + 1.5) / 2 = 0.8e-3  ← Slightly high, but unbiased
-#
-# Alternative: Could use median (AD=1.2, RD=0.5) but mean is more stable
-# =============================================================================
-
 DESIGN_MATRIX_AD = 1.5e-3  # Mean of physiological range [0.5, 2.5]
 DESIGN_MATRIX_RD = 0.5e-3  # Conservative mean [0.1, 1.5] → use 0.5 as compromise
 
 
-# =============================================================================
-# HYBRID AD/RD INITIALIZATION
-# =============================================================================
+# AD/RD INITIALIZATION
+
 
 @njit(cache=True, fastmath=True)
 def estimate_AD_RD_hybrid(bvals, bvecs, sig_norm, fiber_dir,
@@ -84,13 +69,12 @@ def estimate_AD_RD_hybrid(bvals, bvecs, sig_norm, fiber_dir,
         Radial diffusivity estimate
     """
     
-    # =================================================================
-    # CASE 1: Nearly isotropic (very low fiber)
-    # =================================================================
+    
     if f_fib < 0.05:
         ftot_iso = f_res + f_hin + f_wat + 1e-12
         iso_mean = (f_res * D_res + f_hin * D_hin + f_wat * D_wat) / ftot_iso
         iso_mean = max(0.3e-3, min(2.5e-3, iso_mean))
+
         # Return nearly isotropic values
         return iso_mean, iso_mean * 0.95
     
@@ -104,21 +88,18 @@ def estimate_AD_RD_hybrid(bvals, bvecs, sig_norm, fiber_dir,
     fr = f_res / ftot
     fh = f_hin / ftot
     fw = f_wat / ftot
+
     
-    # Build weighted least squares system
-    # Model: log(S_fiber) = -b*RD - b*(AD-RD)*cos²θ
-    # Variables: x = RD, y = AD-RD
-    
-    sum_AA = 0.0  # Σ w·b²
-    sum_AB = 0.0  # Σ w·b²·cos²θ
-    sum_BB = 0.0  # Σ w·b²·cos⁴θ
-    sum_Ay = 0.0  # Σ w·b·log(S_fiber)
-    sum_By = 0.0  # Σ w·b·cos²θ·log(S_fiber)
+    sum_AA = 0.0  
+    sum_AB = 0.0  
+    sum_BB = 0.0  
+    sum_Ay = 0.0  
+    sum_By = 0.0  
     n_meas = 0
     
     for i in range(len(bvals)):
         b = bvals[i]
-        if b < 500:  # Skip b0 and very low b
+        if b < 50: 
             continue
         
         S_total = sig_norm[i]
@@ -184,19 +165,15 @@ def estimate_AD_RD_hybrid(bvals, bvecs, sig_norm, fiber_dir,
             return 1.0e-3, 0.5e-3
     
     # =================================================================
-    # SOLVE 2x2 LINEAR SYSTEM
-    # =================================================================
-    # [sum_AA  sum_AB] [RD]     [sum_Ay]
-    # [sum_AB  sum_BB] [AD-RD] = [sum_By]
     
     det = sum_AA * sum_BB - sum_AB * sum_AB
     
     if abs(det) < 1e-20:
-        # Singular system, use simple estimate
+        
         RD_est = -sum_Ay / (sum_AA + 1e-12)
         AD_est = RD_est * 2.0
     else:
-        # Solve using Cramer's rule
+       
         x = (sum_BB * sum_Ay - sum_AB * sum_By) / det
         y = (sum_AA * sum_By - sum_AB * sum_Ay) / det
         
@@ -207,23 +184,18 @@ def estimate_AD_RD_hybrid(bvals, bvecs, sig_norm, fiber_dir,
     # APPLY PHYSIOLOGICAL CONSTRAINTS
     # =================================================================
     
-    # Hard bounds
+    
     RD_est = max(0.1e-3, min(1.5e-3, RD_est))
     AD_est = max(0.3e-3, min(2.5e-3, AD_est))
     
-    # Physical constraint: AD must be > RD
+    # Physical constraint: 
     if AD_est < RD_est * 1.05:
         mid = (AD_est + RD_est) / 2
         AD_est = mid * 1.15
         RD_est = mid * 0.85
-        # Re-clamp
+        
         AD_est = min(2.5e-3, AD_est)
         RD_est = max(0.1e-3, RD_est)
-    
-    # =================================================================
-    # TISSUE-SPECIFIC VALIDATION (OPTIONAL BUT RECOMMENDED)
-    # =================================================================
-    # Use fractions to apply soft constraints
     
     # High fiber (>60%) → likely WM-like
     if f_fib > 0.6:
@@ -363,9 +335,8 @@ def refine_AD_RD_adaptive(bvals, bvecs, sig_norm, fiber_dir,
                 best_AD = AD
                 best_RD = RD
     
-    # =================================================================
-    # FINE GRID REFINEMENT (Local around best)
-    # =================================================================
+    # FINE GRID REFINEMENT 
+
     AD_c = best_AD
     RD_c = best_RD
     
@@ -412,10 +383,6 @@ def refine_AD_RD_adaptive(bvals, bvecs, sig_norm, fiber_dir,
     return best_AD, best_RD
 
 
-# =============================================================================
-# PARALLEL FITTING KERNEL
-# =============================================================================
-
 @njit(parallel=True, cache=True, fastmath=True)
 def fit_voxels_parallel_hybrid(data, coords, A, AtA, At, bvals, bvecs,
                                 fiber_dirs, iso_grid, reg, enable_step2, out):
@@ -442,11 +409,7 @@ def fit_voxels_parallel_hybrid(data, coords, A, AtA, At, bvals, bvecs,
         x, y, z = coords[idx]
         sig = data[x, y, z]
         
-        # =====================================================================
-        # S0 NORMALIZATION (Adaptive b0 detection)
-        # =====================================================================
-        # Use adaptive threshold instead of hard-coded b<50
-        # This handles scanners with different b0 nominal values
+        
         b_min = 1e10
         for i in range(len(bvals)):
             if bvals[i] < b_min:
@@ -469,9 +432,8 @@ def fit_voxels_parallel_hybrid(data, coords, A, AtA, At, bvals, bvecs,
         
         sig_norm = sig / s0
         
-        # =====================================================================
         # STEP 1: LINEAR NNLS DECOMPOSITION
-        # =====================================================================
+
         Aty = np.zeros(AtA.shape[0])
         for r in range(AtA.shape[0]):
             val = 0.0
@@ -481,9 +443,7 @@ def fit_voxels_parallel_hybrid(data, coords, A, AtA, At, bvals, bvecs,
         
         w, _ = nnls_coordinate_descent(AtA, Aty, reg)
         
-        # =====================================================================
-        # PARSE FRACTIONS
-        # =====================================================================
+        
         w_fib = w[:n_dirs]
         w_iso = w[n_dirs:]
         
@@ -518,7 +478,7 @@ def fit_voxels_parallel_hybrid(data, coords, A, AtA, At, bvals, bvecs,
             f_hin /= ftot
             f_wat /= ftot
         else:
-            # Degenerate case
+            
             continue
         
         if f_fib < 0.10:

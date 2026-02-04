@@ -493,8 +493,8 @@ def fit_voxels_parallel_hybrid(data, coords, A, AtA, At, bvals, bvecs,
         # =====================================================================
         # OPTIONAL STEP 2: REFINEMENT
         # =====================================================================
-        if enable_step2 and f_fib > 0.05:
-            AD, RD = refine_AD_RD_adaptive(
+            if enable_step2 and f_fib > 0.05:
+                AD, RD = refine_AD_RD_adaptive(
                 bvals, bvecs, sig_norm, fiber_dir,
                 f_fib, f_res, f_hin, f_wat,
                 D_res, D_hin, D_wat,

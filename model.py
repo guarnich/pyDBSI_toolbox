@@ -472,9 +472,9 @@ class DBSI_Fused:
             AD/RD/FA will be NaN if fit fails (transparent)
         """
         print("\n" + "="*70)
-        print("  DBSI PIPELINE - ZERO THRESHOLDS (PURE)")
+        print("  DBSI PIPELINE  ")
         print("="*70)
-        print("  Philosophy: Let mathematics decide, no arbitrary rules")
+        
         
         # Normalize gradients
         bvecs = np.asarray(bvecs, dtype=np.float64)
@@ -529,10 +529,6 @@ class DBSI_Fused:
         # Fit
         n_voxels = len(coords)
         print(f"\n5. Fitting {n_voxels:,} voxels...")
-        print("   Approach: ZERO THRESHOLDS (pure data-driven)")
-        print("   - AD/RD estimated for ALL voxel (even f_fib→0)")
-        print("   - Step 2 applied to ALL if enabled (no f_fib check)")
-        print("   - NaN indicates natural fit failure")
         
         results = np.zeros(data.shape[:3] + (8,), dtype=np.float32)
         
@@ -562,16 +558,8 @@ class DBSI_Fused:
         
         elapsed = time.time() - t0
         
-        # Report NaN statistics
-        n_nan_ad = np.sum(np.isnan(results[..., 4][mask]))
-        n_nan_rd = np.sum(np.isnan(results[..., 5][mask]))
-        n_nan_fa = np.sum(np.isnan(results[..., 6][mask]))
-        
         print(f"\n   Completed in {elapsed:.1f}s ({n_voxels/elapsed:.0f} vox/s)")
-        print(f"\n   NaN Statistics (natural fit failures):")
-        print(f"     AD: {n_nan_ad}/{n_voxels} ({n_nan_ad/n_voxels*100:.1f}%)")
-        print(f"     RD: {n_nan_rd}/{n_voxels} ({n_nan_rd/n_voxels*100:.1f}%)")
-        print(f"     FA: {n_nan_fa}/{n_voxels} ({n_nan_fa/n_voxels*100:.1f}%)")
+
         print("\n" + "="*70 + "\n")
         
         return results

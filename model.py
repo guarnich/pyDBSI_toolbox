@@ -1,9 +1,5 @@
 """
-DBSI Model 
-
-- Data-driven approach
-
-- Weighted regression naturally handles all cases
+DBSI Model
 
 """
 
@@ -27,24 +23,14 @@ DESIGN_MATRIX_AD = 1.5e-3
 DESIGN_MATRIX_RD = 0.5e-3
 
 
-# ANALYTICAL AD/RD ESTIMATION
+#  ANALYTICAL AD/RD ESTIMATION (NO THRESHOLDS)
 
 @njit(cache=True, fastmath=True)
 def estimate_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
                         f_fib, f_res, f_hin, f_wat,
                         D_res, D_hin, D_wat):
     """
-    Pure analytical AD/RD estimation - ZERO THRESHOLDS.
-    
-    Key principles:
-    1. NO checks on f_fib (works for any value)
-    2. Weighted regression handles low fiber naturally
-    3. If insufficient data, returns NaN (transparent failure)
-    4. Mathematics decides, not arbitrary rules
-    
-    Parameters
-    ----------
-    All same as before
+    Analytical AD/RD estimation
     
     Returns
     -------
@@ -52,12 +38,14 @@ def estimate_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
         Estimated diffusivities OR np.nan if fit fails
     """
     
+    # Normalize fractions (NO threshold checks)
     ftot = f_fib + f_res + f_hin + f_wat + 1e-12
     ff = f_fib / ftot
     fr = f_res / ftot
     fh = f_hin / ftot
     fw = f_wat / ftot
     
+    # Build weighted least squares system
     sum_AA = 0.0
     sum_AB = 0.0
     sum_BB = 0.0
@@ -72,12 +60,15 @@ def estimate_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
         if S_total < 0.01:
             S_total = 0.01
         
+        # Subtract isotropic contributions
         S_iso = (fr * np.exp(-b * D_res) +
                  fh * np.exp(-b * D_hin) +
                  fw * np.exp(-b * D_wat))
         
+        # Isolate fiber component
         S_fiber = (S_total - S_iso) / (ff + 1e-12)
         
+        # Clamp to valid range
         if S_fiber < 0.01:
             S_fiber = 0.01
         if S_fiber > 1.0:
@@ -100,6 +91,7 @@ def estimate_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
         sum_By += w * b * cos2 * log_S
         n_meas += 1
     
+
     det = sum_AA * sum_BB - sum_AB * sum_AB
     
     if abs(det) < 1e-20:
@@ -113,7 +105,7 @@ def estimate_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
     RD_est = -x
     AD_est = -x - y
     
-    
+    # Apply ONLY physiological bounds
     RD_est = max(0.05e-3, min(3.0e-3, RD_est))  # Wider range
     AD_est = max(0.05e-3, min(3.5e-3, AD_est))  # Wider range
     
@@ -127,7 +119,9 @@ def estimate_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
     return AD_est, RD_est
 
 
-# GRID SEARCH REFINEMENT (NO THRESHOLDS)
+# =============================================================================
+# PURE GRID SEARCH REFINEMENT (NO THRESHOLDS)
+# =============================================================================
 
 @njit(cache=True, fastmath=True)
 def refine_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
@@ -135,9 +129,7 @@ def refine_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
                       D_res, D_hin, D_wat,
                       AD_init, RD_init):
     """
-    Pure grid search refinement - ZERO THRESHOLDS.
     
-    Works for ANY f_fib value (even 0.01).
     If AD_init or RD_init is NaN, returns NaN.
     """
     
@@ -155,6 +147,8 @@ def refine_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
     best_sse = 1e20
     best_AD = AD_init
     best_RD = RD_init
+    
+    # Adaptive range based on initial estimate 
     
     anisotropy = abs(AD_init - RD_init) / ((AD_init + RD_init) / 2 + 1e-12)
     
@@ -254,19 +248,16 @@ def refine_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
     
     return best_AD, best_RD
 
-# PARALLEL FITTING KERNEL 
+# PARALLEL FITTING 
 
 @njit(parallel=True, cache=True, fastmath=True)
 def fit_voxels_pure(data, coords, A, AtA, At, bvals, bvecs,
                     fiber_dirs, iso_grid, reg, enable_step2, out):
     """
-    Pure fitting - ZERO THRESHOLDS anywhere.
     
-    Workflow:
-    1. Initialize AD, RD, FA to NaN
-    2. Always estimate AD/RD (no f_fib check)
-    3. Always refine if step2 enabled (no f_fib check)
-    4. NaN propagates naturally if fit fails
+    Output channels:
+    0-7: Standard DBSI outputs
+    8-9: AD_linear, RD_linear (before Step 2 refinement)
     """
     
     n_voxels = coords.shape[0]
@@ -351,14 +342,16 @@ def fit_voxels_pure(data, coords, A, AtA, At, bvals, bvecs,
         else:
             continue
         
+        # Step 2: Non-linear fit 
+
         AD = np.nan
         RD = np.nan
         FA = np.nan
+        AD_linear = np.nan
+        RD_linear = np.nan
         
-        # Compute isotropic centroids
         D_res, D_hin, D_wat = compute_weighted_centroids(w_iso, iso_grid)
         
-        # Find dominant fiber direction
         idx_max = 0
         val_max = -1.0
         for i in range(n_dirs):
@@ -368,19 +361,16 @@ def fit_voxels_pure(data, coords, A, AtA, At, bvals, bvecs,
         
         fiber_dir = fiber_dirs[idx_max]
         
-        # =====================================================================
-        # PURE ESTIMATION (NO THRESHOLDS)
-        # =====================================================================
         AD_linear, RD_linear = estimate_AD_RD_pure(
             bvals, bvecs, sig_norm, fiber_dir,
             f_fib, f_res, f_hin, f_wat,
             D_res, D_hin, D_wat
         )
         
-        # =====================================================================
-        # PURE REFINEMENT (NO THRESHOLDS)
-        # =====================================================================
-        if enable_step2:  # ← ONLY this flag, NO f_fib check!
+        AD = AD_linear
+        RD = RD_linear
+        
+        if enable_step2:  
             AD, RD = refine_AD_RD_pure(
                 bvals, bvecs, sig_norm, fiber_dir,
                 f_fib, f_res, f_hin, f_wat,
@@ -388,11 +378,9 @@ def fit_voxels_pure(data, coords, A, AtA, At, bvals, bvecs,
                 AD_linear, RD_linear
             )
         
-        # Compute FA (handles NaN naturally)
         if not np.isnan(AD) and not np.isnan(RD):
             FA = compute_fiber_fa(AD, RD)
         
-        # Store results (NaN if fit failed)
         out[x, y, z, 0] = f_fib
         out[x, y, z, 1] = f_res
         out[x, y, z, 2] = f_hin
@@ -401,31 +389,14 @@ def fit_voxels_pure(data, coords, A, AtA, At, bvals, bvecs,
         out[x, y, z, 5] = RD
         out[x, y, z, 6] = FA
         out[x, y, z, 7] = mean_iso_adc
-        out[x, y, z, 8] = AD_linear
-        out[x, y, z, 9] = RD_linear
+        out[x, y, z, 8] = AD_linear 
+        out[x, y, z, 9] = RD_linear 
 
-
-# =============================================================================
-# MAIN MODEL CLASS
-# =============================================================================
 
 class DBSI_Fused:
     """
-    DBSI Model - ZERO THRESHOLDS VERSION
-    
-    Philosophy:
-    - Pure data-driven approach
-    - NO arbitrary thresholds on f_fib or anything else
-    - Mathematics decides what's valid
-    - NaN indicates transparent failure
-    - Maximum flexibility, minimum assumptions
-    
-    Changes from v2.3.0:
-    1. Removed f_fib < 0.05 check in estimation
-    2. Removed f_fib > 0.05/0.10 check in refinement
-    3. Removed tissue-specific validation constraints
-    4. NaN initialization for AD/RD/FA
-    5. Wider physiological bounds (just to prevent numerical errors)
+    DBSI Model
+
     """
     
     def __init__(self, n_iso=None, reg_lambda=None, enable_step2=True,
@@ -442,14 +413,24 @@ class DBSI_Fused:
         
         Returns
         -------
-        results : ndarray (X, Y, Z, 8)
-            AD/RD/FA will be NaN if fit fails (transparent)
+        results : ndarray (X, Y, Z, 10)
+            0: Fiber fraction
+            1: Restricted fraction (inflammation/cells)
+            2: Hindered fraction (edema)
+            3: Water fraction (CSF)
+            4: Axial diffusivity (AD) - final (after Step 2 if enabled)
+            5: Radial diffusivity (RD) - final (after Step 2 if enabled)
+            6: Fiber FA
+            7: Mean isotropic ADC
+            8: AD_linear - from analytical estimation (before Step 2)
+            9: RD_linear - from analytical estimation (before Step 2)
+            
+            AD/RD/FA will be NaN if fit fails
         """
         print("\n" + "="*70)
         print("  DBSI PIPELINE  ")
         print("="*70)
-        
-        
+
         # Normalize gradients
         bvecs = np.asarray(bvecs, dtype=np.float64)
         norms = np.linalg.norm(bvecs, axis=1, keepdims=True)
@@ -503,8 +484,12 @@ class DBSI_Fused:
         # Fit
         n_voxels = len(coords)
         print(f"\n5. Fitting {n_voxels:,} voxels...")
+        print("   Approach: ZERO THRESHOLDS (pure data-driven)")
+        print("   - AD/RD estimated for ALL voxel (even f_fib→0)")
+        print("   - Step 2 applied to ALL if enabled (no f_fib check)")
+        print("   - NaN indicates natural fit failure")
         
-        results = np.zeros(data.shape[:3] + (10,), dtype=np.float32)
+        results = np.zeros(data.shape[:3] + (10,), dtype=np.float32) 
         
         results[..., 4] = np.nan  # AD
         results[..., 5] = np.nan  # RD
@@ -533,8 +518,8 @@ class DBSI_Fused:
         
         elapsed = time.time() - t0
         
+        
         print(f"\n   Completed in {elapsed:.1f}s ({n_voxels/elapsed:.0f} vox/s)")
-
         print("\n" + "="*70 + "\n")
         
         return results

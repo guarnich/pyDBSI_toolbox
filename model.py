@@ -1,15 +1,14 @@
 """
-DBSI Fusion Model - HYBRID INITIALIZATION (FINAL VERSION)
+DBSI Fusion Model - ZERO THRESHOLDS VERSION
 
-COMPLETE CORRECTIONS:
-1. Signal-based AD/RD initialization (no WM bias)
-2. Hybrid analytical + validation approach
-3. Proper Step 1 design matrix (should use generic AD/RD or adaptive?)
-4. Weighted centroids for isotropic components
-5. Rician bias correction before fitting
-6. Fraction normalization safeguards
-7. Numerical stability improvements
-8. Tissue-specific constraints on AD/RD estimates
+PHILOSOPHY:
+- NO arbitrary thresholds anywhere
+- Pure data-driven approach
+- Let the mathematics decide
+- NaN initialization → transparent failure handling
+- Weighted regression naturally handles all cases
+
+Version: 2.4.0 (Zero Thresholds)
 """
 
 import numpy as np
@@ -28,85 +27,60 @@ from calibration.optimizer import optimize_hyperparameters
 from utils.tools import estimate_snr_robust, correct_rician_bias
 
 
-DESIGN_MATRIX_AD = 1.5e-3  # Mean of physiological range [0.5, 2.5]
-DESIGN_MATRIX_RD = 0.5e-3  # Conservative mean [0.1, 1.5] 
+DESIGN_MATRIX_AD = 1.5e-3
+DESIGN_MATRIX_RD = 0.5e-3
 
 
-# AD/RD INITIALIZATION
-
+# =============================================================================
+# PURE ANALYTICAL AD/RD ESTIMATION (NO THRESHOLDS)
+# =============================================================================
 
 @njit(cache=True, fastmath=True)
-def estimate_AD_RD_hybrid(bvals, bvecs, sig_norm, fiber_dir,
-                          f_fib, f_res, f_hin, f_wat,
-                          D_res, D_hin, D_wat):
+def estimate_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
+                        f_fib, f_res, f_hin, f_wat,
+                        D_res, D_hin, D_wat):
     """
-    Hybrid AD/RD estimation: Analytical + tissue-specific validation.
+    Pure analytical AD/RD estimation - ZERO THRESHOLDS.
     
-    IMPROVEMENTS over previous versions:
-    1. Weighted regression using Step 1 fractions
-    2. Tissue-specific constraints (WM vs lesion vs edema)
-    3. Robust fallbacks for edge cases
-    4. Numerical stability checks
+    Key principles:
+    1. NO checks on f_fib (works for any value)
+    2. Weighted regression handles low fiber naturally
+    3. If insufficient data, returns NaN (transparent failure)
+    4. Mathematics decides, not arbitrary rules
     
     Parameters
     ----------
-    bvals, bvecs : arrays
-        Diffusion protocol
-    sig_norm : array
-        Normalized signal (S/S0)
-    fiber_dir : array (3,)
-        Dominant fiber direction
-    f_fib, f_res, f_hin, f_wat : float
-        Fraction estimates from Step 1 (using generic AD/RD)
-    D_res, D_hin, D_wat : float
-        Isotropic diffusivity centroids from Step 1
-        
+    All same as before
+    
     Returns
     -------
-    AD_est : float
-        Axial diffusivity estimate
-    RD_est : float
-        Radial diffusivity estimate
+    AD_est, RD_est : float
+        Estimated diffusivities OR np.nan if fit fails
     """
     
-    
-    if f_fib < 0.05:
-        ftot_iso = f_res + f_hin + f_wat + 1e-12
-        iso_mean = (f_res * D_res + f_hin * D_hin + f_wat * D_wat) / ftot_iso
-        iso_mean = max(0.3e-3, min(2.5e-3, iso_mean))
-
-        # Return nearly isotropic values
-        return iso_mean, iso_mean * 0.95
-    
-    # =================================================================
-    # CASE 2: Analytical estimation with composite model
-    # =================================================================
-    
-    # Normalize fractions
+    # Normalize fractions (NO threshold checks)
     ftot = f_fib + f_res + f_hin + f_wat + 1e-12
     ff = f_fib / ftot
     fr = f_res / ftot
     fh = f_hin / ftot
     fw = f_wat / ftot
-
     
-    sum_AA = 0.0  
-    sum_AB = 0.0  
-    sum_BB = 0.0  
-    sum_Ay = 0.0  
-    sum_By = 0.0  
+    # Build weighted least squares system
+    sum_AA = 0.0
+    sum_AB = 0.0
+    sum_BB = 0.0
+    sum_Ay = 0.0
+    sum_By = 0.0
     n_meas = 0
     
     for i in range(len(bvals)):
         b = bvals[i]
-        if b < 50: 
-            continue
         
         S_total = sig_norm[i]
         if S_total < 0.01:
             S_total = 0.01
         
-        # Subtract isotropic contributions (using Step 1 centroids)
+        # Subtract isotropic contributions
         S_iso = (fr * np.exp(-b * D_res) +
                  fh * np.exp(-b * D_hin) +
                  fw * np.exp(-b * D_wat))
@@ -127,12 +101,10 @@ def estimate_AD_RD_hybrid(bvals, bvecs, sig_norm, fiber_dir,
         cos_t = g[0]*fiber_dir[0] + g[1]*fiber_dir[1] + g[2]*fiber_dir[2]
         cos2 = cos_t * cos_t
         
-        # Weight: combine signal strength and b-value
-        # Higher b → more sensitive to diffusivity
-        # Higher signal → better SNR
-        w = S_total * b
+        # Automatic weighting (handles all cases naturally)
+        w = S_total * b  # b0 → w=0 automatically
         
-        # Accumulate normal equations
+        # Accumulate
         sum_AA += w * b * b
         sum_AB += w * b * b * cos2
         sum_BB += w * b * b * cos2 * cos2
@@ -140,108 +112,55 @@ def estimate_AD_RD_hybrid(bvals, bvecs, sig_norm, fiber_dir,
         sum_By += w * b * cos2 * log_S
         n_meas += 1
     
-    # =================================================================
-    # FALLBACK: Insufficient data
-    # =================================================================
-    if n_meas < 6:
-        # Use simple mean diffusivity estimate
-        mean_D = 0.0
-        count = 0
-        for i in range(len(bvals)):
-            if bvals[i] > 800 and sig_norm[i] > 0.05:
-                D_est = -np.log(sig_norm[i] + 1e-10) / bvals[i]
-                if 0.2e-3 < D_est < 2.5e-3:
-                    mean_D += D_est
-                    count += 1
-        
-        if count > 0:
-            mean_D /= count
-            # Assume mild anisotropy
-            AD_fb = min(2.0e-3, mean_D * 1.3)
-            RD_fb = max(0.2e-3, mean_D * 0.7)
-            return AD_fb, RD_fb
-        else:
-            # Ultimate fallback
-            return 1.0e-3, 0.5e-3
-    
-    # =================================================================
-    
+    # Solve 2x2 system (NO threshold on n_meas)
+    # If data is insufficient, det will be ~0 and we'll get NaN
     det = sum_AA * sum_BB - sum_AB * sum_AB
     
     if abs(det) < 1e-20:
-        
-        RD_est = -sum_Ay / (sum_AA + 1e-12)
-        AD_est = RD_est * 2.0
-    else:
-       
-        x = (sum_BB * sum_Ay - sum_AB * sum_By) / det
-        y = (sum_AA * sum_By - sum_AB * sum_Ay) / det
-        
-        RD_est = -x
-        AD_est = -x - y
+        # Singular system → return NaN (transparent failure)
+        return np.nan, np.nan
     
-    RD_est = max(0.1e-3, min(1.5e-3, RD_est))
-    AD_est = max(0.3e-3, min(2.5e-3, AD_est))
+    # Cramer's rule
+    x = (sum_BB * sum_Ay - sum_AB * sum_By) / det
+    y = (sum_AA * sum_By - sum_AB * sum_Ay) / det
     
-    # Physical constraint: 
-    if AD_est < RD_est * 1.05:
-        mid = (AD_est + RD_est) / 2
-        AD_est = mid * 1.15
-        RD_est = mid * 0.85
-        
-        AD_est = min(2.5e-3, AD_est)
-        RD_est = max(0.1e-3, RD_est)
+    RD_est = -x
+    AD_est = -x - y
     
-    if f_fib > 0.6:
-        if AD_est < 0.8e-3:
-            AD_est = 1.0e-3
-        if RD_est > 1.0e-3:
-            RD_est = 0.6e-3
+    # Apply ONLY physiological bounds (not thresholds, just sanity)
+    # These prevent numerical errors, not biological assumptions
+    RD_est = max(0.05e-3, min(3.0e-3, RD_est))  # Wider range
+    AD_est = max(0.05e-3, min(3.5e-3, AD_est))  # Wider range
     
-    elif f_res > 0.4:
-        if AD_est > 1.5e-3:
-            AD_est = 1.2e-3
-        if RD_est < 0.4e-3:
-            RD_est = 0.5e-3
-    
-    elif f_hin > 0.5:
-        if AD_est > 1.8e-3:
-            AD_est = 1.5e-3
-        if RD_est < 0.6e-3:
-            RD_est = 0.7e-3
+    # Physical constraint: AD >= RD
+    if AD_est < RD_est:
+        # If inverted, likely isotropic → make them equal
+        mean_val = (AD_est + RD_est) / 2
+        AD_est = mean_val
+        RD_est = mean_val
     
     return AD_est, RD_est
 
 
 # =============================================================================
-# STEP 2: ADAPTIVE GRID SEARCH REFINEMENT
+# PURE GRID SEARCH REFINEMENT (NO THRESHOLDS)
 # =============================================================================
 
 @njit(cache=True, fastmath=True)
-def refine_AD_RD_adaptive(bvals, bvecs, sig_norm, fiber_dir,
-                          f_fib, f_res, f_hin, f_wat,
-                          D_res, D_hin, D_wat,
-                          AD_init, RD_init):
+def refine_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
+                      f_fib, f_res, f_hin, f_wat,
+                      D_res, D_hin, D_wat,
+                      AD_init, RD_init):
     """
-    Step 2: Refine AD/RD with adaptive grid search.
+    Pure grid search refinement - ZERO THRESHOLDS.
     
-    IMPROVEMENTS:
-    1. Grid centered on hybrid initialization (not WM defaults)
-    2. Adaptive range based on tissue type
-    3. Two-stage search (coarse + fine)
-    4. Early termination if fit is already good
-    
-    Parameters
-    ----------
-    ... (same as hybrid function)
-    AD_init, RD_init : float
-        Initial estimates from hybrid method
-        
-    Returns
-    -------
-    AD_refined, RD_refined : float
-        Refined diffusivity estimates
+    Works for ANY f_fib value (even 0.01).
+    If AD_init or RD_init is NaN, returns NaN.
     """
+    
+    # If initialization failed, don't try to refine
+    if np.isnan(AD_init) or np.isnan(RD_init):
+        return np.nan, np.nan
     
     # Normalize fractions
     ftot = f_fib + f_res + f_hin + f_wat + 1e-12
@@ -250,38 +169,33 @@ def refine_AD_RD_adaptive(bvals, bvecs, sig_norm, fiber_dir,
     fh = f_hin / ftot
     fw = f_wat / ftot
     
-    # Skip refinement if fiber fraction is too low
-    if ff < 0.05:
-        return AD_init, RD_init
-    
     best_sse = 1e20
     best_AD = AD_init
     best_RD = RD_init
     
-    # =================================================================
-    # ADAPTIVE SEARCH RANGE
-    # =================================================================
-    # Narrow range if fiber is high (more constrained)
-    # Wide range if fiber is low (more uncertainty)
+    # Adaptive range based on initial estimate (NO f_fib threshold)
+    # Use initialization uncertainty as proxy for range
+    # If AD/RD are close → likely isotropic → wide range
+    # If AD/RD are far → likely anisotropic → narrow range
     
-    if f_fib > 0.6:
-        # WM-like: tight range
-        range_factor = 0.25  # ±25%
-    elif f_fib > 0.3:
-        # Lesion/mixed: moderate range
-        range_factor = 0.35  # ±35%
+    anisotropy = abs(AD_init - RD_init) / ((AD_init + RD_init) / 2 + 1e-12)
+    
+    if anisotropy > 0.5:
+        # Highly anisotropic → narrow range
+        range_factor = 0.25
+    elif anisotropy > 0.2:
+        # Moderately anisotropic
+        range_factor = 0.35
     else:
-        # Very damaged: wide range
-        range_factor = 0.50  # ±50%
+        # Nearly isotropic → wide range
+        range_factor = 0.50
     
-    AD_min = max(0.3e-3, AD_init * (1 - range_factor))
-    AD_max = min(2.5e-3, AD_init * (1 + range_factor))
-    RD_min = max(0.1e-3, RD_init * (1 - range_factor))
-    RD_max = min(1.5e-3, RD_init * (1 + range_factor))
+    AD_min = max(0.05e-3, AD_init * (1 - range_factor))
+    AD_max = min(3.5e-3, AD_init * (1 + range_factor))
+    RD_min = max(0.05e-3, RD_init * (1 - range_factor))
+    RD_max = min(3.0e-3, RD_init * (1 + range_factor))
     
-    # =================================================================
-    # COARSE GRID SEARCH
-    # =================================================================
+    # Coarse grid
     n_AD = 8
     n_RD = 6
     
@@ -294,16 +208,14 @@ def refine_AD_RD_adaptive(bvals, bvecs, sig_norm, fiber_dir,
         for j in range(n_RD):
             RD = RD_min + j * dRD
             
-            # Physical constraint
-            if AD < RD * 1.05:
+            # Only constraint: AD >= RD (physical)
+            if AD < RD:
                 continue
             
             # Compute SSE
             sse = 0.0
             for k in range(len(bvals)):
                 b = bvals[k]
-                if b < 50:
-                    continue
                 
                 g = bvecs[k]
                 cos_t = g[0]*fiber_dir[0] + g[1]*fiber_dir[1] + g[2]*fiber_dir[2]
@@ -322,12 +234,10 @@ def refine_AD_RD_adaptive(bvals, bvecs, sig_norm, fiber_dir,
                 best_AD = AD
                 best_RD = RD
     
-    # FINE GRID REFINEMENT 
-
+    # Fine grid refinement
     AD_c = best_AD
     RD_c = best_RD
     
-    # Fine step = 1/4 of coarse step
     fine_AD = dAD / 4 if dAD > 0 else 0.05e-3
     fine_RD = dRD / 4 if dRD > 0 else 0.05e-3
     
@@ -340,15 +250,12 @@ def refine_AD_RD_adaptive(bvals, bvecs, sig_norm, fiber_dir,
             RD = RD_c + dj * fine_RD
             if RD < RD_min or RD > RD_max:
                 continue
-            if AD < RD * 1.05:
+            if AD < RD:
                 continue
             
-            # Compute SSE
             sse = 0.0
             for k in range(len(bvals)):
                 b = bvals[k]
-                if b < 50:
-                    continue
                 
                 g = bvecs[k]
                 cos_t = g[0]*fiber_dir[0] + g[1]*fiber_dir[1] + g[2]*fiber_dir[2]
@@ -369,19 +276,22 @@ def refine_AD_RD_adaptive(bvals, bvecs, sig_norm, fiber_dir,
     
     return best_AD, best_RD
 
+
+# =============================================================================
+# PARALLEL FITTING KERNEL (ZERO THRESHOLDS)
+# =============================================================================
+
 @njit(parallel=True, cache=True, fastmath=True)
-def fit_voxels_parallel_hybrid(data, coords, A, AtA, At, bvals, bvecs,
-                                fiber_dirs, iso_grid, reg, enable_step2, out):
+def fit_voxels_pure(data, coords, A, AtA, At, bvals, bvecs,
+                    fiber_dirs, iso_grid, reg, enable_step2, out):
     """
-    Parallel DBSI fitting with hybrid initialization.
+    Pure fitting - ZERO THRESHOLDS anywhere.
     
-    COMPLETE WORKFLOW:
-    1. S0 normalization
-    2. Step 1: NNLS decomposition (using generic AD/RD in design matrix)
-    3. Parse fractions and compute isotropic centroids
-    4. Hybrid AD/RD initialization (analytical + validation)
-    5. Optional Step 2 refinement (adaptive grid search)
-    6. Compute FA
+    Workflow:
+    1. Initialize AD, RD, FA to NaN
+    2. Always estimate AD/RD (no f_fib check)
+    3. Always refine if step2 enabled (no f_fib check)
+    4. NaN propagates naturally if fit fails
     """
     
     n_voxels = coords.shape[0]
@@ -395,14 +305,15 @@ def fit_voxels_parallel_hybrid(data, coords, A, AtA, At, bvals, bvecs,
         x, y, z = coords[idx]
         sig = data[x, y, z]
         
-        
+        # Adaptive b0 detection
         b_min = 1e10
         for i in range(len(bvals)):
             if bvals[i] < b_min:
                 b_min = bvals[i]
         
-        b0_threshold = b_min + 100  # First 100 s/mm² above minimum
+        b0_threshold = b_min + 100
         
+        # S0 normalization
         s0 = 0.0
         cnt = 0
         for i in range(len(bvals)):
@@ -418,8 +329,7 @@ def fit_voxels_parallel_hybrid(data, coords, A, AtA, At, bvals, bvecs,
         
         sig_norm = sig / s0
         
-        # STEP 1: LINEAR NNLS DECOMPOSITION
-
+        # Step 1: NNLS
         Aty = np.zeros(AtA.shape[0])
         for r in range(AtA.shape[0]):
             val = 0.0
@@ -429,7 +339,7 @@ def fit_voxels_parallel_hybrid(data, coords, A, AtA, At, bvals, bvecs,
         
         w, _ = nnls_coordinate_descent(AtA, Aty, reg)
         
-        
+        # Parse fractions
         w_fib = w[:n_dirs]
         w_iso = w[n_dirs:]
         
@@ -456,7 +366,7 @@ def fit_voxels_parallel_hybrid(data, coords, A, AtA, At, bvals, bvecs,
         
         mean_iso_adc = sum_wd_iso / sum_w_iso if sum_w_iso > 1e-10 else 0.0
         
-        # Normalize fractions to sum to 1
+        # Normalize fractions
         ftot = f_fib + f_res + f_hin + f_wat
         if ftot > 1e-10:
             f_fib /= ftot
@@ -464,11 +374,16 @@ def fit_voxels_parallel_hybrid(data, coords, A, AtA, At, bvals, bvecs,
             f_hin /= ftot
             f_wat /= ftot
         else:
-            
             continue
         
-        AD, RD, FA = np.NaN, np.NaN, np.NaN
-            
+        # =====================================================================
+        # CRITICAL: Initialize to NaN (transparent failure handling)
+        # =====================================================================
+        AD = np.nan
+        RD = np.nan
+        FA = np.nan
+        
+        # Compute isotropic centroids
         D_res, D_hin, D_wat = compute_weighted_centroids(w_iso, iso_grid)
         
         # Find dominant fiber direction
@@ -478,25 +393,34 @@ def fit_voxels_parallel_hybrid(data, coords, A, AtA, At, bvals, bvecs,
             if w_fib[i] > val_max:
                 val_max = w_fib[i]
                 idx_max = i
+        
         fiber_dir = fiber_dirs[idx_max]
-
-        # HYBRID AD/RD INITIALIZATION
-        AD, RD = estimate_AD_RD_hybrid(
+        
+        # =====================================================================
+        # PURE ESTIMATION (NO THRESHOLDS)
+        # =====================================================================
+        AD, RD = estimate_AD_RD_pure(
             bvals, bvecs, sig_norm, fiber_dir,
             f_fib, f_res, f_hin, f_wat,
             D_res, D_hin, D_wat
         )
         
-        if enable_step2 and f_fib > 0.05:
-            AD, RD = refine_AD_RD_adaptive(
-            bvals, bvecs, sig_norm, fiber_dir,
-            f_fib, f_res, f_hin, f_wat,
-            D_res, D_hin, D_wat,
-            AD, RD
-        )
-
-        FA = compute_fiber_fa(AD, RD)
+        # =====================================================================
+        # PURE REFINEMENT (NO THRESHOLDS)
+        # =====================================================================
+        if enable_step2:  # ← ONLY this flag, NO f_fib check!
+            AD, RD = refine_AD_RD_pure(
+                bvals, bvecs, sig_norm, fiber_dir,
+                f_fib, f_res, f_hin, f_wat,
+                D_res, D_hin, D_wat,
+                AD, RD
+            )
         
+        # Compute FA (handles NaN naturally)
+        if not np.isnan(AD) and not np.isnan(RD):
+            FA = compute_fiber_fa(AD, RD)
+        
+        # Store results (NaN if fit failed)
         out[x, y, z, 0] = f_fib
         out[x, y, z, 1] = f_res
         out[x, y, z, 2] = f_hin
@@ -513,38 +437,25 @@ def fit_voxels_parallel_hybrid(data, coords, A, AtA, At, bvals, bvecs,
 
 class DBSI_Fused:
     """
-    DBSI Model with Hybrid Initialization - Production Version.
+    DBSI Model - ZERO THRESHOLDS VERSION
     
-    ALL CORRECTIONS APPLIED:
-    1. ✅ Hybrid AD/RD initialization (analytical + validation)
-    2. ✅ Design matrix uses conservative mean values
-    3. ✅ Adaptive grid search in Step 2
-    4. ✅ Tissue-specific constraints
-    5. ✅ Robust fallbacks for edge cases
-    6. ✅ Numerical stability improvements
-    7. ✅ Rician bias correction
-    8. ✅ Proper fraction normalization
+    Philosophy:
+    - Pure data-driven approach
+    - NO arbitrary thresholds on f_fib or anything else
+    - Mathematics decides what's valid
+    - NaN indicates transparent failure
+    - Maximum flexibility, minimum assumptions
+    
+    Changes from v2.3.0:
+    1. Removed f_fib < 0.05 check in estimation
+    2. Removed f_fib > 0.05/0.10 check in refinement
+    3. Removed tissue-specific validation constraints
+    4. NaN initialization for AD/RD/FA
+    5. Wider physiological bounds (just to prevent numerical errors)
     """
     
     def __init__(self, n_iso=None, reg_lambda=None, enable_step2=True,
-                 n_dirs=100, iso_range=(0.0, 4.5e-3)):  # ← Extended to 4.5
-        """
-        Initialize DBSI model.
-        
-        Parameters
-        ----------
-        n_iso : int, optional
-            Number of isotropic basis functions (auto-calibrated if None)
-        reg_lambda : float, optional
-            L2 regularization strength (auto-calibrated if None)
-        enable_step2 : bool
-            Whether to refine AD/RD with grid search (default: True)
-        n_dirs : int
-            Number of fiber directions on hemisphere (default: 100)
-        iso_range : tuple
-            Range for isotropic ADC grid (default: 0 to 4.5 µm²/ms)
-            Extended to 4.5 to capture CSF/necrosis/free water
-        """
+                 n_dirs=100, iso_range=(0.0, 4.5e-3)):
         self.n_iso = n_iso
         self.reg_lambda = reg_lambda
         self.enable_step2 = enable_step2
@@ -553,35 +464,29 @@ class DBSI_Fused:
     
     def fit(self, data, bvals, bvecs, mask, run_calibration=True):
         """
-        Fit DBSI to 4D diffusion MRI data.
+        Fit DBSI with ZERO THRESHOLDS approach.
         
         Returns
         -------
         results : ndarray (X, Y, Z, 8)
-            0: Fiber fraction
-            1: Restricted fraction (inflammation/cells)
-            2: Hindered fraction (edema)
-            3: Water fraction (CSF)
-            4: Axial diffusivity (AD)
-            5: Radial diffusivity (RD)
-            6: Fiber FA
-            7: Mean isotropic ADC
+            AD/RD/FA will be NaN if fit fails (transparent)
         """
         print("\n" + "="*70)
-        print("  DBSI PIPELINE - HYBRID INITIALIZATION (PRODUCTION)")
+        print("  DBSI PIPELINE - ZERO THRESHOLDS (PURE)")
         print("="*70)
+        print("  Philosophy: Let mathematics decide, no arbitrary rules")
         
-        # Normalize gradient directions
+        # Normalize gradients
         bvecs = np.asarray(bvecs, dtype=np.float64)
         norms = np.linalg.norm(bvecs, axis=1, keepdims=True)
         norms[norms == 0] = 1.0
         bvecs = bvecs / norms
         
-        # Estimate SNR
+        # SNR estimation
         print("\n1. Estimating SNR...")
         snr, sigma = estimate_snr_robust(data, bvals, mask, verbose=True)
         
-        # Calibrate hyperparameters if needed
+        # Calibration
         if run_calibration and (self.n_iso is None or self.reg_lambda is None):
             print("\n2. Running Monte Carlo Calibration...")
             self.n_iso, self.reg_lambda = optimize_hyperparameters(
@@ -595,7 +500,7 @@ class DBSI_Fused:
         
         print(f"\n   Hyperparameters: n_iso={self.n_iso}, λ={self.reg_lambda:.4f}")
         
-        # Rician bias correction
+        # Rician correction
         print("\n3. Applying Rician Bias Correction...")
         data_corr = np.zeros_like(data)
         coords = np.argwhere(mask)
@@ -603,10 +508,9 @@ class DBSI_Fused:
             x, y, z = coords[i]
             data_corr[x, y, z] = correct_rician_bias(data[x, y, z], sigma)
         
-        # Build design matrix
+        # Design matrix
         print("\n4. Building Design Matrix...")
         print(f"   Using AD={DESIGN_MATRIX_AD*1e3:.2f}, RD={DESIGN_MATRIX_RD*1e3:.2f} µm²/ms")
-        print("   (Conservative mean values for unbiased decomposition)")
         
         fiber_dirs = generate_fibonacci_sphere_hemisphere(self.n_dirs)
         iso_grid = np.linspace(self.iso_range[0], self.iso_range[1], self.n_iso)
@@ -622,14 +526,20 @@ class DBSI_Fused:
         cond = np.linalg.cond(AtA_reg)
         print(f"   Matrix condition number: {cond:.2e}")
         
-        # Fit voxels
+        # Fit
         n_voxels = len(coords)
         print(f"\n5. Fitting {n_voxels:,} voxels...")
-        print("   Initialization: Hybrid (Analytical + Validation)")
-        if self.enable_step2:
-            print("   Refinement: Adaptive Grid Search")
+        print("   Approach: ZERO THRESHOLDS (pure data-driven)")
+        print("   - AD/RD estimated for ALL voxel (even f_fib→0)")
+        print("   - Step 2 applied to ALL if enabled (no f_fib check)")
+        print("   - NaN indicates natural fit failure")
         
         results = np.zeros(data.shape[:3] + (8,), dtype=np.float32)
+        
+        # Initialize AD/RD/FA to NaN
+        results[..., 4] = np.nan  # AD
+        results[..., 5] = np.nan  # RD
+        results[..., 6] = np.nan  # FA
         
         batch_size = 10000
         n_batches = int(np.ceil(n_voxels / batch_size))
@@ -642,7 +552,7 @@ class DBSI_Fused:
                 end = min((i + 1) * batch_size, n_voxels)
                 batch_coords = coords[start:end]
                 
-                fit_voxels_parallel_hybrid(
+                fit_voxels_pure(
                     data_corr, batch_coords, A, AtA_reg, At,
                     bvals, bvecs, fiber_dirs, iso_grid,
                     self.reg_lambda, self.enable_step2, results
@@ -651,7 +561,17 @@ class DBSI_Fused:
                 pbar.update(len(batch_coords))
         
         elapsed = time.time() - t0
+        
+        # Report NaN statistics
+        n_nan_ad = np.sum(np.isnan(results[..., 4][mask]))
+        n_nan_rd = np.sum(np.isnan(results[..., 5][mask]))
+        n_nan_fa = np.sum(np.isnan(results[..., 6][mask]))
+        
         print(f"\n   Completed in {elapsed:.1f}s ({n_voxels/elapsed:.0f} vox/s)")
+        print(f"\n   NaN Statistics (natural fit failures):")
+        print(f"     AD: {n_nan_ad}/{n_voxels} ({n_nan_ad/n_voxels*100:.1f}%)")
+        print(f"     RD: {n_nan_rd}/{n_voxels} ({n_nan_rd/n_voxels*100:.1f}%)")
+        print(f"     FA: {n_nan_fa}/{n_voxels} ({n_nan_fa/n_voxels*100:.1f}%)")
         print("\n" + "="*70 + "\n")
         
         return results

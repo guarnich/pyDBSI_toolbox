@@ -29,7 +29,7 @@ from utils.tools import estimate_snr_robust, correct_rician_bias
 
 
 DESIGN_MATRIX_AD = 1.5e-3  # Mean of physiological range [0.5, 2.5]
-DESIGN_MATRIX_RD = 0.5e-3  # Conservative mean [0.1, 1.5] → use 0.5 as compromise
+DESIGN_MATRIX_RD = 0.5e-3  # Conservative mean [0.1, 1.5] 
 
 
 # AD/RD INITIALIZATION
@@ -180,11 +180,6 @@ def estimate_AD_RD_hybrid(bvals, bvecs, sig_norm, fiber_dir,
         RD_est = -x
         AD_est = -x - y
     
-    # =================================================================
-    # APPLY PHYSIOLOGICAL CONSTRAINTS
-    # =================================================================
-    
-    
     RD_est = max(0.1e-3, min(1.5e-3, RD_est))
     AD_est = max(0.3e-3, min(2.5e-3, AD_est))
     
@@ -197,27 +192,19 @@ def estimate_AD_RD_hybrid(bvals, bvecs, sig_norm, fiber_dir,
         AD_est = min(2.5e-3, AD_est)
         RD_est = max(0.1e-3, RD_est)
     
-    # High fiber (>60%) → likely WM-like
     if f_fib > 0.6:
-        # AD should be reasonably high (> 0.8)
         if AD_est < 0.8e-3:
             AD_est = 1.0e-3
-        # RD should be reasonably low (< 1.0)
         if RD_est > 1.0e-3:
             RD_est = 0.6e-3
     
-    # High restricted (>40%) → likely lesion
     elif f_res > 0.4:
-        # AD often reduced in lesions
         if AD_est > 1.5e-3:
             AD_est = 1.2e-3
-        # RD often increased
         if RD_est < 0.4e-3:
             RD_est = 0.5e-3
     
-    # High hindered (>50%) → likely edema
     elif f_hin > 0.5:
-        # Both diffusivities tend to be elevated but close
         if AD_est > 1.8e-3:
             AD_est = 1.5e-3
         if RD_est < 0.6e-3:
@@ -381,7 +368,6 @@ def refine_AD_RD_adaptive(bvals, bvecs, sig_norm, fiber_dir,
                 best_RD = RD
     
     return best_AD, best_RD
-
 
 @njit(parallel=True, cache=True, fastmath=True)
 def fit_voxels_parallel_hybrid(data, coords, A, AtA, At, bvals, bvecs,

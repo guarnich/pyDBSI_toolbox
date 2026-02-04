@@ -9,7 +9,6 @@ Contains the mathematical core of the DBSI implementation:
 - Fiber FA computation
 """
 
-# OPTION 1: Absolute imports (RECOMMENDED for GitHub/server)
 from dbsi_toolbox.core.basis import (
     build_design_matrix,
     generate_fibonacci_sphere_hemisphere,

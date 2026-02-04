@@ -1,14 +1,10 @@
 """
-DBSI Fusion Model - ZERO THRESHOLDS VERSION
+DBSI Model 
 
-PHILOSOPHY:
-- NO arbitrary thresholds anywhere
-- Pure data-driven approach
-- Let the mathematics decide
-- NaN initialization → transparent failure handling
+- Data-driven approach
+
 - Weighted regression naturally handles all cases
 
-Version: 2.4.0 (Zero Thresholds)
 """
 
 import numpy as np
@@ -31,9 +27,7 @@ DESIGN_MATRIX_AD = 1.5e-3
 DESIGN_MATRIX_RD = 0.5e-3
 
 
-# =============================================================================
-# PURE ANALYTICAL AD/RD ESTIMATION (NO THRESHOLDS)
-# =============================================================================
+# ANALYTICAL AD/RD ESTIMATION
 
 @njit(cache=True, fastmath=True)
 def estimate_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
@@ -58,14 +52,12 @@ def estimate_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
         Estimated diffusivities OR np.nan if fit fails
     """
     
-    # Normalize fractions (NO threshold checks)
     ftot = f_fib + f_res + f_hin + f_wat + 1e-12
     ff = f_fib / ftot
     fr = f_res / ftot
     fh = f_hin / ftot
     fw = f_wat / ftot
     
-    # Build weighted least squares system
     sum_AA = 0.0
     sum_AB = 0.0
     sum_BB = 0.0
@@ -80,15 +72,12 @@ def estimate_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
         if S_total < 0.01:
             S_total = 0.01
         
-        # Subtract isotropic contributions
         S_iso = (fr * np.exp(-b * D_res) +
                  fh * np.exp(-b * D_hin) +
                  fw * np.exp(-b * D_wat))
         
-        # Isolate fiber component
         S_fiber = (S_total - S_iso) / (ff + 1e-12)
         
-        # Clamp to valid range
         if S_fiber < 0.01:
             S_fiber = 0.01
         if S_fiber > 1.0:
@@ -101,8 +90,7 @@ def estimate_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
         cos_t = g[0]*fiber_dir[0] + g[1]*fiber_dir[1] + g[2]*fiber_dir[2]
         cos2 = cos_t * cos_t
         
-        # Automatic weighting (handles all cases naturally)
-        w = S_total * b  # b0 → w=0 automatically
+        w = S_total * b  
         
         # Accumulate
         sum_AA += w * b * b
@@ -112,8 +100,6 @@ def estimate_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
         sum_By += w * b * cos2 * log_S
         n_meas += 1
     
-    # Solve 2x2 system (NO threshold on n_meas)
-    # If data is insufficient, det will be ~0 and we'll get NaN
     det = sum_AA * sum_BB - sum_AB * sum_AB
     
     if abs(det) < 1e-20:
@@ -127,8 +113,7 @@ def estimate_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
     RD_est = -x
     AD_est = -x - y
     
-    # Apply ONLY physiological bounds (not thresholds, just sanity)
-    # These prevent numerical errors, not biological assumptions
+    
     RD_est = max(0.05e-3, min(3.0e-3, RD_est))  # Wider range
     AD_est = max(0.05e-3, min(3.5e-3, AD_est))  # Wider range
     
@@ -142,9 +127,7 @@ def estimate_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
     return AD_est, RD_est
 
 
-# =============================================================================
-# PURE GRID SEARCH REFINEMENT (NO THRESHOLDS)
-# =============================================================================
+# GRID SEARCH REFINEMENT (NO THRESHOLDS)
 
 @njit(cache=True, fastmath=True)
 def refine_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
@@ -172,11 +155,6 @@ def refine_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
     best_sse = 1e20
     best_AD = AD_init
     best_RD = RD_init
-    
-    # Adaptive range based on initial estimate (NO f_fib threshold)
-    # Use initialization uncertainty as proxy for range
-    # If AD/RD are close → likely isotropic → wide range
-    # If AD/RD are far → likely anisotropic → narrow range
     
     anisotropy = abs(AD_init - RD_init) / ((AD_init + RD_init) / 2 + 1e-12)
     
@@ -276,10 +254,7 @@ def refine_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
     
     return best_AD, best_RD
 
-
-# =============================================================================
-# PARALLEL FITTING KERNEL (ZERO THRESHOLDS)
-# =============================================================================
+# PARALLEL FITTING KERNEL 
 
 @njit(parallel=True, cache=True, fastmath=True)
 def fit_voxels_pure(data, coords, A, AtA, At, bvals, bvecs,
@@ -376,9 +351,6 @@ def fit_voxels_pure(data, coords, A, AtA, At, bvals, bvecs,
         else:
             continue
         
-        # =====================================================================
-        # CRITICAL: Initialize to NaN (transparent failure handling)
-        # =====================================================================
         AD = np.nan
         RD = np.nan
         FA = np.nan

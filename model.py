@@ -9,8 +9,7 @@ COMPLETE CORRECTIONS:
 5. Rician bias correction before fitting
 6. Fraction normalization safeguards
 7. Numerical stability improvements
-
-Version: 2.3.0 (Production Ready)
+8. Tissue-specific constraints on AD/RD estimates
 """
 
 import numpy as np
@@ -19,14 +18,14 @@ import time
 from tqdm import tqdm
 
 # ABSOLUTE IMPORTS
-from dbsi_toolbox.core.basis import build_design_matrix, generate_fibonacci_sphere_hemisphere
-from dbsi_toolbox.core.solvers import (
+from core.basis import build_design_matrix, generate_fibonacci_sphere_hemisphere
+from core.solvers import (
     nnls_coordinate_descent,
     compute_weighted_centroids,
     compute_fiber_fa
 )
-from dbsi_toolbox.calibration.optimizer import optimize_hyperparameters
-from dbsi_toolbox.utils.tools import estimate_snr_robust, correct_rician_bias
+from calibration.optimizer import optimize_hyperparameters
+from utils.tools import estimate_snr_robust, correct_rician_bias
 
 
 # =============================================================================
@@ -522,32 +521,29 @@ def fit_voxels_parallel_hybrid(data, coords, A, AtA, At, bvals, bvecs,
             # Degenerate case
             continue
         
-        # =====================================================================
-        # COMPUTE ISOTROPIC CENTROIDS
-        # =====================================================================
-        D_res, D_hin, D_wat = compute_weighted_centroids(w_iso, iso_grid)
-        
-        # =====================================================================
-        # FIND DOMINANT FIBER DIRECTION
-        # =====================================================================
-        idx_max = 0
-        val_max = -1.0
-        for i in range(n_dirs):
-            if w_fib[i] > val_max:
-                val_max = w_fib[i]
-                idx_max = i
-        
-        fiber_dir = fiber_dirs[idx_max]
-        
-        # =====================================================================
-        # HYBRID AD/RD INITIALIZATION
-        # =====================================================================
-        AD, RD = estimate_AD_RD_hybrid(
-            bvals, bvecs, sig_norm, fiber_dir,
-            f_fib, f_res, f_hin, f_wat,
-            D_res, D_hin, D_wat
-        )
-        
+        if f_fib < 0.10:
+            # Nearly isotropic voxel (CSF, Necrosis, or pure Edema)
+            AD, RD, FA = 0.0, 0.0, 0.0
+        else:
+            
+            D_res, D_hin, D_wat = compute_weighted_centroids(w_iso, iso_grid)
+            
+            # Find dominant fiber direction
+            idx_max = 0
+            val_max = -1.0
+            for i in range(n_dirs):
+                if w_fib[i] > val_max:
+                    val_max = w_fib[i]
+                    idx_max = i
+            fiber_dir = fiber_dirs[idx_max]
+
+            # HYBRID AD/RD INITIALIZATION
+            AD, RD = estimate_AD_RD_hybrid(
+                bvals, bvecs, sig_norm, fiber_dir,
+                f_fib, f_res, f_hin, f_wat,
+                D_res, D_hin, D_wat
+            )
+            
         # =====================================================================
         # OPTIONAL STEP 2: REFINEMENT
         # =====================================================================

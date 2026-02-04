@@ -119,9 +119,7 @@ def estimate_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
     return AD_est, RD_est
 
 
-# =============================================================================
-# PURE GRID SEARCH REFINEMENT (NO THRESHOLDS)
-# =============================================================================
+#  GRID SEARCH 
 
 @njit(cache=True, fastmath=True)
 def refine_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,

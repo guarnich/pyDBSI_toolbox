@@ -467,10 +467,9 @@ def fit_voxels_parallel_hybrid(data, coords, A, AtA, At, bvals, bvecs,
             
             continue
         
-        if f_fib < 0.10:
-            # Nearly isotropic voxel (CSF, Necrosis, or pure Edema)
-            AD, RD, FA = 0.0, 0.0, 0.0
-        else:
+        AD, RD, FA = 0.0, 0.0, 0.0
+
+        if f_fib >= 0.10:
             
             D_res, D_hin, D_wat = compute_weighted_centroids(w_iso, iso_grid)
             

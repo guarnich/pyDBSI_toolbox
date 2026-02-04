@@ -467,37 +467,35 @@ def fit_voxels_parallel_hybrid(data, coords, A, AtA, At, bvals, bvecs,
             
             continue
         
-        AD, RD, FA = 0.0, 0.0, 0.0
+        AD, RD, FA = np.NaN, np.NaN, np.NaN
+            
+        D_res, D_hin, D_wat = compute_weighted_centroids(w_iso, iso_grid)
+        
+        # Find dominant fiber direction
+        idx_max = 0
+        val_max = -1.0
+        for i in range(n_dirs):
+            if w_fib[i] > val_max:
+                val_max = w_fib[i]
+                idx_max = i
+        fiber_dir = fiber_dirs[idx_max]
 
-        if f_fib >= 0.10:
-            
-            D_res, D_hin, D_wat = compute_weighted_centroids(w_iso, iso_grid)
-            
-            # Find dominant fiber direction
-            idx_max = 0
-            val_max = -1.0
-            for i in range(n_dirs):
-                if w_fib[i] > val_max:
-                    val_max = w_fib[i]
-                    idx_max = i
-            fiber_dir = fiber_dirs[idx_max]
+        # HYBRID AD/RD INITIALIZATION
+        AD, RD = estimate_AD_RD_hybrid(
+            bvals, bvecs, sig_norm, fiber_dir,
+            f_fib, f_res, f_hin, f_wat,
+            D_res, D_hin, D_wat
+        )
+        
+        if enable_step2 and f_fib > 0.05:
+            AD, RD = refine_AD_RD_adaptive(
+            bvals, bvecs, sig_norm, fiber_dir,
+            f_fib, f_res, f_hin, f_wat,
+            D_res, D_hin, D_wat,
+            AD, RD
+        )
 
-            # HYBRID AD/RD INITIALIZATION
-            AD, RD = estimate_AD_RD_hybrid(
-                bvals, bvecs, sig_norm, fiber_dir,
-                f_fib, f_res, f_hin, f_wat,
-                D_res, D_hin, D_wat
-            )
-            
-            if enable_step2 and f_fib > 0.05:
-                AD, RD = refine_AD_RD_adaptive(
-                bvals, bvecs, sig_norm, fiber_dir,
-                f_fib, f_res, f_hin, f_wat,
-                D_res, D_hin, D_wat,
-                AD, RD
-            )
-    
-            FA = compute_fiber_fa(AD, RD)
+        FA = compute_fiber_fa(AD, RD)
         
         out[x, y, z, 0] = f_fib
         out[x, y, z, 1] = f_res

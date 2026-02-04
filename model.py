@@ -371,7 +371,7 @@ def fit_voxels_pure(data, coords, A, AtA, At, bvals, bvecs,
         # =====================================================================
         # PURE ESTIMATION (NO THRESHOLDS)
         # =====================================================================
-        AD, RD = estimate_AD_RD_pure(
+        AD_linear, RD_linear = estimate_AD_RD_pure(
             bvals, bvecs, sig_norm, fiber_dir,
             f_fib, f_res, f_hin, f_wat,
             D_res, D_hin, D_wat
@@ -385,7 +385,7 @@ def fit_voxels_pure(data, coords, A, AtA, At, bvals, bvecs,
                 bvals, bvecs, sig_norm, fiber_dir,
                 f_fib, f_res, f_hin, f_wat,
                 D_res, D_hin, D_wat,
-                AD, RD
+                AD_linear, RD_linear
             )
         
         # Compute FA (handles NaN naturally)
@@ -401,6 +401,8 @@ def fit_voxels_pure(data, coords, A, AtA, At, bvals, bvecs,
         out[x, y, z, 5] = RD
         out[x, y, z, 6] = FA
         out[x, y, z, 7] = mean_iso_adc
+        out[x, y, z, 8] = AD_linear
+        out[x, y, z, 9] = RD_linear
 
 
 # =============================================================================

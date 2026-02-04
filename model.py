@@ -504,12 +504,13 @@ class DBSI_Fused:
         n_voxels = len(coords)
         print(f"\n5. Fitting {n_voxels:,} voxels...")
         
-        results = np.zeros(data.shape[:3] + (8,), dtype=np.float32)
+        results = np.zeros(data.shape[:3] + (10,), dtype=np.float32)
         
-        # Initialize AD/RD/FA to NaN
         results[..., 4] = np.nan  # AD
         results[..., 5] = np.nan  # RD
         results[..., 6] = np.nan  # FA
+        results[..., 8] = np.nan  # AD_linear
+        results[..., 9] = np.nan  # RD_linear
         
         batch_size = 10000
         n_batches = int(np.ceil(n_voxels / batch_size))

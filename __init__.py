@@ -33,7 +33,7 @@ Date: December 2025
 __version__ = "2.1.1"
 __author__ = "DBSI Toolbox Contributors"
 
-from .model import DBSI_Fused
+#from .model import DBSI_Fused
 from .model_adaptive_threshold import DBSI_Fused
 from .utils.tools import load_data, estimate_snr_robust, correct_rician_bias
 from .calibration.optimizer import optimize_hyperparameters

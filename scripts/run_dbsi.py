@@ -69,7 +69,8 @@ def main():
         'fiber_fa',
         'mean_iso_adc',
         'axial_diffusivity_linear',
-        'radial_diffusivity_linear'
+        'radial_diffusivity_linear',
+        'adaptive_threshold'
     ]
     
     print("\nSaving outputs...")

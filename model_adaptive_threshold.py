@@ -1,5 +1,11 @@
 """
-DBSI Model
+DBSI Model with Adaptive Threshold
+
+Key Features:
+- Simple SNR-based adaptive threshold
+- Pathology-aware adjustment (lesions get lower threshold)
+- Threshold output for full visibility (channel 10)
+- Minimal constraints, data-driven approach
 
 """
 
@@ -23,29 +29,97 @@ DESIGN_MATRIX_AD = 1.5e-3
 DESIGN_MATRIX_RD = 0.5e-3
 
 
-#  ANALYTICAL AD/RD ESTIMATION (NO THRESHOLDS)
+# ============================================================================
+# ADAPTIVE THRESHOLD LOGIC (Simple and Effective)
+# ============================================================================
+
+@njit(cache=True, fastmath=True)
+def compute_adaptive_threshold(snr_local, f_res):
+    """
+    Compute adaptive f_fib threshold based on:
+    1. Local SNR (data quality)
+    2. Restricted fraction (pathology marker)
+    
+    Philosophy:
+    - High SNR + healthy tissue → lower threshold (more permissive)
+    - Low SNR + pathology → higher threshold (more conservative)
+    
+    Parameters
+    ----------
+    snr_local : float
+        Estimated SNR from b0 temporal variation
+    f_res : float
+        Restricted fraction (inflammation/cellularity marker)
+        
+    Returns
+    -------
+    threshold : float
+        Adaptive threshold for f_fib
+        
+    Typical ranges:
+    - Healthy WM, high SNR: 0.15-0.20
+    - Lesions, medium SNR: 0.20-0.25
+    - Noisy data: 0.25-0.35
+    """
+    
+    # Base threshold from SNR (primary factor)
+    # SNR > 25: excellent data → 0.15
+    # SNR = 15: good data → 0.25
+    # SNR < 10: poor data → 0.35
+    
+    if snr_local > 25.0:
+        base_thresh = 0.15
+    elif snr_local > 20.0:
+        base_thresh = 0.18
+    elif snr_local > 15.0:
+        base_thresh = 0.22
+    elif snr_local > 12.0:
+        base_thresh = 0.28
+    else:
+        base_thresh = 0.35
+    
+    # Pathology adjustment
+    # High f_res (lesions) → slightly LOWER threshold
+    # Rationale: lesions may have f_fib = 0.15-0.25 with meaningful signal
+    # We don't want to throw away ALL lesion data
+    
+    if f_res > 0.35:
+        # Severe pathology (acute lesion)
+        pathology_adjustment = -0.03
+    elif f_res > 0.25:
+        # Moderate pathology
+        pathology_adjustment = -0.02
+    elif f_res > 0.15:
+        # Mild pathology
+        pathology_adjustment = -0.01
+    else:
+        # Healthy tissue
+        pathology_adjustment = 0.0
+    
+    threshold = base_thresh + pathology_adjustment
+    
+    # Safety bounds: never go below 0.10 or above 0.40
+    threshold = max(0.10, min(0.40, threshold))
+    
+    return threshold
+
+
+# ============================================================================
+# ANALYTICAL AD/RD ESTIMATION (unchanged)
+# ============================================================================
 
 @njit(cache=True, fastmath=True)
 def estimate_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
                         f_fib, f_res, f_hin, f_wat,
                         D_res, D_hin, D_wat):
-    """
-    Analytical AD/RD estimation
+    """Analytical AD/RD estimation (unchanged from before)"""
     
-    Returns
-    -------
-    AD_est, RD_est : float
-        Estimated diffusivities OR np.nan if fit fails
-    """
-    
-    # Normalize fractions (NO threshold checks)
     ftot = f_fib + f_res + f_hin + f_wat + 1e-12
     ff = f_fib / ftot
     fr = f_res / ftot
     fh = f_hin / ftot
     fw = f_wat / ftot
     
-    # Build weighted least squares system
     sum_AA = 0.0
     sum_AB = 0.0
     sum_BB = 0.0
@@ -60,15 +134,12 @@ def estimate_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
         if S_total < 0.01:
             S_total = 0.01
         
-        # Subtract isotropic contributions
         S_iso = (fr * np.exp(-b * D_res) +
                  fh * np.exp(-b * D_hin) +
                  fw * np.exp(-b * D_wat))
         
-        # Isolate fiber component
         S_fiber = (S_total - S_iso) / (ff + 1e-12)
         
-        # Clamp to valid range
         if S_fiber < 0.01:
             S_fiber = 0.01
         if S_fiber > 1.0:
@@ -76,14 +147,12 @@ def estimate_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
         
         log_S = np.log(S_fiber)
         
-        # Compute angle
         g = bvecs[i]
         cos_t = g[0]*fiber_dir[0] + g[1]*fiber_dir[1] + g[2]*fiber_dir[2]
         cos2 = cos_t * cos_t
         
         w = S_total * b  
         
-        # Accumulate
         sum_AA += w * b * b
         sum_AB += w * b * b * cos2
         sum_BB += w * b * b * cos2 * cos2
@@ -91,27 +160,21 @@ def estimate_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
         sum_By += w * b * cos2 * log_S
         n_meas += 1
     
-
     det = sum_AA * sum_BB - sum_AB * sum_AB
     
     if abs(det) < 1e-20:
-        # Singular system → return NaN (transparent failure)
         return np.nan, np.nan
     
-    # Cramer's rule
     x = (sum_BB * sum_Ay - sum_AB * sum_By) / det
     y = (sum_AA * sum_By - sum_AB * sum_Ay) / det
     
     RD_est = -x
     AD_est = -x - y
     
-    # Apply ONLY physiological bounds
-    RD_est = max(0.05e-3, min(3.0e-3, RD_est))  # Wider range
-    AD_est = max(0.05e-3, min(3.5e-3, AD_est))  # Wider range
+    RD_est = max(0.05e-3, min(3.0e-3, RD_est))
+    AD_est = max(0.05e-3, min(3.5e-3, AD_est))
     
-    # Physical constraint: AD >= RD
     if AD_est < RD_est:
-        # If inverted, likely isotropic → make them equal
         mean_val = (AD_est + RD_est) / 2
         AD_est = mean_val
         RD_est = mean_val
@@ -119,23 +182,20 @@ def estimate_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
     return AD_est, RD_est
 
 
-#  GRID SEARCH 
+# ============================================================================
+# GRID SEARCH REFINEMENT (unchanged)
+# ============================================================================
 
 @njit(cache=True, fastmath=True)
 def refine_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
                       f_fib, f_res, f_hin, f_wat,
                       D_res, D_hin, D_wat,
                       AD_init, RD_init):
-    """
+    """Grid search refinement (unchanged from before)"""
     
-    If AD_init or RD_init is NaN, returns NaN.
-    """
-    
-    # If initialization failed, don't try to refine
     if np.isnan(AD_init) or np.isnan(RD_init):
         return np.nan, np.nan
     
-    # Normalize fractions
     ftot = f_fib + f_res + f_hin + f_wat + 1e-12
     ff = f_fib / ftot
     fr = f_res / ftot
@@ -146,18 +206,13 @@ def refine_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
     best_AD = AD_init
     best_RD = RD_init
     
-    # Adaptive range based on initial estimate 
-    
     anisotropy = abs(AD_init - RD_init) / ((AD_init + RD_init) / 2 + 1e-12)
     
     if anisotropy > 0.5:
-        # Highly anisotropic → narrow range
         range_factor = 0.25
     elif anisotropy > 0.2:
-        # Moderately anisotropic
         range_factor = 0.35
     else:
-        # Nearly isotropic → wide range
         range_factor = 0.50
     
     AD_min = max(0.05e-3, AD_init * (1 - range_factor))
@@ -165,7 +220,6 @@ def refine_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
     RD_min = max(0.05e-3, RD_init * (1 - range_factor))
     RD_max = min(3.0e-3, RD_init * (1 + range_factor))
     
-    # Coarse grid
     n_AD = 8
     n_RD = 6
     
@@ -178,11 +232,9 @@ def refine_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
         for j in range(n_RD):
             RD = RD_min + j * dRD
             
-            # Only constraint: AD >= RD (physical)
             if AD < RD:
                 continue
             
-            # Compute SSE
             sse = 0.0
             for k in range(len(bvals)):
                 b = bvals[k]
@@ -204,7 +256,7 @@ def refine_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
                 best_AD = AD
                 best_RD = RD
     
-    # Fine grid refinement
+    # Fine grid
     AD_c = best_AD
     RD_c = best_RD
     
@@ -246,16 +298,29 @@ def refine_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
     
     return best_AD, best_RD
 
-# PARALLEL FITTING 
+
+# ============================================================================
+# PARALLEL FITTING KERNEL WITH ADAPTIVE THRESHOLD
+# ============================================================================
 
 @njit(parallel=True, cache=True, fastmath=True)
-def fit_voxels_pure(data, coords, A, AtA, At, bvals, bvecs,
-                    fiber_dirs, iso_grid, reg, enable_step2, out):
+def fit_voxels_adaptive(data, coords, A, AtA, At, bvals, bvecs,
+                        fiber_dirs, iso_grid, reg, enable_step2, out):
     """
+    Parallel fitting with adaptive threshold.
     
-    Output channels:
-    0-7: Standard DBSI outputs
-    8-9: AD_linear, RD_linear (before Step 2 refinement)
+    Output channels (11 total):
+    0: Fiber fraction
+    1: Restricted fraction
+    2: Hindered fraction
+    3: Water fraction
+    4: AD (final, after Step 2 if enabled)
+    5: RD (final, after Step 2 if enabled)
+    6: Fiber FA
+    7: Mean isotropic ADC
+    8: AD_linear (before Step 2)
+    9: RD_linear (before Step 2)
+    10: Adaptive threshold used (for visibility/debugging)
     """
     
     n_voxels = coords.shape[0]
@@ -293,7 +358,37 @@ def fit_voxels_pure(data, coords, A, AtA, At, bvals, bvecs,
         
         sig_norm = sig / s0
         
-        # Step 1: NNLS
+        # ===================================================================
+        # ESTIMATE LOCAL SNR FROM B0 TEMPORAL VARIATION
+        # ===================================================================
+        snr_local = 20.0  # Default
+        
+        if cnt >= 2:
+            # Compute temporal std of b0 volumes
+            b0_mean = 0.0
+            for i in range(len(bvals)):
+                if bvals[i] < b0_threshold:
+                    b0_mean += sig[i]
+            b0_mean /= cnt
+            
+            b0_var = 0.0
+            for i in range(len(bvals)):
+                if bvals[i] < b0_threshold:
+                    diff = sig[i] - b0_mean
+                    b0_var += diff * diff
+            b0_std = np.sqrt(b0_var / (cnt - 1 + 1e-12))
+            
+            if b0_std > 1e-6:
+                snr_local = b0_mean / b0_std
+            else:
+                snr_local = 30.0  # Very stable signal
+        
+        # Clamp SNR to reasonable range
+        snr_local = max(5.0, min(50.0, snr_local))
+        
+        # ===================================================================
+        # STEP 1: NNLS
+        # ===================================================================
         Aty = np.zeros(AtA.shape[0])
         for r in range(AtA.shape[0]):
             val = 0.0
@@ -340,18 +435,26 @@ def fit_voxels_pure(data, coords, A, AtA, At, bvals, bvecs,
         else:
             continue
         
-        # Step 2: Non-linear fit 
-
+        # ===================================================================
+        # COMPUTE ADAPTIVE THRESHOLD
+        # ===================================================================
+        adaptive_thresh = compute_adaptive_threshold(snr_local, f_res)
+        
+        # ===================================================================
+        # STEP 2: AD/RD ESTIMATION (conditional on threshold)
+        # ===================================================================
         AD = np.nan
         RD = np.nan
         FA = np.nan
         AD_linear = np.nan
         RD_linear = np.nan
-
-        if f_fib > 0.1:
         
+        # Only estimate AD/RD if f_fib exceeds adaptive threshold
+        if f_fib > adaptive_thresh:
+            
             D_res, D_hin, D_wat = compute_weighted_centroids(w_iso, iso_grid)
             
+            # Find dominant fiber direction
             idx_max = 0
             val_max = -1.0
             for i in range(n_dirs):
@@ -361,6 +464,7 @@ def fit_voxels_pure(data, coords, A, AtA, At, bvals, bvecs,
             
             fiber_dir = fiber_dirs[idx_max]
             
+            # Analytical estimation
             AD_linear, RD_linear = estimate_AD_RD_pure(
                 bvals, bvecs, sig_norm, fiber_dir,
                 f_fib, f_res, f_hin, f_wat,
@@ -370,6 +474,7 @@ def fit_voxels_pure(data, coords, A, AtA, At, bvals, bvecs,
             AD = AD_linear
             RD = RD_linear
             
+            # Optional refinement
             if enable_step2:  
                 AD, RD = refine_AD_RD_pure(
                     bvals, bvecs, sig_norm, fiber_dir,
@@ -378,25 +483,36 @@ def fit_voxels_pure(data, coords, A, AtA, At, bvals, bvecs,
                     AD_linear, RD_linear
                 )
             
+            # Compute FA if AD/RD valid
             if not np.isnan(AD) and not np.isnan(RD):
                 FA = compute_fiber_fa(AD, RD)
-            
-            out[x, y, z, 0] = f_fib
-            out[x, y, z, 1] = f_res
-            out[x, y, z, 2] = f_hin
-            out[x, y, z, 3] = f_wat
-            out[x, y, z, 4] = AD
-            out[x, y, z, 5] = RD
-            out[x, y, z, 6] = FA
-            out[x, y, z, 7] = mean_iso_adc
-            out[x, y, z, 8] = AD_linear 
-            out[x, y, z, 9] = RD_linear 
+        
+        # Store results
+        out[x, y, z, 0] = f_fib
+        out[x, y, z, 1] = f_res
+        out[x, y, z, 2] = f_hin
+        out[x, y, z, 3] = f_wat
+        out[x, y, z, 4] = AD
+        out[x, y, z, 5] = RD
+        out[x, y, z, 6] = FA
+        out[x, y, z, 7] = mean_iso_adc
+        out[x, y, z, 8] = AD_linear
+        out[x, y, z, 9] = RD_linear
+        out[x, y, z, 10] = adaptive_thresh  # VISIBILITY OUTPUT
 
+
+# ============================================================================
+# MAIN MODEL CLASS
+# ============================================================================
 
 class DBSI_Fused:
     """
-    DBSI Model
-
+    DBSI Model with Adaptive Threshold
+    
+    Simple, data-driven approach:
+    - SNR-based threshold adjustment
+    - Pathology-aware (lesions get slightly lower threshold)
+    - Full visibility via threshold output (channel 10)
     """
     
     def __init__(self, n_iso=None, reg_lambda=None, enable_step2=True,
@@ -409,28 +525,29 @@ class DBSI_Fused:
     
     def fit(self, data, bvals, bvecs, mask, run_calibration=True):
         """
-        Fit DBSI with ZERO THRESHOLDS approach.
+        Fit DBSI with adaptive threshold.
         
         Returns
         -------
-        results : ndarray (X, Y, Z, 10)
+        results : ndarray (X, Y, Z, 11)
             0: Fiber fraction
             1: Restricted fraction (inflammation/cells)
             2: Hindered fraction (edema)
             3: Water fraction (CSF)
-            4: Axial diffusivity (AD) - final (after Step 2 if enabled)
-            5: Radial diffusivity (RD) - final (after Step 2 if enabled)
+            4: Axial diffusivity (AD) - final
+            5: Radial diffusivity (RD) - final
             6: Fiber FA
             7: Mean isotropic ADC
-            8: AD_linear - from analytical estimation (before Step 2)
-            9: RD_linear - from analytical estimation (before Step 2)
+            8: AD_linear (analytical estimate)
+            9: RD_linear (analytical estimate)
+            10: Adaptive threshold used
             
-            AD/RD/FA will be NaN if fit fails
+        AD/RD/FA will be NaN if f_fib < adaptive_threshold
         """
         print("\n" + "="*70)
-        print("  DBSI PIPELINE  ")
+        print("  DBSI PIPELINE - ADAPTIVE THRESHOLD")
         print("="*70)
-
+        
         # Normalize gradients
         bvecs = np.asarray(bvecs, dtype=np.float64)
         norms = np.linalg.norm(bvecs, axis=1, keepdims=True)
@@ -483,19 +600,23 @@ class DBSI_Fused:
         
         # Fit
         n_voxels = len(coords)
-        print(f"\n5. Fitting {n_voxels:,} voxels...")
-        print("   Approach: ZERO THRESHOLDS (pure data-driven)")
-        print("   - AD/RD estimated for ALL voxel (even f_fib→0)")
-        print("   - Step 2 applied to ALL if enabled (no f_fib check)")
-        print("   - NaN indicates natural fit failure")
+        print(f"\n5. Fitting {n_voxels:,} voxels with ADAPTIVE THRESHOLD...")
+        print("   Threshold logic:")
+        print("     - High SNR (>25) + Healthy  → ~0.15 (permissive)")
+        print("     - Medium SNR (15-20)        → ~0.20")
+        print("     - Low SNR (<15)             → ~0.30 (conservative)")
+        print("     - Lesions (high f_res)      → -0.02 adjustment")
+        print("   See channel 10 for voxel-wise thresholds")
         
-        results = np.zeros(data.shape[:3] + (10,), dtype=np.float32) 
+        results = np.zeros(data.shape[:3] + (11,), dtype=np.float32)
         
+        # Initialize with NaN
         results[..., 4] = np.nan  # AD
         results[..., 5] = np.nan  # RD
         results[..., 6] = np.nan  # FA
         results[..., 8] = np.nan  # AD_linear
         results[..., 9] = np.nan  # RD_linear
+        results[..., 10] = np.nan  # Threshold
         
         batch_size = 10000
         n_batches = int(np.ceil(n_voxels / batch_size))
@@ -508,7 +629,7 @@ class DBSI_Fused:
                 end = min((i + 1) * batch_size, n_voxels)
                 batch_coords = coords[start:end]
                 
-                fit_voxels_pure(
+                fit_voxels_adaptive(
                     data_corr, batch_coords, A, AtA_reg, At,
                     bvals, bvecs, fiber_dirs, iso_grid,
                     self.reg_lambda, self.enable_step2, results
@@ -518,8 +639,22 @@ class DBSI_Fused:
         
         elapsed = time.time() - t0
         
-        
+        # Report threshold statistics
         print(f"\n   Completed in {elapsed:.1f}s ({n_voxels/elapsed:.0f} vox/s)")
+        
+        thresh_map = results[..., 10]
+        valid_thresh = thresh_map[mask]
+        valid_thresh = valid_thresh[~np.isnan(valid_thresh)]
+        
+        if len(valid_thresh) > 0:
+            print("\n   THRESHOLD STATISTICS:")
+            print(f"     Mean:   {np.mean(valid_thresh):.3f}")
+            print(f"     Median: {np.median(valid_thresh):.3f}")
+            print(f"     Min:    {np.min(valid_thresh):.3f}")
+            print(f"     Max:    {np.max(valid_thresh):.3f}")
+            print(f"     25th %: {np.percentile(valid_thresh, 25):.3f}")
+            print(f"     75th %: {np.percentile(valid_thresh, 75):.3f}")
+        
         print("\n" + "="*70 + "\n")
         
         return results

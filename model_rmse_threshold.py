@@ -503,9 +503,7 @@ def fit_voxels_rmse_threshold(data, coords, A, AtA, At, bvals, bvecs,
         out[x, y, z, 10] = adaptive_thresh
 
 
-# ============================================================================
 # MAIN MODEL CLASS
-# ============================================================================
 
 class DBSI_Fused:
     """
@@ -598,16 +596,7 @@ class DBSI_Fused:
         
         # Fit
         n_voxels = len(coords)
-        # print(f"\n5. Fitting {n_voxels:,} voxels with RMSE-BASED THRESHOLD...")
-        # print("   Threshold logic:")
-        # print("     - Excellent fit (RMSE < 0.05) → ~0.15 (permissive)")
-        # print("     - Good fit (RMSE 0.05-0.08)   → ~0.18")
-        # print("     - Fair fit (RMSE 0.08-0.12)   → ~0.22")
-        # print("     - Poor fit (RMSE 0.12-0.18)   → ~0.28")
-        # print("     - Very poor (RMSE > 0.18)     → ~0.35 (conservative)")
-        # print("     + Pathology adjustment (high f_res) → -0.02")
-        # print("     + Anisotropy adjustment (low f_fib/f_res) → +0.05")
-        # print("   See channel 10 for voxel-wise thresholds")
+        
         
         results = np.zeros(data.shape[:3] + (11,), dtype=np.float32)
         

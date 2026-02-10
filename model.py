@@ -472,8 +472,6 @@ class DBSI_Fused:
 
         # Design matrix
         print("\n4. Building Design Matrix...")
-        print(f"   AD={DESIGN_MATRIX_AD*1e3:.2f} µm²/ms, "
-              f"RD={DESIGN_MATRIX_RD*1e3:.2f} µm²/ms")
 
         fiber_dirs = generate_fibonacci_sphere_hemisphere(self.n_dirs)
         iso_grid   = np.linspace(self.iso_range[0], self.iso_range[1], self.n_iso)

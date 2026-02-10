@@ -1,10 +1,6 @@
 """
 DBSI Calibration: Hyperparameter Optimization
 
-Corrected Version:
-- Fixed ADC thresholds (0.3, 3.0)
-- Extended isotropic range
-- Uses hemisphere directions
 """
 
 import numpy as np

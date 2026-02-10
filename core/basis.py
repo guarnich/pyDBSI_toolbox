@@ -1,9 +1,6 @@
 """
 DBSI Basis Functions
 
-Implements:
-- Fibonacci sphere for fiber directions (hemisphere)
-- Design matrix construction with cylinder model
 """
 
 import numpy as np
@@ -16,7 +13,6 @@ def generate_fibonacci_sphere_hemisphere(n_points):
     
     Only returns points with z >= 0 to exploit antipodal symmetry.
     """
-    # Generate more points and filter to hemisphere
     n_full = n_points * 2 + 10
     
     golden_ratio = (1 + np.sqrt(5)) / 2
@@ -29,7 +25,6 @@ def generate_fibonacci_sphere_hemisphere(n_points):
     y = np.sin(phi) * np.sin(theta)
     z = np.cos(phi)
     
-    # Keep only hemisphere (z >= 0)
     mask = z >= 0
     x, y, z = x[mask], y[mask], z[mask]
     

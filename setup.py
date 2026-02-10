@@ -21,7 +21,7 @@ setup(
     description="Diffusion Basis Spectrum Imaging (DBSI) - Two-Step Implementation with Numba Acceleration",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/your-repo/dbsi-toolbox",
+    url="https://github.com/guarnich/pyDBSI_toolbox",
     packages=find_packages(),
     py_modules=["model"],
     classifiers=[

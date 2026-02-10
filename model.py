@@ -23,10 +23,7 @@ DESIGN_MATRIX_AD = 1.5e-3
 DESIGN_MATRIX_RD = 0.5e-3
 FIBER_THRESHOLD  = 0.15
 
-
-# ============================================================================
 # ANALYTICAL AD/RD ESTIMATION
-# ============================================================================
 
 @njit(cache=True, fastmath=True)
 def estimate_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
@@ -111,10 +108,7 @@ def estimate_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
 
     return AD_est, RD_est
 
-
-# ============================================================================
 # GRID SEARCH REFINEMENT
-# ============================================================================
 
 @njit(cache=True, fastmath=True)
 def refine_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
@@ -143,11 +137,11 @@ def refine_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
     anisotropy = abs(AD_init - RD_init) / ((AD_init + RD_init) / 2 + 1e-12)
 
     if anisotropy > 0.5:
-        range_factor = 0.25   # Highly anisotropic → narrow range
+        range_factor = 0.25   # Highly anisotropic 
     elif anisotropy > 0.2:
         range_factor = 0.35   # Moderate
     else:
-        range_factor = 0.50   # Nearly isotropic → wider range
+        range_factor = 0.50   # Nearly isotropic
 
     AD_min = max(0.05e-3, AD_init * (1 - range_factor))
     AD_max = min(3.5e-3,  AD_init * (1 + range_factor))
@@ -188,7 +182,7 @@ def refine_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
                 best_AD  = AD
                 best_RD  = RD
 
-    # --- Fine grid around best coarse solution ---
+    # --- Fine grid ---
     AD_c     = best_AD
     RD_c     = best_RD
     fine_AD  = dAD / 4 if dAD > 0 else 0.05e-3
@@ -228,9 +222,7 @@ def refine_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
     return best_AD, best_RD
 
 
-# ============================================================================
 # PARALLEL FITTING KERNEL
-# ============================================================================
 
 @njit(parallel=True, cache=True, fastmath=True)
 def fit_voxels_pure(data, coords, A, AtA, At, bvals, bvecs,
@@ -250,8 +242,7 @@ def fit_voxels_pure(data, coords, A, AtA, At, bvals, bvecs,
         8: AD_linear               — NaN if f_fib <= fiber_threshold
         9: RD_linear               — NaN if f_fib <= fiber_threshold
 
-    Note: fractions and mean_iso_adc are ALWAYS written regardless of
-    the fiber threshold, because they come from Step 1 and are always valid.
+
     """
 
     n_voxels = coords.shape[0]
@@ -265,9 +256,7 @@ def fit_voxels_pure(data, coords, A, AtA, At, bvals, bvecs,
         x, y, z = coords[idx]
         sig = data[x, y, z]
 
-        # ----------------------------------------------------------------
-        # Adaptive b0 detection
-        # ----------------------------------------------------------------
+        # b0 detection
         b_min = 1e10
         for i in range(len(bvals)):
             if bvals[i] < b_min:
@@ -290,9 +279,8 @@ def fit_voxels_pure(data, coords, A, AtA, At, bvals, bvecs,
 
         sig_norm = sig / s0
 
-        # ----------------------------------------------------------------
         # Step 1: NNLS decomposition
-        # ----------------------------------------------------------------
+
         Aty = np.zeros(AtA.shape[0])
         for r in range(AtA.shape[0]):
             val = 0.0
@@ -302,9 +290,6 @@ def fit_voxels_pure(data, coords, A, AtA, At, bvals, bvecs,
 
         w, _ = nnls_coordinate_descent(AtA, Aty, reg)
 
-        # ----------------------------------------------------------------
-        # Parse Step 1 fractions (ALWAYS valid)
-        # ----------------------------------------------------------------
         w_fib = w[:n_dirs]
         w_iso = w[n_dirs:]
 
@@ -341,18 +326,13 @@ def fit_voxels_pure(data, coords, A, AtA, At, bvals, bvecs,
         f_hin = f_hin_raw / ftot
         f_wat = f_wat_raw / ftot
 
-        # ----------------------------------------------------------------
-        # Write Step 1 outputs — ALWAYS, regardless of fiber threshold
-        # ----------------------------------------------------------------
         out[x, y, z, 0] = f_fib
         out[x, y, z, 1] = f_res
         out[x, y, z, 2] = f_hin
         out[x, y, z, 3] = f_wat
         out[x, y, z, 7] = mean_iso_adc
 
-        # ----------------------------------------------------------------
         # Step 2: AD/RD estimation — ONLY if f_fib > fiber_threshold
-        # ----------------------------------------------------------------
         if f_fib > fiber_threshold:
 
             D_res_c, D_hin_c, D_wat_c = compute_weighted_centroids(w_iso, iso_grid)
@@ -397,9 +377,7 @@ def fit_voxels_pure(data, coords, A, AtA, At, bvals, bvecs,
             out[x, y, z, 9] = RD_linear
 
 
-# ============================================================================
 # MAIN MODEL CLASS
-# ============================================================================
 
 class DBSI_Fused:
     """DBSI Model — fixed threshold on fiber fraction for AD/RD estimation."""

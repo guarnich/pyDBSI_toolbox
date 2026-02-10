@@ -1,12 +1,6 @@
 """
 DBSI Core Solvers - Numba-Compatible Version
 
-Key changes:
-1. step2_refine_diffusivities_adaptive - NEW function with explicit AD/RD params
-2. step2_refine_diffusivities - Legacy function (calls adaptive with defaults)
-
-Numba does NOT support optional parameters with default values, so we use
-two separate functions instead.
 """
 
 import numpy as np

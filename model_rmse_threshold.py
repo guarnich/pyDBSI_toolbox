@@ -541,7 +541,7 @@ class DBSI_Fused:
         AD/RD/FA will be NaN if f_fib < adaptive_threshold
         """
         print("\n" + "="*70)
-        print("  DBSI PIPELINE - RMSE-BASED ADAPTIVE THRESHOLD")
+        print("  DBSI PIPELINE  ")
         print("="*70)
         
         # Normalize gradients

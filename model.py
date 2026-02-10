@@ -348,7 +348,7 @@ def fit_voxels_pure(data, coords, A, AtA, At, bvals, bvecs,
         AD_linear = np.nan
         RD_linear = np.nan
 
-        if f_fib > 0.1:
+        if f_fib > 0.15:
         
             D_res, D_hin, D_wat = compute_weighted_centroids(w_iso, iso_grid)
             

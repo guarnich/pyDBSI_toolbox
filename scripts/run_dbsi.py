@@ -2,7 +2,7 @@
 """
 DBSI Fusion CLI
 
-Outputs (11 channels):
+Outputs (10 channels):
             0: Fiber fraction
             1: Restricted fraction (inflammation/cells)
             2: Hindered fraction (edema)
@@ -13,9 +13,8 @@ Outputs (11 channels):
             7: Mean isotropic ADC
             8: AD_linear (analytical estimate)
             9: RD_linear (analytical estimate)
-            10: Adaptive threshold (RMSE-based)
             
-        AD/RD/FA will be NaN if f_fib < adaptive_threshold
+        AD/RD/FA will be NaN if f_fib < f_fib threshold.
 """
 
 import argparse
@@ -74,9 +73,7 @@ def main():
         'fiber_fa',
         'mean_iso_adc',
         'ad_linear',
-        'rd_linear',
-        'adaptive_threshold'
-    ]
+        'rd_linear'    ]
     
     print("\nSaving outputs...")
     for i, name in enumerate(names):

@@ -2,15 +2,20 @@
 """
 DBSI Fusion CLI
 
-Outputs (8 channels):
-- fiber_fraction.nii.gz      : Apparent axonal density
-- restricted_fraction.nii.gz : Cellularity (ADC ≤ 0.3)
-- hindered_fraction.nii.gz   : Edema (0.3 < ADC ≤ 3.0)
-- water_fraction.nii.gz      : CSF (ADC > 3.0)
-- axial_diffusivity.nii.gz   : Fiber AD
-- radial_diffusivity.nii.gz  : Fiber RD
-- fiber_fa_intrinsic.nii.gz  : Fiber FA
-- mean_iso_adc.nii.gz        : Mean isotropic ADC
+Outputs (11 channels):
+            0: Fiber fraction
+            1: Restricted fraction (inflammation/cells)
+            2: Hindered fraction (edema)
+            3: Water fraction (CSF)
+            4: Axial diffusivity (AD) - final
+            5: Radial diffusivity (RD) - final
+            6: Fiber FA
+            7: Mean isotropic ADC
+            8: AD_linear (analytical estimate)
+            9: RD_linear (analytical estimate)
+            10: Adaptive threshold (RMSE-based)
+            
+        AD/RD/FA will be NaN if f_fib < adaptive_threshold
 """
 
 import argparse
@@ -68,8 +73,8 @@ def main():
         'radial_diffusivity',
         'fiber_fa',
         'mean_iso_adc',
-        'axial_diffusivity_linear',
-        'radial_diffusivity_linear',
+        'ad_linear',
+        'rd_linear',
         'adaptive_threshold'
     ]
     

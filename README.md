@@ -46,6 +46,24 @@ data, affine, bvals, bvecs, mask = load_data(
 model = DBSI_Fused(enable_step2=True)
 results = model.fit(data, bvals, bvecs, mask)
 
+map_names = [
+    'fiber_fraction', 
+    'restricted_fraction', 
+    'hindered_fraction', 
+    'water_fraction', 
+    'axial_diffusivity', 
+    'radial_diffusivity',
+    'fiber_fa_intrinsic', 
+    'mean_iso_adc',
+    'ad_linear',
+    'rd_linear'
+]
+
+for i, name in enumerate(map_names):
+    out_img = nib.Nifti1Image(results[..., i], affine)
+    fname = os.path.join(output_dir, f'dbsi_{name}.nii.gz')
+    nib.save(out_img, fname)
+
 ```
 
 ### Command Line

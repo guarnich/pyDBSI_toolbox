@@ -484,10 +484,7 @@ class DBSI_Fused:
         # Fit
         n_voxels = len(coords)
         print(f"\n5. Fitting {n_voxels:,} voxels...")
-        print("   Approach: ZERO THRESHOLDS (pure data-driven)")
-        print("   - AD/RD estimated for ALL voxel (even f_fib→0)")
-        print("   - Step 2 applied to ALL if enabled (no f_fib check)")
-        print("   - NaN indicates natural fit failure")
+        print("   Ad/RD estimation for f_fib > 0.15   ")
         
         results = np.zeros(data.shape[:3] + (10,), dtype=np.float32) 
         

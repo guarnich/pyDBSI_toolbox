@@ -37,16 +37,6 @@ def compute_adaptive_threshold_rmse(f_fib, f_res, rmse):
     """
     Compute adaptive threshold based on Step 1 fit quality.
     
-    Philosophy:
-    - Good RMSE → model fits data well → trust anisotropic component
-    - Poor RMSE → model doesn't fit → likely noise/artifact → be conservative
-    
-    This is MORE robust than SNR-based because:
-    1. Always available (RMSE computed anyway)
-    2. Intrinsic to data (no external noise estimation)
-    3. Detects ALL sources of misfit (noise, motion, model mismatch)
-    4. No assumptions about noise distribution
-    
     Parameters
     ----------
     f_fib : float
@@ -69,49 +59,34 @@ def compute_adaptive_threshold_rmse(f_fib, f_res, rmse):
     - Poor fit (RMSE 0.12-0.18): threshold = 0.28
     - Very poor fit (RMSE > 0.18): threshold = 0.35
     
-    Notes
-    -----
-    RMSE thresholds are calibrated for S/S0 normalized signal.
-    For raw signal, RMSE values would be ~100x higher.
     """
     
-    # ========================================================================
     # PRIMARY FACTOR: FIT QUALITY (RMSE)
     # ========================================================================
     # Lower RMSE = better fit = more permissive threshold
     # Higher RMSE = poor fit = more conservative threshold
     
     if rmse < 0.05:
-        # Excellent fit - model explains data very well
-        # Likely high SNR, good compliance, minimal motion
+       
         base_thresh = 0.15
         
     elif rmse < 0.08:
-        # Good fit - model explains data well
-        # Standard quality acquisition
+       
         base_thresh = 0.18
         
     elif rmse < 0.12:
-        # Fair fit - some unexplained variance
-        # Could be moderate noise or slight model mismatch
+        
         base_thresh = 0.22
         
     elif rmse < 0.18:
-        # Poor fit - significant unexplained variance
-        # High noise, motion, or partial volume
+        
         base_thresh = 0.28
         
     else:
-        # Very poor fit - model doesn't explain data
-        # Severe artifact, CSF contamination, or non-brain tissue
+        
         base_thresh = 0.35
     
-    # ========================================================================
     # SECONDARY FACTOR: PATHOLOGY ADJUSTMENT
-    # ========================================================================
-    # High f_res (inflammation) → slightly LOWER threshold
-    # Rationale: Lesions may have f_fib = 0.15-0.25 with meaningful structure
-    # We don't want to discard ALL pathological tissue
     
     if f_res > 0.35:
         # Severe pathology (acute MS lesion, tumor)
@@ -130,11 +105,7 @@ def compute_adaptive_threshold_rmse(f_fib, f_res, rmse):
         # Normal tissue
         pathology_adjustment = 0.0
     
-    # ========================================================================
     # TERTIARY FACTOR: ANISOTROPY RATIO
-    # ========================================================================
-    # If f_fib << f_res, likely no true fiber structure (dominated by cells)
-    # Make threshold MORE conservative to avoid fitting noise as anisotropy
     
     anisotropy_adjustment = 0.0
     
@@ -142,28 +113,22 @@ def compute_adaptive_threshold_rmse(f_fib, f_res, rmse):
         aniso_ratio = f_fib / (f_fib + f_res)
         
         if aniso_ratio < 0.3:
-            # f_fib < 0.3 * (f_fib + f_res)
-            # Isotropic component dominates → be more conservative
+            
             anisotropy_adjustment = 0.05
             
         elif aniso_ratio < 0.4:
-            # Moderate anisotropy
+            
             anisotropy_adjustment = 0.02
     
-    # ========================================================================
     # COMBINE FACTORS
-    # ========================================================================
     threshold = base_thresh + pathology_adjustment + anisotropy_adjustment
     
-    # Safety bounds: never go below 0.10 or above 0.40
+    # bounds: never go below 0.10 or above 0.40
     threshold = max(0.10, min(0.40, threshold))
     
     return threshold
 
-
-# ============================================================================
-# ANALYTICAL AD/RD ESTIMATION (unchanged)
-# ============================================================================
+# ANALYTICAL AD/RD ESTIMATION 
 
 @njit(cache=True, fastmath=True)
 def estimate_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
@@ -236,10 +201,7 @@ def estimate_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
     
     return AD_est, RD_est
 
-
-# ============================================================================
-# GRID SEARCH REFINEMENT (unchanged)
-# ============================================================================
+# GRID SEARCH REFINEMENT 
 
 @njit(cache=True, fastmath=True)
 def refine_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
@@ -353,9 +315,7 @@ def refine_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
     return best_AD, best_RD
 
 
-# ============================================================================
 # PARALLEL FITTING KERNEL WITH RMSE-BASED THRESHOLD
-# ============================================================================
 
 @njit(parallel=True, cache=True, fastmath=True)
 def fit_voxels_rmse_threshold(data, coords, A, AtA, At, bvals, bvecs,
@@ -413,9 +373,8 @@ def fit_voxels_rmse_threshold(data, coords, A, AtA, At, bvals, bvecs,
         
         sig_norm = sig / s0
         
-        # ===================================================================
         # STEP 1: NNLS FIT
-        # ===================================================================
+
         Aty = np.zeros(AtA.shape[0])
         for r in range(AtA.shape[0]):
             val = 0.0
@@ -425,10 +384,9 @@ def fit_voxels_rmse_threshold(data, coords, A, AtA, At, bvals, bvecs,
         
         w, _ = nnls_coordinate_descent(AtA, Aty, reg)
         
-        # ===================================================================
         # COMPUTE RMSE OF STEP 1 FIT
-        # ===================================================================
         # Predict signal from Step 1 weights
+
         sig_pred = np.zeros(n_meas)
         for i in range(n_meas):
             for j in range(len(w)):
@@ -443,9 +401,8 @@ def fit_voxels_rmse_threshold(data, coords, A, AtA, At, bvals, bvecs,
         # RMSE (normalized by number of measurements)
         rmse = np.sqrt(sse / n_meas)
         
-        # ===================================================================
         # PARSE FRACTIONS FROM STEP 1
-        # ===================================================================
+
         w_fib = w[:n_dirs]
         w_iso = w[n_dirs:]
         
@@ -482,14 +439,11 @@ def fit_voxels_rmse_threshold(data, coords, A, AtA, At, bvals, bvecs,
         else:
             continue
         
-        # ===================================================================
         # COMPUTE ADAPTIVE THRESHOLD (RMSE-BASED)
-        # ===================================================================
+
         adaptive_thresh = compute_adaptive_threshold_rmse(f_fib, f_res, rmse)
         
-        # ===================================================================
-        # STEP 2: AD/RD ESTIMATION (conditional on threshold)
-        # ===================================================================
+        # STEP 2: AD/RD ESTIMATION 
         AD = np.nan
         RD = np.nan
         FA = np.nan
@@ -557,17 +511,6 @@ class DBSI_Fused:
     """
     DBSI Model with RMSE-Based Adaptive Threshold.
     
-    Key Innovation:
-    - Threshold determined by Step 1 fit quality (RMSE)
-    - More robust than SNR-based (no external noise estimation)
-    - Always available (RMSE computed anyway)
-    - Intrinsic to the data (detects all sources of misfit)
-    
-    Advantages over SNR-based:
-    1. Independent of b0 count (works with 1 b0)
-    2. Robust to motion artifacts
-    3. No assumptions about noise distribution
-    4. Detects model mismatch, not just thermal noise
     """
     
     def __init__(self, n_iso=None, reg_lambda=None, enable_step2=True,
@@ -655,16 +598,16 @@ class DBSI_Fused:
         
         # Fit
         n_voxels = len(coords)
-        print(f"\n5. Fitting {n_voxels:,} voxels with RMSE-BASED THRESHOLD...")
-        print("   Threshold logic:")
-        print("     - Excellent fit (RMSE < 0.05) → ~0.15 (permissive)")
-        print("     - Good fit (RMSE 0.05-0.08)   → ~0.18")
-        print("     - Fair fit (RMSE 0.08-0.12)   → ~0.22")
-        print("     - Poor fit (RMSE 0.12-0.18)   → ~0.28")
-        print("     - Very poor (RMSE > 0.18)     → ~0.35 (conservative)")
-        print("     + Pathology adjustment (high f_res) → -0.02")
-        print("     + Anisotropy adjustment (low f_fib/f_res) → +0.05")
-        print("   See channel 10 for voxel-wise thresholds")
+        # print(f"\n5. Fitting {n_voxels:,} voxels with RMSE-BASED THRESHOLD...")
+        # print("   Threshold logic:")
+        # print("     - Excellent fit (RMSE < 0.05) → ~0.15 (permissive)")
+        # print("     - Good fit (RMSE 0.05-0.08)   → ~0.18")
+        # print("     - Fair fit (RMSE 0.08-0.12)   → ~0.22")
+        # print("     - Poor fit (RMSE 0.12-0.18)   → ~0.28")
+        # print("     - Very poor (RMSE > 0.18)     → ~0.35 (conservative)")
+        # print("     + Pathology adjustment (high f_res) → -0.02")
+        # print("     + Anisotropy adjustment (low f_fib/f_res) → +0.05")
+        # print("   See channel 10 for voxel-wise thresholds")
         
         results = np.zeros(data.shape[:3] + (11,), dtype=np.float32)
         

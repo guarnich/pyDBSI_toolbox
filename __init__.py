@@ -10,14 +10,13 @@ Main Components:
 Outputs (10 channels):
             0: Fiber fraction
             1: Restricted fraction (inflammation/cells)
-            2: Hindered fraction (edema)
-            3: Water fraction (CSF)
-            4: Axial diffusivity (AD) - final
-            5: Radial diffusivity (RD) - final
-            6: Fiber FA
-            7: Mean isotropic ADC
-            8: AD_linear (analytical estimate)
-            9: RD_linear (analytical estimate)
+            2: Non-restricted fraction (edema/CSF)
+            3: Axial diffusivity (AD) - final
+            4: Radial diffusivity (RD) - final
+            5: Fiber FA
+            6: Mean isotropic ADC
+            7: AD_linear (analytical estimate)
+            8: RD_linear (analytical estimate)
             
         AD/RD/FA will be NaN if f_fib < f_fib threshold.
 
@@ -28,7 +27,7 @@ References:
 
 """
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 __author__ = "DBSI Toolbox Contributors"
 
 #from .model import DBSI_Fused

@@ -1,6 +1,20 @@
 """
 DBSI Model
 
+Isotropic compartments:
+  - Restricted fraction  (RF)     : ADC <= THRESH_RES  (0.3e-3 mm²/s)
+  - Non-Restricted fraction (non-RF): ADC >  THRESH_RES  (hindered + free water merged)
+
+Output channels (9 total):
+  0 : Fiber fraction          — always valid
+  1 : Restricted fraction     — always valid
+  2 : Non-Restricted fraction — always valid
+  3 : Axial diffusivity AD    — NaN if f_fib <= fiber_threshold
+  4 : Radial diffusivity RD   — NaN if f_fib <= fiber_threshold
+  5 : Fiber FA                — NaN if f_fib <= fiber_threshold
+  6 : Mean isotropic ADC      — always valid
+  7 : AD_linear               — NaN if f_fib <= fiber_threshold
+  8 : RD_linear               — NaN if f_fib <= fiber_threshold
 """
 
 import numpy as np
@@ -12,8 +26,7 @@ from tqdm import tqdm
 from core.basis import build_design_matrix, generate_fibonacci_sphere_hemisphere
 from core.solvers import (
     nnls_coordinate_descent,
-    compute_weighted_centroids,
-    compute_fiber_fa
+    compute_fiber_fa          # compute_weighted_centroids replaced by inline code
 )
 from calibration.optimizer import optimize_hyperparameters
 from utils.tools import estimate_snr_robust, correct_rician_bias
@@ -23,14 +36,24 @@ DESIGN_MATRIX_AD = 1.5e-3
 DESIGN_MATRIX_RD = 0.5e-3
 FIBER_THRESHOLD  = 0.15
 
+# ADC boundary between Restricted and Non-Restricted compartments
+THRESH_RES = 0.3e-3
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # ANALYTICAL AD/RD ESTIMATION
+# ─────────────────────────────────────────────────────────────────────────────
 
 @njit(cache=True, fastmath=True)
 def estimate_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
-                        f_fib, f_res, f_hin, f_wat,
-                        D_res, D_hin, D_wat):
+                        f_fib, f_res, f_nonrf,
+                        D_res, D_nonrf):
     """
     Analytical AD/RD estimation via weighted least squares on log-signal.
+
+    Isotropic signal is modelled with two compartments:
+      - Restricted   : fraction f_res,   centroid ADC D_res
+      - Non-Restricted: fraction f_nonrf, centroid ADC D_nonrf
 
     Returns
     -------
@@ -38,11 +61,10 @@ def estimate_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
         Estimated diffusivities, OR np.nan if system is singular.
     """
 
-    ftot = f_fib + f_res + f_hin + f_wat + 1e-12
-    ff = f_fib / ftot
-    fr = f_res / ftot
-    fh = f_hin / ftot
-    fw = f_wat / ftot
+    ftot = f_fib + f_res + f_nonrf + 1e-12
+    ff = f_fib  / ftot
+    fr = f_res  / ftot
+    fn = f_nonrf / ftot
 
     sum_AA = 0.0
     sum_AB = 0.0
@@ -59,8 +81,7 @@ def estimate_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
 
         # Subtract isotropic contributions to isolate fiber signal
         S_iso = (fr * np.exp(-b * D_res) +
-                 fh * np.exp(-b * D_hin) +
-                 fw * np.exp(-b * D_wat))
+                 fn * np.exp(-b * D_nonrf))
 
         S_fiber = (S_total - S_iso) / (ff + 1e-12)
 
@@ -73,7 +94,7 @@ def estimate_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
 
         g = bvecs[i]
         cos_t = g[0]*fiber_dir[0] + g[1]*fiber_dir[1] + g[2]*fiber_dir[2]
-        cos2 = cos_t * cos_t
+        cos2  = cos_t * cos_t
 
         # Weight by signal amplitude * b (more weight to high-b, high-signal)
         w = S_total * b
@@ -102,51 +123,58 @@ def estimate_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
 
     # Physical constraint: AD >= RD
     if AD_est < RD_est:
-        mean_val = (AD_est + RD_est) / 2
-        AD_est = mean_val
-        RD_est = mean_val
+        mean_val = (AD_est + RD_est) / 2.0
+        AD_est   = mean_val
+        RD_est   = mean_val
 
     return AD_est, RD_est
 
+
+# ─────────────────────────────────────────────────────────────────────────────
 # GRID SEARCH REFINEMENT
+# ─────────────────────────────────────────────────────────────────────────────
 
 @njit(cache=True, fastmath=True)
 def refine_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
-                      f_fib, f_res, f_hin, f_wat,
-                      D_res, D_hin, D_wat,
+                      f_fib, f_res, f_nonrf,
+                      D_res, D_nonrf,
                       AD_init, RD_init):
     """
     Grid search refinement of AD/RD around analytical initialization.
+
+    Isotropic signal is modelled with two compartments:
+      - Restricted    : fraction f_res,   centroid ADC D_res
+      - Non-Restricted: fraction f_nonrf, centroid ADC D_nonrf
+
     Returns np.nan if initialization is np.nan.
     """
 
     if np.isnan(AD_init) or np.isnan(RD_init):
         return np.nan, np.nan
 
-    ftot = f_fib + f_res + f_hin + f_wat + 1e-12
-    ff = f_fib / ftot
-    fr = f_res / ftot
-    fh = f_hin / ftot
-    fw = f_wat / ftot
+    ftot = f_fib + f_res + f_nonrf + 1e-12
+    ff = f_fib  / ftot
+    fr = f_res  / ftot
+    fn = f_nonrf / ftot
 
     best_sse = 1e20
     best_AD  = AD_init
     best_RD  = RD_init
 
     # Adaptive search range based on estimated anisotropy
-    anisotropy = abs(AD_init - RD_init) / ((AD_init + RD_init) / 2 + 1e-12)
+    anisotropy = abs(AD_init - RD_init) / ((AD_init + RD_init) / 2.0 + 1e-12)
 
     if anisotropy > 0.5:
-        range_factor = 0.25   # Highly anisotropic 
+        range_factor = 0.25   # Highly anisotropic
     elif anisotropy > 0.2:
         range_factor = 0.35   # Moderate
     else:
         range_factor = 0.50   # Nearly isotropic
 
-    AD_min = max(0.05e-3, AD_init * (1 - range_factor))
-    AD_max = min(3.5e-3,  AD_init * (1 + range_factor))
-    RD_min = max(0.05e-3, RD_init * (1 - range_factor))
-    RD_max = min(3.0e-3,  RD_init * (1 + range_factor))
+    AD_min = max(0.05e-3, AD_init * (1.0 - range_factor))
+    AD_max = min(3.5e-3,  AD_init * (1.0 + range_factor))
+    RD_min = max(0.05e-3, RD_init * (1.0 - range_factor))
+    RD_max = min(3.0e-3,  RD_init * (1.0 + range_factor))
 
     n_AD = 8
     n_RD = 6
@@ -164,18 +192,17 @@ def refine_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
 
             sse = 0.0
             for k in range(len(bvals)):
-                b   = bvals[k]
-                g   = bvecs[k]
+                b     = bvals[k]
+                g     = bvecs[k]
                 cos_t = g[0]*fiber_dir[0] + g[1]*fiber_dir[1] + g[2]*fiber_dir[2]
                 D_app = RD + (AD - RD) * cos_t * cos_t
 
-                s_pred = (ff * np.exp(-b * D_app) +
-                          fr * np.exp(-b * D_res) +
-                          fh * np.exp(-b * D_hin) +
-                          fw * np.exp(-b * D_wat))
+                s_pred = (ff * np.exp(-b * D_app)  +
+                          fr * np.exp(-b * D_res)   +
+                          fn * np.exp(-b * D_nonrf))
 
-                diff = sig_norm[k] - s_pred
-                sse += diff * diff
+                diff  = sig_norm[k] - s_pred
+                sse  += diff * diff
 
             if sse < best_sse:
                 best_sse = sse
@@ -183,10 +210,10 @@ def refine_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
                 best_RD  = RD
 
     # --- Fine grid ---
-    AD_c     = best_AD
-    RD_c     = best_RD
-    fine_AD  = dAD / 4 if dAD > 0 else 0.05e-3
-    fine_RD  = dRD / 4 if dRD > 0 else 0.05e-3
+    AD_c    = best_AD
+    RD_c    = best_RD
+    fine_AD = dAD / 4.0 if dAD > 0.0 else 0.05e-3
+    fine_RD = dRD / 4.0 if dRD > 0.0 else 0.05e-3
 
     for di in range(-2, 3):
         AD = AD_c + di * fine_AD
@@ -201,18 +228,17 @@ def refine_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
 
             sse = 0.0
             for k in range(len(bvals)):
-                b   = bvals[k]
-                g   = bvecs[k]
+                b     = bvals[k]
+                g     = bvecs[k]
                 cos_t = g[0]*fiber_dir[0] + g[1]*fiber_dir[1] + g[2]*fiber_dir[2]
                 D_app = RD + (AD - RD) * cos_t * cos_t
 
-                s_pred = (ff * np.exp(-b * D_app) +
-                          fr * np.exp(-b * D_res) +
-                          fh * np.exp(-b * D_hin) +
-                          fw * np.exp(-b * D_wat))
+                s_pred = (ff * np.exp(-b * D_app)  +
+                          fr * np.exp(-b * D_res)   +
+                          fn * np.exp(-b * D_nonrf))
 
-                diff = sig_norm[k] - s_pred
-                sse += diff * diff
+                diff  = sig_norm[k] - s_pred
+                sse  += diff * diff
 
             if sse < best_sse:
                 best_sse = sse
@@ -222,7 +248,9 @@ def refine_AD_RD_pure(bvals, bvecs, sig_norm, fiber_dir,
     return best_AD, best_RD
 
 
+# ─────────────────────────────────────────────────────────────────────────────
 # PARALLEL FITTING KERNEL
+# ─────────────────────────────────────────────────────────────────────────────
 
 @njit(parallel=True, cache=True, fastmath=True)
 def fit_voxels_pure(data, coords, A, AtA, At, bvals, bvecs,
@@ -230,27 +258,21 @@ def fit_voxels_pure(data, coords, A, AtA, At, bvals, bvecs,
     """
     Parallel DBSI fitting kernel.
 
-    Output channels (10 total):
-        0: Fiber fraction          — always written
-        1: Restricted fraction     — always written
-        2: Hindered fraction       — always written
-        3: Water fraction          — always written
-        4: AD (final)              — NaN if f_fib <= fiber_threshold
-        5: RD (final)              — NaN if f_fib <= fiber_threshold
-        6: Fiber FA                — NaN if f_fib <= fiber_threshold
-        7: Mean isotropic ADC      — always written
-        8: AD_linear               — NaN if f_fib <= fiber_threshold
-        9: RD_linear               — NaN if f_fib <= fiber_threshold
-
-
+    Output channels (9 total):
+        0 : Fiber fraction           — always written
+        1 : Restricted fraction      — always written
+        2 : Non-Restricted fraction  — always written  (hindered + water merged)
+        3 : AD (final)               — NaN if f_fib <= fiber_threshold
+        4 : RD (final)               — NaN if f_fib <= fiber_threshold
+        5 : Fiber FA                 — NaN if f_fib <= fiber_threshold
+        6 : Mean isotropic ADC       — always written
+        7 : AD_linear                — NaN if f_fib <= fiber_threshold
+        8 : RD_linear                — NaN if f_fib <= fiber_threshold
     """
 
     n_voxels = coords.shape[0]
     n_dirs   = len(fiber_dirs)
     n_iso    = len(iso_grid)
-
-    THRESH_RES = 0.3e-3
-    THRESH_WAT = 3.0e-3
 
     for idx in prange(n_voxels):
         x, y, z = coords[idx]
@@ -279,7 +301,7 @@ def fit_voxels_pure(data, coords, A, AtA, At, bvals, bvecs,
 
         sig_norm = sig / s0
 
-        # Step 1: NNLS decomposition
+        # ── Step 1: NNLS decomposition ────────────────────────────────────
 
         Aty = np.zeros(AtA.shape[0])
         for r in range(AtA.shape[0]):
@@ -293,49 +315,64 @@ def fit_voxels_pure(data, coords, A, AtA, At, bvals, bvecs,
         w_fib = w[:n_dirs]
         w_iso = w[n_dirs:]
 
-        f_fib_raw = np.sum(w_fib)
-        f_res_raw = 0.0
-        f_hin_raw = 0.0
-        f_wat_raw = 0.0
-        sum_w_iso  = 0.0
-        sum_wd_iso = 0.0
+        # ── Compartment accumulation with inline centroid computation ─────
+        #
+        # Single pass over iso_grid:
+        #   ADC <= THRESH_RES  →  Restricted
+        #   ADC >  THRESH_RES  →  Non-Restricted  (hindered + free water merged)
+        #
+        # Centroid ADCs (D_res_c, D_nonrf_c) are computed here to avoid a
+        # separate call to compute_weighted_centroids.
+
+        f_fib_raw   = np.sum(w_fib)
+        f_res_raw   = 0.0
+        f_nonrf_raw = 0.0
+
+        sum_w_iso    = 0.0
+        sum_wd_iso   = 0.0   # for mean isotropic ADC (all components)
+
+        sum_res_w    = 0.0
+        sum_res_wd   = 0.0
+        sum_nonrf_w  = 0.0
+        sum_nonrf_wd = 0.0
 
         for i in range(n_iso):
             adc = iso_grid[i]
             wi  = w_iso[i]
 
             if adc <= THRESH_RES:
-                f_res_raw += wi
-            elif adc <= THRESH_WAT:
-                f_hin_raw += wi
+                f_res_raw   += wi
+                sum_res_w   += wi
+                sum_res_wd  += wi * adc
             else:
-                f_wat_raw += wi
+                f_nonrf_raw  += wi
+                sum_nonrf_w  += wi
+                sum_nonrf_wd += wi * adc
 
             sum_w_iso  += wi
             sum_wd_iso += wi * adc
 
-        mean_iso_adc = sum_wd_iso / sum_w_iso if sum_w_iso > 1e-10 else 0.0
+        mean_iso_adc = sum_wd_iso  / sum_w_iso   if sum_w_iso   > 1e-10 else 0.0
+        D_res_c      = sum_res_wd  / sum_res_w   if sum_res_w   > 1e-10 else 0.2e-3
+        D_nonrf_c    = sum_nonrf_wd / sum_nonrf_w if sum_nonrf_w > 1e-10 else 2.0e-3
 
-        # Normalize fractions
-        ftot = f_fib_raw + f_res_raw + f_hin_raw + f_wat_raw
+        # Normalize fractions to sum to 1
+        ftot = f_fib_raw + f_res_raw + f_nonrf_raw
         if ftot < 1e-10:
             continue
 
-        f_fib = f_fib_raw / ftot
-        f_res = f_res_raw / ftot
-        f_hin = f_hin_raw / ftot
-        f_wat = f_wat_raw / ftot
+        f_fib   = f_fib_raw   / ftot
+        f_res   = f_res_raw   / ftot
+        f_nonrf = f_nonrf_raw / ftot
 
         out[x, y, z, 0] = f_fib
         out[x, y, z, 1] = f_res
-        out[x, y, z, 2] = f_hin
-        out[x, y, z, 3] = f_wat
-        out[x, y, z, 7] = mean_iso_adc
+        out[x, y, z, 2] = f_nonrf
+        out[x, y, z, 6] = mean_iso_adc
 
-        # Step 2: AD/RD estimation — ONLY if f_fib > fiber_threshold
+        # ── Step 2: AD/RD estimation (only where f_fib > fiber_threshold) ─
+
         if f_fib > fiber_threshold:
-
-            D_res_c, D_hin_c, D_wat_c = compute_weighted_centroids(w_iso, iso_grid)
 
             # Dominant fiber direction
             idx_max = 0
@@ -347,11 +384,11 @@ def fit_voxels_pure(data, coords, A, AtA, At, bvals, bvecs,
 
             fiber_dir = fiber_dirs[idx_max]
 
-            # Analytical initialization
+            # Analytical initialization (two isotropic compartments)
             AD_linear, RD_linear = estimate_AD_RD_pure(
                 bvals, bvecs, sig_norm, fiber_dir,
-                f_fib, f_res, f_hin, f_wat,
-                D_res_c, D_hin_c, D_wat_c
+                f_fib, f_res, f_nonrf,
+                D_res_c, D_nonrf_c
             )
 
             AD = AD_linear
@@ -361,8 +398,8 @@ def fit_voxels_pure(data, coords, A, AtA, At, bvals, bvecs,
             if enable_step2:
                 AD, RD = refine_AD_RD_pure(
                     bvals, bvecs, sig_norm, fiber_dir,
-                    f_fib, f_res, f_hin, f_wat,
-                    D_res_c, D_hin_c, D_wat_c,
+                    f_fib, f_res, f_nonrf,
+                    D_res_c, D_nonrf_c,
                     AD_linear, RD_linear
                 )
 
@@ -370,27 +407,36 @@ def fit_voxels_pure(data, coords, A, AtA, At, bvals, bvecs,
             if not np.isnan(AD) and not np.isnan(RD):
                 FA = compute_fiber_fa(AD, RD)
 
-            out[x, y, z, 4] = AD
-            out[x, y, z, 5] = RD
-            out[x, y, z, 6] = FA
-            out[x, y, z, 8] = AD_linear
-            out[x, y, z, 9] = RD_linear
+            out[x, y, z, 3] = AD
+            out[x, y, z, 4] = RD
+            out[x, y, z, 5] = FA
+            out[x, y, z, 7] = AD_linear
+            out[x, y, z, 8] = RD_linear
 
 
+# ─────────────────────────────────────────────────────────────────────────────
 # MAIN MODEL CLASS
+# ─────────────────────────────────────────────────────────────────────────────
 
 class DBSI_Fused:
-    """DBSI Model — fixed threshold on fiber fraction for AD/RD estimation."""
+    """
+    DBSI Model — two isotropic compartments (Restricted / Non-Restricted).
+
+    The Non-Restricted fraction merges what was previously Hindered and Water
+    into a single compartment complementary to the Restricted fraction, in line
+    with the original DBSI nomenclature (Wang et al. 2011; Vavasour et al.).
+    AD/RD estimation is performed only where f_fib > fiber_threshold.
+    """
 
     def __init__(self, n_iso=None, reg_lambda=None, enable_step2=True,
                  n_dirs=100, iso_range=(0.0, 4.5e-3),
                  fiber_threshold=FIBER_THRESHOLD):
-        self.n_iso            = n_iso
-        self.reg_lambda       = reg_lambda
-        self.enable_step2     = enable_step2
-        self.n_dirs           = n_dirs
-        self.iso_range        = iso_range
-        self.fiber_threshold  = fiber_threshold
+        self.n_iso           = n_iso
+        self.reg_lambda      = reg_lambda
+        self.enable_step2    = enable_step2
+        self.n_dirs          = n_dirs
+        self.iso_range       = iso_range
+        self.fiber_threshold = fiber_threshold
 
     def fit(self, data, bvals, bvecs, mask, run_calibration=True):
         """
@@ -398,17 +444,28 @@ class DBSI_Fused:
 
         Returns
         -------
-        results : ndarray (X, Y, Z, 10)
-            0 : Fiber fraction          (always valid)
-            1 : Restricted fraction     (always valid)
-            2 : Hindered fraction       (always valid)
-            3 : Water fraction          (always valid)
-            4 : Axial diffusivity AD    (NaN if f_fib <= fiber_threshold)
-            5 : Radial diffusivity RD   (NaN if f_fib <= fiber_threshold)
-            6 : Fiber FA                (NaN if f_fib <= fiber_threshold)
-            7 : Mean isotropic ADC      (always valid)
-            8 : AD_linear               (NaN if f_fib <= fiber_threshold)
-            9 : RD_linear               (NaN if f_fib <= fiber_threshold)
+        results : ndarray (X, Y, Z, 9)
+            0 : Fiber fraction            (always valid)
+            1 : Restricted fraction       (always valid)
+            2 : Non-Restricted fraction   (always valid)   ← hindered + water merged
+            3 : Axial diffusivity AD      (NaN if f_fib <= fiber_threshold)
+            4 : Radial diffusivity RD     (NaN if f_fib <= fiber_threshold)
+            5 : Fiber FA                  (NaN if f_fib <= fiber_threshold)
+            6 : Mean isotropic ADC        (always valid)
+            7 : AD_linear                 (NaN if f_fib <= fiber_threshold)
+            8 : RD_linear                 (NaN if f_fib <= fiber_threshold)
+
+        Saved maps
+        ----------
+        dbsi_fiber_fraction.nii.gz
+        dbsi_restricted_fraction.nii.gz
+        dbsi_nonrestricted_fraction.nii.gz          
+        dbsi_AD.nii.gz
+        dbsi_RD.nii.gz
+        dbsi_fiber_FA.nii.gz
+        dbsi_mean_iso_ADC.nii.gz
+        dbsi_AD_linear.nii.gz
+        dbsi_RD_linear.nii.gz
         """
         print("\n" + "="*70)
         print("  DBSI PIPELINE")
@@ -439,6 +496,9 @@ class DBSI_Fused:
         print(f"\n   Hyperparameters: n_iso={self.n_iso}, λ={self.reg_lambda:.4f}")
         print(f"   Fiber threshold: {self.fiber_threshold:.2f} "
               f"(AD/RD estimated only where f_fib > {self.fiber_threshold:.2f})")
+        print(f"   Isotropic compartments: "
+              f"Restricted (ADC ≤ {THRESH_RES*1e3:.1f}×10⁻³ mm²/s) | "
+              f"Non-Restricted (ADC > {THRESH_RES*1e3:.1f}×10⁻³ mm²/s)")
 
         # Rician correction
         print("\n3. Applying Rician Bias Correction...")
@@ -467,13 +527,13 @@ class DBSI_Fused:
         n_voxels = len(coords)
         print(f"\n5. Fitting {n_voxels:,} voxels...")
 
-        # Initialise outputs: fractions default to 0, AD/RD/FA to NaN
-        results = np.zeros(data.shape[:3] + (10,), dtype=np.float32)
-        results[..., 4] = np.nan   # AD
-        results[..., 5] = np.nan   # RD
-        results[..., 6] = np.nan   # FA
-        results[..., 8] = np.nan   # AD_linear
-        results[..., 9] = np.nan   # RD_linear
+        # Initialise outputs: fractions default to 0, diffusivity maps to NaN
+        results = np.zeros(data.shape[:3] + (9,), dtype=np.float32)
+        results[..., 3] = np.nan   # AD
+        results[..., 4] = np.nan   # RD
+        results[..., 5] = np.nan   # FA
+        results[..., 7] = np.nan   # AD_linear
+        results[..., 8] = np.nan   # RD_linear
 
         batch_size = 10000
         n_batches  = int(np.ceil(n_voxels / batch_size))
@@ -497,7 +557,7 @@ class DBSI_Fused:
         elapsed = time.time() - t0
 
         # Summary statistics
-        n_fitted = np.sum(~np.isnan(results[..., 4]) & mask)
+        n_fitted = np.sum(~np.isnan(results[..., 3]) & mask)   # channel 3 = AD
         pct      = n_fitted / n_voxels * 100
 
         print(f"\n   Completed in {elapsed:.1f}s  ({n_voxels/elapsed:.0f} vox/s)")

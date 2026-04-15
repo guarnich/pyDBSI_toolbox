@@ -11,8 +11,7 @@ DBSI is an advanced diffusion MRI technique that decomposes the diffusion-weight
 
 - **Anisotropic fiber diffusion** (axons)
 - **Restricted isotropic diffusion** (cells/inflammation)
-- **Hindered isotropic diffusion** (edema/tissue loss)
-- **Free isotropic diffusion** (CSF)
+- **Non Restricted isotropic diffusion** (edema/tissue loss)
 
 This implementation follows the two-step approach described in Wang et al. (2011) Brain, with Numba/JIT acceleration for performance.
 
@@ -49,11 +48,10 @@ results = model.fit(data, bvals, bvecs, mask)
 map_names = [
     'fiber_fraction', 
     'restricted_fraction', 
-    'hindered_fraction', 
-    'water_fraction', 
+    'nonrestricted_fraction', 
     'axial_diffusivity', 
     'radial_diffusivity',
-    'fiber_fa_intrinsic', 
+    'fiber_fa', 
     'mean_iso_adc',
     'ad_linear',
     'rd_linear'

@@ -9,16 +9,16 @@ Contains the mathematical core of the DBSI implementation:
 - Fiber FA computation
 """
 
-from core.basis import (
+from .basis import (
     build_design_matrix,
     generate_fibonacci_sphere_hemisphere,
     generate_fibonacci_sphere, 
 )
 
-from core.solvers import (
+from .solvers import (
     nnls_coordinate_descent,
     step2_refine_diffusivities,
-    step2_refine_diffusivities_adaptive,
+    step2_refine_diffusivities_adaptive, 
     compute_weighted_centroids,
     compute_fiber_fa,
 )

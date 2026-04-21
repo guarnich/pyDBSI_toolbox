@@ -14,8 +14,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.tools import load_data
-# Assumendo che tu abbia rinominato il nuovo script in model.py, o importa dal nome effettivo:
-from model import DBSI_Adaptive 
+from model_Niso_adaptive_ff_thr import DBSI_Adaptive 
 
 def main():
     parser = argparse.ArgumentParser(description="DBSI Adaptive Pipeline")

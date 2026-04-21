@@ -109,4 +109,3 @@ python -m scripts.run_dbsi \
 1. Wang Y, et al. (2011). Quantification of increased cellularity during inflammatory demyelination. *Brain*, 134(12), 3590-3601.
 2. Wang Y, et al. (2015). Differentiation and quantification of inflammation, demyelination and axon injury or loss in multiple sclerosis. *Brain*, 138(5), 1223-1238.
 3. Vavasour IM, et al. (2022). Characterisation of multiple sclerosis neuroinflammation and neurodegeneration with relaxation and diffusion basis spectrum imaging. *Multiple Sclerosis Journal*, 28(3), 418-428.
-```

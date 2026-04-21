@@ -11,10 +11,8 @@ import sys
 import nibabel as nib
 import numpy as np
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from utils.tools import load_data
-from model_Niso_adaptive_ff_thr import DBSI_Adaptive 
+from dbsi_toolbox import DBSI_Adaptive
+from dbsi_toolbox import load_data
 
 def main():
     parser = argparse.ArgumentParser(description="DBSI Adaptive Pipeline")

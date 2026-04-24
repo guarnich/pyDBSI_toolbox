@@ -249,7 +249,7 @@ def compute_fiber_fa(AD, RD):
     if denom < 1e-12:
         return 0.0
     
-    FA_raw = np.sqrt(0.5) * diff / denom
+    FA_raw = diff / denom
     FA_raw = min(1.0, max(0.0, FA_raw))
     
     return FA_raw

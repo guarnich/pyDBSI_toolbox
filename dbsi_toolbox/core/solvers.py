@@ -233,7 +233,7 @@ def compute_fiber_fa(AD, RD):
     """
     Compute FA for cylindrically symmetric tensor.
     
-    Formula: FA = sqrt(0.5) * (AD - RD) / sqrt(AD² + 2*RD²)
+    Formula: FA = (AD - RD) / sqrt(AD² + 2*RD²)
     """
     if AD < 1e-10 or RD < 1e-10:
         return 0.0

@@ -21,9 +21,9 @@ The toolbox dynamically generates the following parameter maps depending on the 
 3. **hindered_fraction (HF)**: Vasogenic edema *(NaN in 2-ISO mode)*.
 4. **water_fraction (WF)**: CSF / Free water *(NaN in 2-ISO mode)*.
 5. **nonrestricted_fraction (NRF)**: HF + WF combined.
-6. **axial_diffusivity (AD)**: Axonal integrity *(NaN if FF \le threshold)*.
-7. **radial_diffusivity (RD)**: Demyelination marker *(NaN if FF \le threshold)*.
-8. **fiber_fa**: Intrinsic fiber fractional anisotropy *(NaN if FF \le threshold)*.
+6. **axial_diffusivity (AD)**: Axonal integrity *(NaN if FF < threshold)*.
+7. **radial_diffusivity (RD)**: Demyelination marker *(NaN if FF < threshold)*.
+8. **fiber_fa**: Intrinsic fiber fractional anisotropy *(NaN if FF < threshold)*.
 9. **mean_iso_adc**: Mean isotropic ADC.
 10. **ad_linear**: Initial analytical AD estimate.
 11. **rd_linear**: Initial analytical RD estimate.

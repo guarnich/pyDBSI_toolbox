@@ -35,8 +35,8 @@ The toolbox dynamically generates the following parameter maps depending on the 
 git clone [https://github.com/guarnich/pyDBSI_toolbox](https://github.com/guarnich/pyDBSI_toolbox)
 cd pyDBSI_toolbox
 
-# Install in development mode
-pip install -e .
+# Install
+pip install .
 ```
 
 ## Quick Start

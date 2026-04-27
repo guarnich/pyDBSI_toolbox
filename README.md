@@ -12,7 +12,7 @@ DBSI is an advanced diffusion MRI technique that decomposes the diffusion-weight
 - **3-ISO (Research Protocols)**: Separates Restricted (inflammation/cellularity), Hindered (vasogenic edema), and Free Water (CSF). Activated when $b_{max} \ge 3000 \text{ s/mm}^2$ and $\ge 3$ non-zero shells.
 - **2-ISO (Clinical Protocols)**: Merges Hindered and Free Water into a single Non-Restricted fraction to guarantee numerical stability when the free water signal is near the noise floor ($b_{max} < 3000 \text{ s/mm}^2$).
 
-## Outputs (11 Channels)
+## Outputs
 
 The toolbox dynamically generates the following parameter maps depending on the selected model mode:
 
@@ -25,8 +25,6 @@ The toolbox dynamically generates the following parameter maps depending on the 
 7. **radial_diffusivity (RD)**: Demyelination marker *(NaN if FF < threshold)*.
 8. **fiber_fa**: Intrinsic fiber fractional anisotropy *(NaN if FF < threshold)*.
 9. **mean_iso_adc**: Mean isotropic ADC.
-10. **ad_linear**: Initial analytical AD estimate.
-11. **rd_linear**: Initial analytical RD estimate.
 
 ## Installation
 

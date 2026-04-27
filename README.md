@@ -32,7 +32,7 @@ The toolbox dynamically generates the following parameter maps depending on the 
 
 ```bash
 # Clone the repository
-git clone [https://github.com/guarnich/pyDBSI_toolbox](https://github.com/guarnich/pyDBSI_toolbox)
+git clone https://github.com/guarnich/pyDBSI_toolbox
 cd pyDBSI_toolbox
 
 # Install

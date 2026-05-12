@@ -69,6 +69,29 @@ constraints:
     • b_max ≥ 3000 s/mm²: Optimal. Additional shell diversity allows separation
       of HF from WF. RF precision further improved by the high-b plateau.
 
+Regularization Strategy — Differentiated Fiber/Isotropic Penalty
+-----------------------------------------------------------------
+Standard L2 regularization (λ‖w‖²) creates a systematic imbalance between the
+fiber and isotropic sub-dictionaries when n_dirs >> n_iso:
+
+    The NNLS optimizer can represent a fraction f_total using the fiber dictionary
+    at a cost of  λ · n_dirs · (f_total/n_dirs)² = λ · f_total²/n_dirs,
+    but using a single isotropic column at a cost of  λ · f_total².
+
+    For n_dirs = 100 this means distributing weight across fiber directions costs
+    100× LESS than concentrating it in one isotropic column.  The solver exploits
+    this asymmetry to spuriously assign isotropic tissue (cortex, GM) to the fiber
+    dictionary — producing artificially elevated FF in non-WM regions.
+
+Fix: scale the fiber penalty by n_dirs so that the marginal cost of adding one
+unit of total fraction via fiber directions equals the cost of adding it via one
+isotropic column:
+
+    reg_vec[:n_dirs] = λ × n_dirs   →  cost per unit fraction = λ  (same as ISO)
+    reg_vec[n_dirs:] = λ
+
+This is implemented in fit() and must be mirrored in the calibration module.
+
 Output Channels (11 total — unified across both model modes)
 -------------------------------------------------------------
     0  : FF   — Fibre fraction                            (always valid)
@@ -525,6 +548,10 @@ def _fit_voxels_2iso(data, coords, A, AtA, At, bvals, bvecs,
     """
     Numba parallel fitting kernel — two-compartment isotropic model (2-ISO).
 
+    NOTE: AtA passed here is already regularized (AtA + diag(reg_vec)) by the
+    caller. The solver is called with reg=0.0 to avoid double-counting the
+    regularization penalty.
+
     Writes into output channels 0, 1, 4–10.  Channels 2 (HF) and 3 (WF)
     are left at 0.0 (caller pre-initialises them to NaN).
 
@@ -569,6 +596,8 @@ def _fit_voxels_2iso(data, coords, A, AtA, At, bvals, bvecs,
         sig_norm = sig / s0
 
         # ── Step 1: regularised NNLS ──────────────────────────────────────
+        # AtA is already pre-regularized by the caller (differentiated scheme).
+        # Pass reg=0.0 to the solver to avoid double-counting the penalty.
         Aty = np.zeros(AtA.shape[0])
         for r in range(AtA.shape[0]):
             val = 0.0
@@ -576,7 +605,7 @@ def _fit_voxels_2iso(data, coords, A, AtA, At, bvals, bvecs,
                 val += At[r, c] * sig_norm[c]
             Aty[r] = val
 
-        w, _ = nnls_coordinate_descent(AtA, Aty, reg)
+        w, _ = nnls_coordinate_descent(AtA, Aty, 0.0)
         w_fib = w[:n_dirs]
         w_iso = w[n_dirs:]
 
@@ -663,6 +692,10 @@ def _fit_voxels_3iso(data, coords, A, AtA, At, bvals, bvecs,
     """
     Numba parallel fitting kernel — three-compartment isotropic model (3-ISO).
 
+    NOTE: AtA passed here is already regularized (AtA + diag(reg_vec)) by the
+    caller. The solver is called with reg=0.0 to avoid double-counting the
+    regularization penalty.
+
     Writes into output channels 0–10.  All channels are valid (no NaN from
     model choice; NaN may still appear in AD/RD/FA where FF ≤ fiber_threshold).
 
@@ -707,6 +740,8 @@ def _fit_voxels_3iso(data, coords, A, AtA, At, bvals, bvecs,
         sig_norm = sig / s0
 
         # ── Step 1: regularised NNLS ──────────────────────────────────────
+        # AtA is already pre-regularized by the caller (differentiated scheme).
+        # Pass reg=0.0 to the solver to avoid double-counting the penalty.
         Aty = np.zeros(AtA.shape[0])
         for r in range(AtA.shape[0]):
             val = 0.0
@@ -714,7 +749,7 @@ def _fit_voxels_3iso(data, coords, A, AtA, At, bvals, bvecs,
                 val += At[r, c] * sig_norm[c]
             Aty[r] = val
 
-        w, _ = nnls_coordinate_descent(AtA, Aty, reg)
+        w, _ = nnls_coordinate_descent(AtA, Aty, 0.0)
         w_fib = w[:n_dirs]
         w_iso = w[n_dirs:]
 
@@ -936,7 +971,7 @@ class DBSI_Adaptive:
 
         # ── Monte Carlo calibration ────────────────────────────────────────
         if run_calibration and (self.n_iso is None or self.reg_lambda is None):
-            print("\n2. Running Monte Carlo Calibration...")
+            print("\n2. Running Monte Carlo Calibration (multi-scenario)...")
             self.n_iso, self.reg_lambda = optimize_hyperparameters(
                 bvals, bvecs, snr, n_mc=1000
             )
@@ -972,15 +1007,28 @@ class DBSI_Adaptive:
         iso_grid   = np.linspace(self.iso_range[0], self.iso_range[1],
                                  self.n_iso)
 
-        A       = build_design_matrix(bvals, bvecs, fiber_dirs, iso_grid,
-                                      ad=DESIGN_MATRIX_AD, rd=DESIGN_MATRIX_RD)
-        AtA     = A.T @ A
-        AtA_reg = AtA + self.reg_lambda * np.eye(AtA.shape[0])
-        At      = A.T
+        A   = build_design_matrix(bvals, bvecs, fiber_dirs, iso_grid,
+                                  ad=DESIGN_MATRIX_AD, rd=DESIGN_MATRIX_RD)
+        AtA = A.T @ A
+        At  = A.T
+
+        # ── Differentiated regularization (Fix 1) ─────────────────────────
+        # Fiber columns (0..n_dirs-1) are penalized n_dirs× more heavily than
+        # isotropic columns to counteract the L2 cost advantage of distributing
+        # a given fraction across many directions (see module docstring).
+        # The solver is then called with reg=0.0 so the penalty is not counted
+        # twice (Fix 2).
+        n_dirs_actual = len(fiber_dirs)
+        reg_vec = np.ones(AtA.shape[0])
+        reg_vec[:n_dirs_actual] = self.reg_lambda * n_dirs_actual
+        reg_vec[n_dirs_actual:] = self.reg_lambda
+        AtA_reg = AtA + np.diag(reg_vec)
 
         cond = np.linalg.cond(AtA_reg)
         print(f"   Design matrix: {A.shape}  |  "
-              f"Condition number: {cond:.2e}")
+              f"Condition number (regularized): {cond:.2e}")
+        print(f"   Regularization: λ_fiber={self.reg_lambda * n_dirs_actual:.4f}  "
+              f"λ_iso={self.reg_lambda:.4f}  (ratio = n_dirs = {n_dirs_actual})")
 
         # ── Allocate output ────────────────────────────────────────────────
         results = np.zeros(data.shape[:3] + (self.N_CHANNELS,), dtype=np.float32)

@@ -46,20 +46,8 @@ setup(
         "scipy>=1.7.0",
         "tqdm>=4.60.0",
         "pandas>=1.3.0",
+        "ipykernel>=6.0.0",
     ],
-    extras_require={
-        "dev": [
-            "pytest>=6.0",
-            "pytest-cov>=2.0",
-            "black>=21.0",
-            "flake8>=3.9",
-            "mypy>=0.900",
-        ],
-        "docs": [
-            "sphinx>=4.0",
-            "sphinx-rtd-theme>=0.5",
-        ],
-    },
     entry_points={
         "console_scripts": [
             "dbsi-fit=scripts.run_dbsi:main",

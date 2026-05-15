@@ -8,6 +8,7 @@ env/
 env_/
 venv/
 venv_*/
+.venv
 __pycache__/
 build/
 dist/

@@ -412,7 +412,7 @@ def optimize_hyperparameters(bvals, bvecs, snr, n_mc=1000):
     results = []
 
     for n_iso in bases_grid:
-        iso_grid = np.linspace(0.0, 4.5e-3, n_iso)
+        iso_grid = np.linspace(0.0, 3.5e-3, n_iso)
         A   = build_design_matrix(bvals, bvecs, fiber_dirs, iso_grid)
         AtA = A.T @ A
         At  = A.T

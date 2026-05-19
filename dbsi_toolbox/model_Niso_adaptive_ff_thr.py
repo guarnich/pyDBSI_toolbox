@@ -270,7 +270,10 @@ def _estimate_AD_RD_2iso(bvals, bvecs, sig_norm, fiber_dir,
         g     = bvecs[i]
         cos_t = g[0]*fiber_dir[0] + g[1]*fiber_dir[1] + g[2]*fiber_dir[2]
         cos2  = cos_t * cos_t
-        w     = S_total * b          # amplitude-weighted, b-weighted
+        # ML-optimal weight for the log-linear model: Var(log S) ≈ σ²/S²,
+        # so optimal WLS weight is w ∝ S².  Using w = S·b over-weights
+        # high-b measurements and can bias AD estimates downward.
+        w     = S_total * S_total
 
         sum_AA += w * b * b
         sum_AB += w * b * b * cos2
@@ -332,7 +335,9 @@ def _estimate_AD_RD_3iso(bvals, bvecs, sig_norm, fiber_dir,
         g     = bvecs[i]
         cos_t = g[0]*fiber_dir[0] + g[1]*fiber_dir[1] + g[2]*fiber_dir[2]
         cos2  = cos_t * cos_t
-        w     = S_total * b
+        # ML-optimal weight for the log-linear model: Var(log S) ≈ σ²/S²,
+        # so optimal WLS weight is w ∝ S².
+        w     = S_total * S_total
 
         sum_AA += w * b * b
         sum_AB += w * b * b * cos2
@@ -543,7 +548,7 @@ def _refine_AD_RD_3iso(bvals, bvecs, sig_norm, fiber_dir,
 
 @njit(parallel=True, cache=True, fastmath=True)
 def _fit_voxels_2iso(data, coords, A, AtA, At, bvals, bvecs,
-                     fiber_dirs, iso_grid, reg,
+                     fiber_dirs, iso_grid, b0_thr,
                      enable_step2, fiber_threshold, out):
     """
     Numba parallel fitting kernel — two-compartment isotropic model (2-ISO).
@@ -551,6 +556,9 @@ def _fit_voxels_2iso(data, coords, A, AtA, At, bvals, bvecs,
     NOTE: AtA passed here is already regularized (AtA + diag(reg_vec)) by the
     caller. The solver is called with reg=0.0 to avoid double-counting the
     regularization penalty.
+
+    b0_thr is precomputed by the caller (= b_min + 100 s/mm²) so it is not
+    recomputed redundantly for every voxel inside the parallel loop.
 
     Writes into output channels 0, 1, 4–10.  Channels 2 (HF) and 3 (WF)
     are left at 0.0 (caller pre-initialises them to NaN).
@@ -577,13 +585,7 @@ def _fit_voxels_2iso(data, coords, A, AtA, At, bvals, bvecs,
         x, y, z = coords[idx]
         sig = data[x, y, z]
 
-        # S₀ normalisation (b ≈ 0 volumes)
-        b_min = 1e10
-        for i in range(len(bvals)):
-            if bvals[i] < b_min:
-                b_min = bvals[i]
-        b0_thr = b_min + 100.0
-
+        # S₀ normalisation — b0_thr precomputed by caller
         s0  = 0.0; cnt = 0
         for i in range(len(bvals)):
             if bvals[i] < b0_thr:
@@ -687,7 +689,7 @@ def _fit_voxels_2iso(data, coords, A, AtA, At, bvals, bvecs,
 
 @njit(parallel=True, cache=True, fastmath=True)
 def _fit_voxels_3iso(data, coords, A, AtA, At, bvals, bvecs,
-                     fiber_dirs, iso_grid, reg,
+                     fiber_dirs, iso_grid, b0_thr,
                      enable_step2, fiber_threshold, out):
     """
     Numba parallel fitting kernel — three-compartment isotropic model (3-ISO).
@@ -695,6 +697,9 @@ def _fit_voxels_3iso(data, coords, A, AtA, At, bvals, bvecs,
     NOTE: AtA passed here is already regularized (AtA + diag(reg_vec)) by the
     caller. The solver is called with reg=0.0 to avoid double-counting the
     regularization penalty.
+
+    b0_thr is precomputed by the caller (= b_min + 100 s/mm²) so it is not
+    recomputed redundantly for every voxel inside the parallel loop.
 
     Writes into output channels 0–10.  All channels are valid (no NaN from
     model choice; NaN may still appear in AD/RD/FA where FF ≤ fiber_threshold).
@@ -721,13 +726,7 @@ def _fit_voxels_3iso(data, coords, A, AtA, At, bvals, bvecs,
         x, y, z = coords[idx]
         sig = data[x, y, z]
 
-        # S₀ normalisation
-        b_min = 1e10
-        for i in range(len(bvals)):
-            if bvals[i] < b_min:
-                b_min = bvals[i]
-        b0_thr = b_min + 100.0
-
+        # S₀ normalisation — b0_thr precomputed by caller
         s0 = 0.0; cnt = 0
         for i in range(len(bvals)):
             if bvals[i] < b0_thr:
@@ -889,7 +888,7 @@ class DBSI_Adaptive:
     N_CHANNELS = 11
 
     def __init__(self, n_iso=None, reg_lambda=None, enable_step2=True,
-                 n_dirs=100, iso_range=(0.0, 4.5e-3),
+                 n_dirs=100, iso_range=(0.0, 3.5e-3),
                  fiber_threshold=FIBER_THRESHOLD, force_n_iso=None):
         self.n_iso           = n_iso
         self.reg_lambda      = reg_lambda
@@ -993,13 +992,24 @@ class DBSI_Adaptive:
         )
         print(f"   Compartments: {_thresh_str}")
 
-        # ── Rician bias correction ─────────────────────────────────────────
+        # ── Rician bias correction (vectorized) ───────────────────────────
         print("\n3. Applying Rician Bias Correction...")
-        coords    = np.argwhere(mask)
-        data_corr = np.zeros_like(data, dtype=np.float32)
-        for i in range(len(coords)):
-            x, y, z = coords[i]
-            data_corr[x, y, z] = correct_rician_bias(data[x, y, z], sigma)
+        coords = np.argwhere(mask)
+
+        # Vectorized Koay-Basser correction over all masked voxels at once.
+        # Avoids a Python for-loop over potentially millions of voxels.
+        # For voxels where signal² ≤ 2σ² the corrected value is set to 0
+        # (SNR too low to recover a meaningful signal estimate).
+        xs, ys, zs  = coords[:, 0], coords[:, 1], coords[:, 2]
+        data_corr   = np.zeros_like(data, dtype=np.float32)
+        noise_floor = 2.0 * sigma**2
+        masked_sq   = data[xs, ys, zs].astype(np.float64)**2   # (n_vox, N)
+        valid_mask  = masked_sq > noise_floor
+        corrected   = np.where(valid_mask,
+                               np.sqrt(np.maximum(masked_sq - noise_floor, 0.0)),
+                               0.0).astype(np.float32)
+        data_corr[xs, ys, zs] = corrected
+        del masked_sq, valid_mask, corrected   # free memory
 
         # ── Design matrix ──────────────────────────────────────────────────
         print("\n4. Building Design Matrix...")
@@ -1053,6 +1063,11 @@ class DBSI_Adaptive:
 
         _kernel = _fit_voxels_3iso if use_3iso else _fit_voxels_2iso
 
+        # Precompute b0_thr once — avoids recomputing it inside every voxel
+        # in the parallel Numba kernel (which would be n_voxels × n_bvals
+        # unnecessary iterations).
+        b0_thr = float(np.min(bvals)) + 100.0
+
         t0 = time.time()
         with tqdm(total=n_voxels, desc="   Progress", unit="vox") as pbar:
             for i in range(n_batches):
@@ -1061,7 +1076,7 @@ class DBSI_Adaptive:
                 _kernel(
                     data_corr, coords[start:end], A, AtA_reg, At,
                     bvals, bvecs, fiber_dirs, iso_grid,
-                    self.reg_lambda, self.enable_step2,
+                    b0_thr, self.enable_step2,
                     self.fiber_threshold, results
                 )
                 pbar.update(end - start)

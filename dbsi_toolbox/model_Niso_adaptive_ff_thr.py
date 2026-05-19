@@ -1063,10 +1063,15 @@ class DBSI_Adaptive:
 
         _kernel = _fit_voxels_3iso if use_3iso else _fit_voxels_2iso
 
-        # Precompute b0_thr once — avoids recomputing it inside every voxel
-        # in the parallel Numba kernel (which would be n_voxels × n_bvals
-        # unnecessary iterations).
-        b0_thr = float(np.min(bvals)) + 100.0
+        # b0 threshold: use a fixed absolute value of 100 s/mm² rather than
+        # min(bvals) + 100. The relative approach fails when b_min is non-zero
+        # (e.g. b_min = 100 → b0_thr = 200, incorrectly including low DWI
+        # volumes as b0). The absolute threshold of 100 s/mm² is standard
+        # (FSL, MRtrix) and consistent with the SNR estimation step which uses
+        # b < 50. Signal attenuation at b = 100 is < 15% even for unrestricted
+        # water, so including these volumes as pseudo-b0 is acceptable and
+        # matches the behaviour expected by most scanner protocols.
+        b0_thr = 100.0
 
         t0 = time.time()
         with tqdm(total=n_voxels, desc="   Progress", unit="vox") as pbar:

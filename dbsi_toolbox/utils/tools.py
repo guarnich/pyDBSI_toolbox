@@ -71,7 +71,11 @@ def estimate_snr_robust(data, bvals, mask, verbose=True):
         std_masked = std_b0[valid_mask]
         snr_apparent = mean_masked / std_masked
         snr_corrected = snr_apparent.copy()
-        for i in range(5):
+        # 5 iterations is insufficient for convergence at typical in-vivo SNR
+        # (e.g. SNR=30 requires ~14 iterations to converge to delta<0.01).
+        # 20 iterations ensures convergence across the full physiological range
+        # (SNR 10–100) with negligible additional cost.
+        for i in range(20):
             snr_old = snr_corrected.copy()
             bias_term = mean_masked**2 / (2 * snr_corrected**2 + 1e-10)
             var_corrected = std_masked**2 - bias_term

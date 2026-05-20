@@ -41,4 +41,6 @@ __all__ = [
     "estimate_snr_robust",
     "correct_rician_bias",
     "optimize_hyperparameters",
+    "compute_fit_quality",
+    "save_fit_quality"
 ]

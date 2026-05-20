@@ -33,6 +33,7 @@ __author__ = "DBSI Toolbox Contributors"
 from .model_Niso_adaptive_ff_thr import DBSI_Adaptive
 from .utils.tools import load_data, estimate_snr_robust, correct_rician_bias
 from .calibration.optimizer import optimize_hyperparameters
+from .fit_quality import compute_fit_quality, save_fit_quality
 
 __all__ = [
     "DBSI_Adaptive",

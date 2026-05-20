@@ -28,8 +28,8 @@ def main():
     parser.add_argument("--no-step2", action="store_true")
     parser.add_argument("--force-n-iso", type=int, choices=[2, 3], default=None, 
                         help="Override automatic model selection (2 or 3)")
-     parser.add_argument("--compute-r2", default=None, 
-                        help="Compute fit quality check")
+    parser.add_argument("--compute-r2", action="store_true", 
+                        help="Compute fit quality check (R2 and RMSE)")
     
     args = parser.parse_args()
     os.makedirs(args.out, exist_ok=True)
@@ -65,9 +65,11 @@ def main():
             print(f"  Skipped {name} (not estimated in {model_mode}-ISO mode)")
 
     if args.compute_r2:
+        print("\nComputing fit quality (R2 and RMSE)...")
         from dbsi_toolbox.fit_quality import compute_fit_quality, save_fit_quality
         r2, rmse = compute_fit_quality(data, bvals, bvecs, mask, results, model_mode)
         save_fit_quality(r2, rmse, affine, args.out)
+        print("Fit quality maps saved.")
     
     print("\nDone!")
 

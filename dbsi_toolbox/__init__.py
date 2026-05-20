@@ -29,7 +29,7 @@ References:
 __version__ = "2.0.0"
 __author__ = "DBSI Toolbox Contributors"
 
-# Importa la classe dal file con il nome esatto che hai scelto
+
 from .model_Niso_adaptive_ff_thr import DBSI_Adaptive
 from .utils.tools import load_data, estimate_snr_robust, correct_rician_bias
 from .calibration.optimizer import optimize_hyperparameters

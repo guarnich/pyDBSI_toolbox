@@ -101,7 +101,7 @@ def generate_fibonacci_sphere(n_points):
 
 
 @njit(cache=True, fastmath=True)
-def build_design_matrix(bvals, bvecs, fiber_dirs, iso_grid, ad=1.5e-3, rd=0.4e-3):
+def build_design_matrix(bvals, bvecs, fiber_dirs, iso_grid, ad=1.5e-3, rd=0.5e-3):
     """
     Build DBSI design matrix.
 
@@ -116,9 +116,15 @@ def build_design_matrix(bvals, bvecs, fiber_dirs, iso_grid, ad=1.5e-3, rd=0.4e-3
     iso_grid : array (L,)
         Isotropic ADC values (mm²/s), range 0 to 3.5e-3
     ad : float
-        Axial diffusivity for fiber basis (default 1.5e-3 mm²/s)
+        Axial diffusivity for fiber basis (default 1.5e-3 mm²/s).
+        Must match DESIGN_MATRIX_AD in model_Niso_adaptive_ff_thr.py.
     rd : float
-        Radial diffusivity for fiber basis (default 0.4e-3 mm²/s)
+        Radial diffusivity for fiber basis (default 0.5e-3 mm²/s).
+        Must match DESIGN_MATRIX_RD in model_Niso_adaptive_ff_thr.py.
+        NOTE: the previous default was 0.4e-3, which differed from the
+        model constant DESIGN_MATRIX_RD = 0.5e-3. Any caller that relied
+        on the default was silently using a different RD than the model.
+        The default is now corrected to 0.5e-3.
 
     Returns
     -------

@@ -90,6 +90,7 @@ python -m scripts.run_dbsi \
 * `n_iso`: Number of isotropic basis functions (default: auto-calibrated).
 * `reg_lambda`: L2 regularization strength (default: auto-calibrated).
 * `n_dirs`: Number of fiber directions on the hemisphere (default: 100).
+* `iso_range`: ADC range of the isotropic basis in mm²/s (default: `(0.0, 3.5e-3)`).
 * `enable_step2`: Whether to refine diffusivities non-linearly (default: True).
 * `force_n_iso`: Forces the algorithm into 2-ISO or 3-ISO mode, bypassing automatic protocol detection.
 

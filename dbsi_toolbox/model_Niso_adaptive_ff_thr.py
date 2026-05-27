@@ -547,7 +547,7 @@ def _refine_AD_RD_3iso(bvals, bvecs, sig_norm, fiber_dir,
 # ─────────────────────────────────────────────────────────────────────────────
 
 @njit(parallel=True, cache=True, fastmath=True)
-def _fit_voxels_2iso(data, coords, A, AtA, At, bvals, bvecs,
+def _fit_voxels_2iso(data, coords, AtA, At, bvals, bvecs,
                      fiber_dirs, iso_grid, b0_thr,
                      enable_step2, fiber_threshold, out):
     """
@@ -557,7 +557,11 @@ def _fit_voxels_2iso(data, coords, A, AtA, At, bvals, bvecs,
     caller. The solver is called with reg=0.0 to avoid double-counting the
     regularization penalty.
 
-    b0_thr is precomputed by the caller (= b_min + 100 s/mm²) so it is not
+    The design matrix A is NOT passed here; all computation uses At (the
+    transpose), which is all the solver needs. Passing A was a no-op that
+    added unnecessary memory traffic on every batch call.
+
+    b0_thr is precomputed by the caller (= 100 s/mm²) so it is not
     recomputed redundantly for every voxel inside the parallel loop.
 
     Writes into output channels 0, 1, 4–10.  Channels 2 (HF) and 3 (WF)
@@ -585,7 +589,7 @@ def _fit_voxels_2iso(data, coords, A, AtA, At, bvals, bvecs,
         x, y, z = coords[idx]
         sig = data[x, y, z]
 
-        # S₀ normalisation — b0_thr precomputed by caller
+        # S₀ normalisation
         s0  = 0.0; cnt = 0
         for i in range(len(bvals)):
             if bvals[i] < b0_thr:
@@ -688,7 +692,7 @@ def _fit_voxels_2iso(data, coords, A, AtA, At, bvals, bvecs,
 
 
 @njit(parallel=True, cache=True, fastmath=True)
-def _fit_voxels_3iso(data, coords, A, AtA, At, bvals, bvecs,
+def _fit_voxels_3iso(data, coords, AtA, At, bvals, bvecs,
                      fiber_dirs, iso_grid, b0_thr,
                      enable_step2, fiber_threshold, out):
     """
@@ -698,8 +702,8 @@ def _fit_voxels_3iso(data, coords, A, AtA, At, bvals, bvecs,
     caller. The solver is called with reg=0.0 to avoid double-counting the
     regularization penalty.
 
-    b0_thr is precomputed by the caller (= b_min + 100 s/mm²) so it is not
-    recomputed redundantly for every voxel inside the parallel loop.
+    The design matrix A is NOT passed here; all computation uses At (the
+    transpose). See _fit_voxels_2iso for rationale.
 
     Writes into output channels 0–10.  All channels are valid (no NaN from
     model choice; NaN may still appear in AD/RD/FA where FF ≤ fiber_threshold).
@@ -726,7 +730,7 @@ def _fit_voxels_3iso(data, coords, A, AtA, At, bvals, bvecs,
         x, y, z = coords[idx]
         sig = data[x, y, z]
 
-        # S₀ normalisation — b0_thr precomputed by caller
+        # S₀ normalisation
         s0 = 0.0; cnt = 0
         for i in range(len(bvals)):
             if bvals[i] < b0_thr:
@@ -739,8 +743,6 @@ def _fit_voxels_3iso(data, coords, A, AtA, At, bvals, bvecs,
         sig_norm = sig / s0
 
         # ── Step 1: regularised NNLS ──────────────────────────────────────
-        # AtA is already pre-regularized by the caller (differentiated scheme).
-        # Pass reg=0.0 to the solver to avoid double-counting the penalty.
         Aty = np.zeros(AtA.shape[0])
         for r in range(AtA.shape[0]):
             val = 0.0
@@ -864,7 +866,7 @@ class DBSI_Adaptive:
     n_dirs : int
         Number of fibre directions on the Fibonacci hemisphere. Default: 100.
     iso_range : tuple (float, float)
-        ADC range [mm²/s] of the isotropic basis. Default: (0.0, 4.5e-3).
+        ADC range [mm²/s] of the isotropic basis. Default: (0.0, 3.5e-3).
     fiber_threshold : float
         Minimum fibre fraction for AD/RD/FA estimation. Default: 0.15.
     force_n_iso : int or None
@@ -996,10 +998,6 @@ class DBSI_Adaptive:
         print("\n3. Applying Rician Bias Correction...")
         coords = np.argwhere(mask)
 
-        # Vectorized Koay-Basser correction over all masked voxels at once.
-        # Avoids a Python for-loop over potentially millions of voxels.
-        # For voxels where signal² ≤ 2σ² the corrected value is set to 0
-        # (SNR too low to recover a meaningful signal estimate).
         xs, ys, zs  = coords[:, 0], coords[:, 1], coords[:, 2]
         data_corr   = np.zeros_like(data, dtype=np.float32)
         noise_floor = 2.0 * sigma**2
@@ -1009,7 +1007,7 @@ class DBSI_Adaptive:
                                np.sqrt(np.maximum(masked_sq - noise_floor, 0.0)),
                                0.0).astype(np.float32)
         data_corr[xs, ys, zs] = corrected
-        del masked_sq, valid_mask, corrected   # free memory
+        del masked_sq, valid_mask, corrected
 
         # ── Design matrix ──────────────────────────────────────────────────
         print("\n4. Building Design Matrix...")
@@ -1022,12 +1020,7 @@ class DBSI_Adaptive:
         AtA = A.T @ A
         At  = A.T
 
-        # ── Differentiated regularization (Fix 1) ─────────────────────────
-        # Fiber columns (0..n_dirs-1) are penalized n_dirs× more heavily than
-        # isotropic columns to counteract the L2 cost advantage of distributing
-        # a given fraction across many directions (see module docstring).
-        # The solver is then called with reg=0.0 so the penalty is not counted
-        # twice (Fix 2).
+        # ── Differentiated regularization ─────────────────────────────────
         n_dirs_actual = len(fiber_dirs)
         reg_vec = np.ones(AtA.shape[0])
         reg_vec[:n_dirs_actual] = self.reg_lambda * n_dirs_actual
@@ -1042,13 +1035,11 @@ class DBSI_Adaptive:
 
         # ── Allocate output ────────────────────────────────────────────────
         results = np.zeros(data.shape[:3] + (self.N_CHANNELS,), dtype=np.float32)
-        # Pre-initialise diffusivity channels to NaN (valid only where FF > thr)
         results[..., 5]  = np.nan   # AD
         results[..., 6]  = np.nan   # RD
         results[..., 7]  = np.nan   # FA
         results[..., 9]  = np.nan   # AD_lin
         results[..., 10] = np.nan   # RD_lin
-        # In 2-ISO mode HF and WF are meaningless → NaN
         if not use_3iso:
             results[..., 2] = np.nan   # HF
             results[..., 3] = np.nan   # WF
@@ -1063,14 +1054,7 @@ class DBSI_Adaptive:
 
         _kernel = _fit_voxels_3iso if use_3iso else _fit_voxels_2iso
 
-        # b0 threshold: use a fixed absolute value of 100 s/mm² rather than
-        # min(bvals) + 100. The relative approach fails when b_min is non-zero
-        # (e.g. b_min = 100 → b0_thr = 200, incorrectly including low DWI
-        # volumes as b0). The absolute threshold of 100 s/mm² is standard
-        # (FSL, MRtrix) and consistent with the SNR estimation step which uses
-        # b < 50. Signal attenuation at b = 100 is < 15% even for unrestricted
-        # water, so including these volumes as pseudo-b0 is acceptable and
-        # matches the behaviour expected by most scanner protocols.
+        # b0 threshold: fixed at 100 s/mm² (FSL/MRtrix convention).
         b0_thr = 100.0
 
         t0 = time.time()
@@ -1078,8 +1062,10 @@ class DBSI_Adaptive:
             for i in range(n_batches):
                 start = i * batch_sz
                 end   = min((i + 1) * batch_sz, n_voxels)
+                # A is NOT passed to the kernel — it is unused there.
+                # All computation goes through AtA_reg and At.
                 _kernel(
-                    data_corr, coords[start:end], A, AtA_reg, At,
+                    data_corr, coords[start:end], AtA_reg, At,
                     bvals, bvecs, fiber_dirs, iso_grid,
                     b0_thr, self.enable_step2,
                     self.fiber_threshold, results

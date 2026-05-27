@@ -80,34 +80,17 @@ def step2_refine_diffusivities_adaptive(bvals, bvecs, y_norm, fiber_dir,
                                         D_res, D_hin, D_wat,
                                         AD_init, RD_init):
     """
+    .. deprecated::
+        This function is no longer used by the DBSI pipeline.
+        AD/RD refinement is performed by ``_refine_AD_RD_2iso`` and
+        ``_refine_AD_RD_3iso`` defined in ``model_Niso_adaptive_ff_thr.py``,
+        which use the correct 2-ISO / 3-ISO compartment logic and adaptive
+        range scaling based on estimated anisotropy.
+
+        Kept here only for external code that may have imported this symbol.
+        Do not call from new code.
+
     Step 2: Refine fiber AD/RD with tissue-adaptive initialization.
-    
-    Grid search centers on AD_init/RD_init from Step 1 coarse estimate,
-    with adaptive range (±50% of initialized values).
-    
-    Parameters
-    ----------
-    bvals, bvecs : arrays
-        Diffusion protocol
-    y_norm : array
-        Normalized signal
-    fiber_dir : array (3,)
-        Fiber direction
-    f_fiber, f_res, f_hin, f_wat : float
-        Fraction estimates
-    D_res, D_hin, D_wat : float
-        Isotropic diffusivity centroids
-    AD_init : float
-        Initial axial diffusivity (from coarse search)
-    RD_init : float
-        Initial radial diffusivity (from coarse search)
-        
-    Returns
-    -------
-    best_ax : float
-        Refined axial diffusivity
-    best_rad : float
-        Refined radial diffusivity
     """
     # Use initialization as starting point
     center_ax = AD_init
@@ -214,10 +197,10 @@ def step2_refine_diffusivities(bvals, bvecs, y_norm, fiber_dir,
                                f_fiber, f_res, f_hin, f_wat,
                                D_res, D_hin, D_wat):
     """
-    Step 2: Legacy version with fixed WM defaults.
-    
-    This version calls the adaptive version with hard-coded defaults.
-    Kept for backward compatibility with old code.
+    .. deprecated::
+        This function is no longer used by the DBSI pipeline.
+        See ``step2_refine_diffusivities_adaptive`` for details.
+        Kept for backward compatibility only.
     """
     return step2_refine_diffusivities_adaptive(
         bvals, bvecs, y_norm, fiber_dir,

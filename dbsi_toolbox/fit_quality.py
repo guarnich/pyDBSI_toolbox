@@ -81,6 +81,13 @@ THRESH_WAT  = 3.0e-3    # mm²/s
 _D_RES_NOM  = 0.15e-3   # nominal restricted centroid when RF≈0
 _D_WAT_NOM  = 3.05e-3   # free water ADC at 37°C
 
+# Upper bound for the iso ADC recovery — must match iso_range[1] used in
+# DBSI_Adaptive (default 3.5e-3).  Using _D_WAT_NOM = 3.05e-3 here was
+# incorrect: high-free-water voxels with a true D_nonrf between 3.05e-3 and
+# 3.5e-3 would have their centroid underestimated, inflating R² errors in
+# CSF/ventricular regions.
+_ISO_ADC_MAX = 3.5e-3   # mm²/s — must match DBSI_Adaptive iso_range[1]
+
 # Output channel indices — must match DBSI_Adaptive.CH
 _CH_FF      = 0
 _CH_RF      = 1
@@ -110,6 +117,10 @@ def _recover_iso_adcs_2iso(rf, nrf, adc_iso):
     D_res is not stored but is always close to _D_RES_NOM since the RF pool
     is constrained to ADC ≤ 0.3e-3 mm²/s during fitting.
 
+    The upper clamp uses _ISO_ADC_MAX (3.5e-3) rather than _D_WAT_NOM
+    (3.05e-3) to correctly handle high-free-water voxels whose centroid ADC
+    can reach up to the iso_grid maximum (3.5e-3 by default).
+
     Returns
     -------
     D_res, D_nonrf : float  (mm²/s)
@@ -122,8 +133,9 @@ def _recover_iso_adcs_2iso(rf, nrf, adc_iso):
 
     if nrf > 1e-6:
         D_nonrf = (adc_iso * ftot_iso - rf * D_res) / nrf
-        # Clamp to physiological range (hindered + free water combined)
-        D_nonrf = max(THRESH_RES, min(_D_WAT_NOM, D_nonrf))
+        # Clamp to physiological range: lower bound is hindered threshold,
+        # upper bound is the iso_grid maximum (not _D_WAT_NOM = 3.05e-3).
+        D_nonrf = max(THRESH_RES, min(_ISO_ADC_MAX, D_nonrf))
     else:
         D_nonrf = adc_iso
 
@@ -220,7 +232,12 @@ def _quality_kernel_2iso(data, coords, bvals, bvecs, fiber_dirs,
         D_res, D_nonrf = _recover_iso_adcs_2iso(rf, nrf, adc_iso)
 
         # ── Fiber direction: grid search if FF > threshold ────────────────
-        has_fiber = (not (ad != ad)) and ff > fiber_threshold  # NaN check
+        # NaN check: use np.isnan(ad) explicitly rather than the ad != ad
+        # idiom, which can be optimised away under fastmath=True (LLVM
+        # -ffinite-math-only may assume no NaN and constant-fold the
+        # comparison to False, causing has_fiber to be incorrectly True for
+        # voxels where AD is NaN / no fiber was estimated).
+        has_fiber = (not np.isnan(ad)) and ff > fiber_threshold
         best_dir  = fiber_dirs[0]
 
         if has_fiber:
@@ -317,7 +334,9 @@ def _quality_kernel_3iso(data, coords, bvals, bvecs, fiber_dirs,
 
         D_res, D_hin, D_wat = _recover_iso_adcs_3iso(rf, hf, wf, adc_iso)
 
-        has_fiber = (not (ad != ad)) and ff > fiber_threshold
+        # NaN check: use np.isnan(ad) — safe under fastmath=True.
+        # See _quality_kernel_2iso for the rationale.
+        has_fiber = (not np.isnan(ad)) and ff > fiber_threshold
         best_dir  = fiber_dirs[0]
 
         if has_fiber:
@@ -481,9 +500,10 @@ def compute_fit_quality(data, bvals, bvecs, mask, results, model_mode,
     results_f32 = results.astype(np.float32)
 
     # Replace NaN in results with 0 for Numba (NaN check inside kernel handles
-    # the fiber/no-fiber logic correctly via the `ad != ad` idiom)
+    # the fiber/no-fiber logic correctly via np.isnan — safe under fastmath).
     results_work = np.where(np.isnan(results_f32), 0.0, results_f32).astype(np.float32)
-    # But keep original NaN pattern for AD channel so kernel detects no-fiber
+    # Preserve original NaN pattern for the AD channel: the kernel uses
+    # np.isnan(ad) to decide whether to include the fiber term.
     results_work[..., _CH_AD] = results_f32[..., _CH_AD]
 
     _kernel = _quality_kernel_3iso if model_mode == 3 else _quality_kernel_2iso

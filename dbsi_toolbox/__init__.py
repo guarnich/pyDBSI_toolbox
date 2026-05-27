@@ -1,46 +1,39 @@
 """
-DBSI Toolbox - Diffusion Basis Spectrum Imaging
+DBSI Core Module - Basis Functions and Solvers
 
-Main Components:
-- DBSI_Adaptive: Main model class for fitting DBSI to diffusion MRI data. 
-  It automatically adapts between 2-ISO (RF + NRF) and 3-ISO (RF + HF + WF) 
-  compartmentalization based on the acquisition protocol.
-- load_data: Utility for loading NIfTI data and gradients
-- optimize_hyperparameters: Monte Carlo calibration
+Contains the mathematical core of the DBSI implementation:
+- Design matrix construction (cylinder model)
+- Fiber direction generation (hemisphere)
+- NNLS solver with coordinate descent
+- Fiber FA computation
 
-Outputs (11 channels):
-            0: FF   - Fiber fraction (always valid)
-            1: RF   - Restricted fraction / inflammation/cells (always valid)
-            2: HF   - Hindered fraction (NaN in 2-ISO mode)
-            3: WF   - Free-water fraction / CSF (NaN in 2-ISO mode)
-            4: NRF  - Non-restricted fraction / edema/CSF (= HF + WF)
-            5: AD   - Axial diffusivity (NaN if FF <= fiber_threshold)
-            6: RD   - Radial diffusivity (NaN if FF <= fiber_threshold)
-            7: FA   - Fiber FA (NaN if FF <= fiber_threshold)
-            8: ADC_iso - Mean isotropic ADC (always valid)
-            9: AD_lin  - Analytical AD estimate (NaN if FF <= fiber_threshold)
-            10: RD_lin - Analytical RD estimate (NaN if FF <= fiber_threshold)
-            
-References:
-    Wang Y, et al. (2011) Brain. Quantification of increased cellularity 
-    during inflammatory demyelination.
+Note on step2_refine_diffusivities / step2_refine_diffusivities_adaptive
+------------------------------------------------------------------------
+These functions are deprecated and no longer used by the pipeline.
+AD/RD refinement in the fitting kernels is handled by the private
+functions _refine_AD_RD_2iso and _refine_AD_RD_3iso defined in
+model_Niso_adaptive_ff_thr.py. The legacy functions are kept in
+solvers.py for backward compatibility but are NOT exported here to
+avoid misleading downstream code into using them.
 """
 
-__version__ = "2.0.0"
-__author__ = "DBSI Toolbox Contributors"
+from .basis import (
+    build_design_matrix,
+    generate_fibonacci_sphere_hemisphere,
+    generate_fibonacci_sphere,
+)
 
-
-from .model_Niso_adaptive_ff_thr import DBSI_Adaptive
-from .utils.tools import load_data, estimate_snr_robust, correct_rician_bias
-from .calibration.optimizer import optimize_hyperparameters
-from .fit_quality import compute_fit_quality, save_fit_quality
+from .solvers import (
+    nnls_coordinate_descent,
+    compute_weighted_centroids,
+    compute_fiber_fa,
+)
 
 __all__ = [
-    "DBSI_Adaptive",
-    "load_data",
-    "estimate_snr_robust",
-    "correct_rician_bias",
-    "optimize_hyperparameters",
-    "compute_fit_quality",
-    "save_fit_quality"
+    "build_design_matrix",
+    "generate_fibonacci_sphere_hemisphere",
+    "generate_fibonacci_sphere",
+    "nnls_coordinate_descent",
+    "compute_weighted_centroids",
+    "compute_fiber_fa",
 ]

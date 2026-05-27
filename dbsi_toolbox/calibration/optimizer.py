@@ -71,6 +71,14 @@ from ..core.solvers import nnls_coordinate_descent
 THRESH_RESTRICTED = 0.3e-3   # mm²/s — RF/HF boundary (Wang et al. 2011)
 THRESH_FREE       = 3.0e-3   # mm²/s — HF/WF boundary
 
+# Design matrix diffusivities — MUST match model_Niso_adaptive_ff_thr.py
+# DESIGN_MATRIX_AD and DESIGN_MATRIX_RD.  Using different values here would
+# mean the calibration optimises (n_iso, λ) against a design matrix that
+# differs from the one used during fitting, making the selected hyperparameters
+# suboptimal for the actual model.
+_DESIGN_MATRIX_AD = 1.5e-3   # mm²/s — matches DESIGN_MATRIX_AD in model
+_DESIGN_MATRIX_RD = 0.5e-3   # mm²/s — matches DESIGN_MATRIX_RD in model
+
 # Nominal fiber tensor diffusivities (WM in vivo at 3T, Wang 2011)
 _D_AX_NOMINAL  = 1.60e-3    # mm²/s
 _D_RAD_NOMINAL = 0.40e-3    # mm²/s
@@ -360,6 +368,10 @@ def optimize_hyperparameters(bvals, bvecs, snr, n_mc=1000):
     more than isotropic columns) is applied identically to the main kernel so
     the selected hyperparameters are directly transferable without re-scaling.
 
+    The design matrix is built with the same AD/RD as the fitting model
+    (_DESIGN_MATRIX_AD = 1.5e-3, _DESIGN_MATRIX_RD = 0.5e-3) to ensure
+    the calibrated hyperparameters apply to the same forward model.
+
     Parameters
     ----------
     bvals  : ndarray (N,)
@@ -375,6 +387,8 @@ def optimize_hyperparameters(bvals, bvecs, snr, n_mc=1000):
     print(f"\n[CALIBRATION — Comprehensive Multi-Tissue]")
     print(f"  Scenarios ({len(_SCENARIOS)}): {', '.join(_SCENARIOS.keys())}")
     print(f"  SNR = {snr:.1f}  |  MC iterations = {n_mc} per cell")
+    print(f"  Design matrix: AD={_DESIGN_MATRIX_AD*1e3:.1f}e-3, "
+          f"RD={_DESIGN_MATRIX_RD*1e3:.1f}e-3 mm²/s")
     print(f"  Reg scheme: λ_fiber = λ × n_dirs,  λ_iso = λ  (solver reg = 0.0)")
 
     # ── Hyperparameter grid ───────────────────────────────────────────────────
@@ -413,7 +427,13 @@ def optimize_hyperparameters(bvals, bvecs, snr, n_mc=1000):
 
     for n_iso in bases_grid:
         iso_grid = np.linspace(0.0, 3.5e-3, n_iso)
-        A   = build_design_matrix(bvals, bvecs, fiber_dirs, iso_grid)
+
+        # Build design matrix with the same AD/RD used in the fitting model.
+        # Previously the default rd=0.4e-3 was used here, which differs from
+        # DESIGN_MATRIX_RD=0.5e-3 and caused the calibrated hyperparameters
+        # to be suboptimal for the actual fitting step.
+        A   = build_design_matrix(bvals, bvecs, fiber_dirs, iso_grid,
+                                  ad=_DESIGN_MATRIX_AD, rd=_DESIGN_MATRIX_RD)
         AtA = A.T @ A
         At  = A.T
 

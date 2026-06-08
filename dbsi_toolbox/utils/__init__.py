@@ -12,12 +12,12 @@ from .tools import (
     load_data,
     print_protocol_summary,
     estimate_snr_robust,
-    correct_rician_bias,
+    # correct_rician_bias,
 )
 
 __all__ = [
     "load_data",
     "print_protocol_summary",
     "estimate_snr_robust",
-    "correct_rician_bias",
+    # "correct_rician_bias",
 ]

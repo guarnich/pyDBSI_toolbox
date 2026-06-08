@@ -65,12 +65,13 @@ def estimate_snr_robust(data, bvals, mask, verbose=True):
         std_b0[std_b0 == 0] = 1e-10
         valid_mask = mask
         if np.sum(valid_mask) == 0:
-            if verbose: print("  ! No valid voxels. Defaulting to 20.0")
+            if verbose: print(" No valid voxels! Defaulting to 20.0")
             return 20.0, 1.0
         mean_masked = mean_b0[valid_mask]
         std_masked = std_b0[valid_mask]
         snr_apparent = mean_masked / std_masked
         snr_corrected = snr_apparent.copy()
+        # Iteratively correct for Rician bias in the noise estimate, which is significant at low SNR.
         # 5 iterations is insufficient for convergence at typical in-vivo SNR
         # (e.g. SNR=30 requires ~14 iterations to converge to delta<0.01).
         # 20 iterations ensures convergence across the full physiological range
@@ -106,22 +107,22 @@ def estimate_snr_robust(data, bvals, mask, verbose=True):
             print(f"  Estimated Noise Sigma: {sigma:.4f}")
         return float(snr), float(sigma)
 
-def correct_rician_bias(signal, sigma):
-    """
-    Koay-Basser approximation for Rician bias correction.
+# def correct_rician_bias(signal, sigma):
+#     """
+#     Koay-Basser approximation for Rician bias correction.
 
-    For voxels where signal^2 <= 2*sigma^2 (SNR < ~1.4), the correction
-    cannot be applied (negative under sqrt). These are set to 0 rather than
-    retaining the biased original signal, which would be the dominant noise
-    contribution and not a meaningful signal estimate.
-    """
-    if sigma <= 0:
-        return signal
-    signal_sq = signal**2
-    noise_floor = 2.0 * sigma**2
-    mask_valid = signal_sq > noise_floor
-    corrected = np.zeros_like(signal)
-    corrected[mask_valid] = np.sqrt(signal_sq[mask_valid] - noise_floor)
-    # ~mask_valid: SNR too low to correct → 0 (noise floor; not the biased signal)
-    corrected[~mask_valid] = 0.0
-    return corrected
+#     For voxels where signal^2 <= 2*sigma^2 (SNR < ~1.4), the correction
+#     cannot be applied (negative under sqrt). These are set to 0 rather than
+#     retaining the biased original signal, which would be the dominant noise
+#     contribution and not a meaningful signal estimate.
+#     """
+#     if sigma <= 0:
+#         return signal
+#     signal_sq = signal**2
+#     noise_floor = 2.0 * sigma**2
+#     mask_valid = signal_sq > noise_floor
+#     corrected = np.zeros_like(signal)
+#     corrected[mask_valid] = np.sqrt(signal_sq[mask_valid] - noise_floor)
+#     # ~mask_valid: SNR too low to correct → 0 (noise floor; not the biased signal)
+#     corrected[~mask_valid] = 0.0
+#     return corrected

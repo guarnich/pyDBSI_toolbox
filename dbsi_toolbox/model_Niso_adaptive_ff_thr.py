@@ -131,7 +131,7 @@ from .core.solvers import (
 )
 from .calibration.optimizer import optimize_hyperparameters
 
-from .utils.tools import estimate_snr_robust, correct_rician_bias
+from .utils.tools import estimate_snr_robust #, correct_rician_bias
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -890,7 +890,7 @@ class DBSI_Adaptive:
     N_CHANNELS = 11
 
     def __init__(self, n_iso=None, reg_lambda=None, enable_step2=True,
-                 n_dirs=100, iso_range=(0.0, 3.5e-3),
+                 n_dirs=150, iso_range=(0.0, 3.5e-3),
                  fiber_threshold=FIBER_THRESHOLD, force_n_iso=None):
         self.n_iso           = n_iso
         self.reg_lambda      = reg_lambda

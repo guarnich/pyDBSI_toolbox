@@ -24,7 +24,7 @@ def main():
     parser.add_argument("--skip-calibration", action="store_true")
     parser.add_argument("--n-iso", type=int, default=None)
     parser.add_argument("--lambda", type=float, dest="reg_lambda", default=None)
-    parser.add_argument("--n-dirs", type=int, default=150)
+    parser.add_argument("--n-dirs", type=int, default=200)
     parser.add_argument("--no-step2", action="store_true")
     parser.add_argument("--force-n-iso", type=int, choices=[2, 3], default=None, 
                         help="Override automatic model selection (2 or 3)")

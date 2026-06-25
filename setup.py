@@ -1,9 +1,9 @@
 """
-DBSI Toolbox - Setup Configuration
+DBSI Toolbox - Setup Configuration (v3 - Hybrid Two-Stage Architecture)
 
 Installation:
     pip install -e .
-    
+
 Or:
     python setup.py install
 """
@@ -15,10 +15,10 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="dbsi-toolbox",
-    version="2.0.0",
+    version="3.0.0",
     author="DBSI Toolbox Contributors",
     author_email="",
-    description="Diffusion Basis Spectrum Imaging (DBSI) - Two-Step Implementation with Numba Acceleration",
+    description="Diffusion Basis Spectrum Imaging (DBSI) - Hybrid Two-Stage Architecture with Numba Acceleration",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/guarnich/pyDBSI_toolbox",

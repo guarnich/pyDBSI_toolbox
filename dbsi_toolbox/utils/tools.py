@@ -75,7 +75,7 @@ def estimate_snr_robust(data, bvals, mask, verbose=True):
         # 5 iterations is insufficient for convergence at typical in-vivo SNR
         # (e.g. SNR=30 requires ~14 iterations to converge to delta<0.01).
         # 20 iterations ensures convergence across the full physiological range
-        # (SNR 10–100) with negligible additional cost.
+        # (SNR 10-100) with negligible additional cost.
         for i in range(20):
             snr_old = snr_corrected.copy()
             bias_term = mean_masked**2 / (2 * snr_corrected**2 + 1e-10)
@@ -110,7 +110,7 @@ def estimate_snr_robust(data, bvals, mask, verbose=True):
 # def correct_rician_bias(signal, sigma):
 #     """
 #     Koay-Basser approximation for Rician bias correction.
-
+#
 #     For voxels where signal^2 <= 2*sigma^2 (SNR < ~1.4), the correction
 #     cannot be applied (negative under sqrt). These are set to 0 rather than
 #     retaining the biased original signal, which would be the dominant noise
@@ -123,6 +123,6 @@ def estimate_snr_robust(data, bvals, mask, verbose=True):
 #     mask_valid = signal_sq > noise_floor
 #     corrected = np.zeros_like(signal)
 #     corrected[mask_valid] = np.sqrt(signal_sq[mask_valid] - noise_floor)
-#     # ~mask_valid: SNR too low to correct → 0 (noise floor; not the biased signal)
+#     # ~mask_valid: SNR too low to correct -> 0 (noise floor; not the biased signal)
 #     corrected[~mask_valid] = 0.0
 #     return corrected

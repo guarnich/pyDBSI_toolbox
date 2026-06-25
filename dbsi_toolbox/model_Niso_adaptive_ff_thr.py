@@ -1,122 +1,105 @@
 """
-DBSI Adaptive Model — Isotropic Compartment Selection Based on Acquisition Scheme
-==================================================================================
+DBSI Adaptive Model v3 — Hybrid Two-Stage Architecture
+=========================================================
 
-This module implements a unified DBSI fitting pipeline that automatically selects
-between a **two-compartment** (2-ISO) and a **three-compartment** (3-ISO) isotropic
-model based on the maximum b-value and the number of distinct non-zero b-value
-shells present in the acquisition protocol.
+WHY v2's SINGLE-STAGE EXHAUSTIVE DICTIONARY WAS REPLACED
+-------------------------------------------------------------
+v2 attempted to estimate fiber orientation AND (AD, RD) simultaneously
+from one linear NNLS solve over an exhaustive (direction x AD/RD-pair)
+dictionary, taking AD_final/RD_final as NNLS-weighted centroids over the
+activated anisotropic columns. Systematic synthetic recovery validation
+(55 swept configurations, `recovery_validation.py`) demonstrated this is
+NOT numerically identifiable: median AD/RD relative errors ranged from
+~20% to >150% across every tested dictionary density, getting WORSE as
+the dictionary was made finer (more candidate (AD,RD) pairs -> more
+simultaneously-activated columns -> a less informative centroid), and no
+regularization strength fixed it. This is a structural collinearity
+failure, not a tuning problem.
 
-Compartment Definitions
------------------------
-Both models share the restricted compartment (RF) definition of Wang et al. (2011):
+v3 ARCHITECTURE: STAGE A (detection) + STAGE B (estimation)
+-----------------------------------------------------------------
+The core idea Alonso Ramirez-Manzanares's feedback motivated — that the
+dictionary should "know" pathology changes AD/RD, not just orientation —
+is preserved, but the two questions (which direction? what diffusivity?)
+are now answered by two separate, appropriately-sized linear problems:
 
-    RF  : ADC ≤ THRESH_RES  (0.3 × 10⁻³ mm²/s) — cells, inflammatory infiltrate
-    HF  : THRESH_RES < ADC ≤ THRESH_WAT          — hindered extracellular water
-    WF  : ADC > THRESH_WAT  (3.0 × 10⁻³ mm²/s)  — free water, CSF, oedema
+  STAGE A — direction detection (sparse, exhaustive dictionary)
+      A small exhaustive (direction x AD/RD-pair) dictionary (deliberately
+      coarse on the AD/RD axis — Stage A does not need fine diffusivity
+      resolution, only fiber/no-fiber detection per direction) is fit via
+      regularized NNLS with heavy sparsity on the anisotropic block
+      (lambda_aniso). `core.solvers.select_dominant_directions` collapses
+      the per-pair weight breakdown and reports which 1-2 hemisphere
+      directions carry meaningful weight. We do NOT trust Stage A's
+      (AD, RD) breakdown — only its directional answer.
+
+  STAGE B — diffusivity estimation (closed-form, conditioned)
+      Given Stage A's selected direction(s), `core.solvers.
+      estimate_AD_RD_conditioned` performs a small closed-form weighted
+      least-squares fit (the same analytical construction validated as
+      the v1/v2 linear AD/RD initialisation) to obtain the final AD/RD.
+      Because direction is now FIXED rather than searched, this problem
+      has only 2 free parameters and is well-conditioned regardless of
+      how rich Stage A's dictionary was.
+
+There is still no non-linear Step 2 grid search: Stage B's closed-form
+estimate is the final value, not an initial guess for further
+refinement.
+
+Synthetic validation summary (see project records for full sweep)
+-----------------------------------------------------------------------
+With a coarse Stage A dictionary (e.g. ~30 directions x 3x3 AD/RD pairs)
+and lambda_base ~ 0.005 (lambda_aniso = lambda_base * n_aniso_cols,
+lambda_iso = lambda_base): direction recovery cosine similarity ~1.0
+across randomized ground truth; median AD relative error ~10-20%, median
+RD relative error ~15-25%, with wider (but bounded, unlike v2) upper-tail
+errors. This is a substantial improvement over v2 but AD/RD precision —
+especially RD, the demyelination marker — should still be treated with
+appropriate caution; see project validation notes before reporting
+voxel-wise AD/RD as a precise quantitative biomarker without further
+protocol-specific validation.
+
+Compartment Definitions (unchanged from v1/v2)
+---------------------------------------------------
+    RF  : ADC <= THRESH_RES  (0.3 x 10^-3 mm^2/s) — cells, inflammatory infiltrate
+    HF  : THRESH_RES < ADC <= THRESH_WAT          — hindered extracellular water
+    WF  : ADC > THRESH_WAT  (3.0 x 10^-3 mm^2/s)  — free water, CSF, oedema
     NRF : HF + WF  (Non-Restricted Fraction, 2-ISO mode only)
 
-Model Selection Criterion
---------------------------
-The two models are fundamentally constrained by signal physics:
+Model Selection Criterion (unchanged from v1/v2)
+------------------------------------------------------
+2-ISO vs 3-ISO selection based on b_max / shell count is unaffected by
+the v3 architecture change — it governs the isotropic block only.
 
-    2-ISO model (NRF = HF + WF merged):
-        Selected when  b_max < B_THRESH_3ISO  (default: 3000 s/mm²)
-        OR             n_nonzero_shells < MIN_SHELLS_3ISO  (default: 3)
-
-        Rationale: At b_max < 3000 s/mm² the free water signal
-        (exp(-b × 3.0e-3)) drops below ~5% of S₀ at the highest shell,
-        placing it near or below the noise floor at typical in-vivo SNR
-        (~25–50). The NNLS cannot reliably separate HF from WF under
-        these conditions; merging them into a single NRF compartment is
-        both numerically stable and physiologically meaningful because
-        the clinically relevant distinction — cellular (RF) vs. non-cellular
-        (NRF) water — is preserved.
-
-    3-ISO model (HF and WF estimated separately):
-        Selected when  b_max ≥ B_THRESH_3ISO  AND  n_nonzero_shells ≥ MIN_SHELLS_3ISO
-
-        Rationale: At b_max ≥ 3000 s/mm² with ≥ 3 diffusion-weighted shells,
-        the NNLS has sufficient measurements to resolve the full isotropic
-        spectrum. The hindered-to-free-water contrast at intermediate b-values
-        (b ~ 300–700 s/mm²) combined with the extended ADC range visible at
-        high b provides the necessary information for stable three-compartment
-        estimation. The "efficient best" calibration criterion automatically
-        selects higher N_iso and λ in this regime to match the expanded
-        spectral resolution.
-
-Restricted Fraction — Minimum b-value Requirements
-----------------------------------------------------
-The restricted compartment (ADC ≤ 0.3e-3 mm²/s) has the following detectability
-constraints:
-
-    • b_max < 1000 s/mm²: RF not quantifiable. The RF/Hindered signal ratio
-      at the highest shell is < 2×, insufficient for NNLS disambiguation at
-      typical SNR. RF may be detected (non-zero) but cannot be reliably
-      quantified.
-
-    • 1000 ≤ b_max < 1500 s/mm²: Qualitative estimation only. Signal ratio
-      RF/Hindered ≈ 2–3×. Requires SNR > 40. Multi-shell design mandatory.
-
-    • 1500 ≤ b_max < 2000 s/mm²: Marginal quantitative regime. Wang et al. 2011
-      validated the RF threshold (0.3 mm²/ms) at b = 1500 as the lowest
-      informative shell in a multi-shell design.
-
-    • b_max ≥ 2000 s/mm²: Quantitatively reliable with ≥ 2 diffusion-weighted
-      shells. This is the validated minimum for clinical applications per Wang
-      et al. 2011 and Shirani et al. 2019.
-
-    • b_max ≥ 3000 s/mm²: Optimal. Additional shell diversity allows separation
-      of HF from WF. RF precision further improved by the high-b plateau.
-
-Regularization Strategy — Differentiated Fiber/Isotropic Penalty
------------------------------------------------------------------
-Standard L2 regularization (λ‖w‖²) creates a systematic imbalance between the
-fiber and isotropic sub-dictionaries when n_dirs >> n_iso:
-
-    The NNLS optimizer can represent a fraction f_total using the fiber dictionary
-    at a cost of  λ · n_dirs · (f_total/n_dirs)² = λ · f_total²/n_dirs,
-    but using a single isotropic column at a cost of  λ · f_total².
-
-    For n_dirs = 100 this means distributing weight across fiber directions costs
-    100× LESS than concentrating it in one isotropic column.  The solver exploits
-    this asymmetry to spuriously assign isotropic tissue (cortex, GM) to the fiber
-    dictionary — producing artificially elevated FF in non-WM regions.
-
-Fix: scale the fiber penalty by n_dirs so that the marginal cost of adding one
-unit of total fraction via fiber directions equals the cost of adding it via one
-isotropic column:
-
-    reg_vec[:n_dirs] = λ × n_dirs   →  cost per unit fraction = λ  (same as ISO)
-    reg_vec[n_dirs:] = λ
-
-This is implemented in fit() and must be mirrored in the calibration module.
-
-Output Channels (11 total — unified across both model modes)
--------------------------------------------------------------
+Output Channels (11 total — unified across both model modes, unchanged
+layout from v1/v2)
+-------------------------------------------------------------------------
     0  : FF   — Fibre fraction                            (always valid)
-    1  : RF   — Restricted fraction  (ADC ≤ 0.3e-3)      (always valid)
-    2  : HF   — Hindered fraction    (0.3e-3 < ADC ≤ 3.0e-3) (NaN in 2-ISO mode)
+    1  : RF   — Restricted fraction  (ADC <= 0.3e-3)      (always valid)
+    2  : HF   — Hindered fraction    (0.3e-3 < ADC <= 3.0e-3) (NaN in 2-ISO mode)
     3  : WF   — Free-water fraction  (ADC > 3.0e-3)      (NaN in 2-ISO mode)
     4  : NRF  — Non-Restricted fraction = HF + WF        (always valid)
-    5  : AD   — Axial diffusivity                         (NaN if FF ≤ fiber_threshold)
-    6  : RD   — Radial diffusivity                        (NaN if FF ≤ fiber_threshold)
-    7  : FA   — Intrinsic fibre FA                        (NaN if FF ≤ fiber_threshold)
+    5  : AD   — Axial diffusivity   (v3: Stage B closed-form estimate;
+                NaN if FF <= fiber_threshold)
+    6  : RD   — Radial diffusivity  (v3: Stage B closed-form estimate;
+                NaN if FF <= fiber_threshold)
+    7  : FA   — Intrinsic fibre FA  (computed from the v3 Stage B AD/RD;
+                NaN if FF <= fiber_threshold)
     8  : ADC_iso — Mean isotropic ADC                     (always valid)
-    9  : AD_lin  — Analytical AD estimate (Step 1)        (NaN if FF ≤ fiber_threshold)
-    10 : RD_lin  — Analytical RD estimate (Step 1)        (NaN if FF ≤ fiber_threshold)
-
-In 2-ISO mode: channels 2 (HF) and 3 (WF) are NaN; channel 4 (NRF) is the
-directly estimated non-restricted fraction.
-
-In 3-ISO mode: channels 2, 3, and 4 are all valid, with NRF = HF + WF enforced
-by construction after renormalisation.
+    9  : AD_lin  — v3: identical to channel 5 (retained for output-shape
+                compatibility; Stage B's estimate is the only diffusivity
+                estimate produced, there is no separate "linear" vs.
+                "refined" pair any more)
+    10 : RD_lin  — v3: identical to channel 6 (see note above)
 
 References
 ----------
-Wang Y, et al. (2011). Brain, 134(12):3590–3601. doi:10.1093/brain/awr307
-Shirani A, et al. (2019). Ann Clin Transl Neurol, 6(11):2323–2327.
-Jelescu IO, et al. (2016). NMR Biomed, 29(1):33–47.
+Wang Y, et al. (2011). Brain, 134(12):3590-3601. doi:10.1093/brain/awr307
+Shirani A, et al. (2019). Ann Clin Transl Neurol, 6(11):2323-2327.
+Jelescu IO, et al. (2016). NMR Biomed, 29(1):33-47.
+Design document: toolbox_v2.md (Ramirez-Manzanares discussion); v3
+hybrid redesign motivated by synthetic recovery validation of the v2
+single-stage approach.
 """
 
 import numpy as np
@@ -124,63 +107,79 @@ from numba import njit, prange
 import time
 from tqdm import tqdm
 
-from .core.basis import build_design_matrix, generate_fibonacci_sphere_hemisphere
+from .core.basis import (
+    build_design_matrix_exhaustive,
+    generate_exhaustive_diffusivity_pairs,
+    generate_fibonacci_sphere_hemisphere,
+    generate_isotropic_grid,
+)
 from .core.solvers import (
     nnls_coordinate_descent,
+    compute_regularization_matrix,
+    select_dominant_directions,
+    estimate_AD_RD_conditioned,
     compute_fiber_fa,
 )
 from .calibration.optimizer import optimize_hyperparameters
 
-from .utils.tools import estimate_snr_robust #, correct_rician_bias
+from .utils.tools import estimate_snr_robust
+from .utils.autoconfig import autoconfigure_dictionary
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MODEL CONSTANTS
 # ─────────────────────────────────────────────────────────────────────────────
 
-DESIGN_MATRIX_AD = 1.5e-3   # mm²/s  — fixed AD used to build design matrix
-DESIGN_MATRIX_RD = 0.5e-3   # mm²/s  — fixed RD used to build design matrix
-FIBER_THRESHOLD  = 0.15     # dimensionless — minimum FF for AD/RD estimation
+FIBER_THRESHOLD = 0.15      # dimensionless — minimum FF for AD/RD estimation
 
-# Isotropic compartment ADC boundaries (Wang et al. 2011)
-THRESH_RES = 0.3e-3         # mm²/s  — restricted / hindered boundary
-THRESH_WAT = 3.0e-3         # mm²/s  — hindered  / free-water boundary
+THRESH_RES = 0.3e-3          # mm^2/s — restricted / hindered boundary
+THRESH_WAT = 3.0e-3          # mm^2/s — hindered  / free-water boundary
 
-# Adaptive model selection thresholds
-B_THRESH_3ISO   = 3000.0    # s/mm²  — minimum b_max to activate 3-ISO model
-MIN_SHELLS_3ISO = 3         # minimum distinct non-zero b-value shells for 3-ISO
+B_THRESH_3ISO = 3000.0       # s/mm^2 — minimum b_max to activate 3-ISO model
+MIN_SHELLS_3ISO = 3          # minimum distinct non-zero b-value shells for 3-ISO
+
+# Stage A dictionary defaults. Deliberately coarse on the AD/RD axis —
+# Stage A only needs to detect WHICH directions are active, not estimate
+# diffusivity precisely (that is Stage B's job). Synthetic validation
+# showed direction-recovery cosine similarity ~1.0 essentially
+# independent of (n_ad, n_rd) density, so the smallest grid that keeps
+# the NNLS solve fast is preferred (solver cost scales worse than
+# linearly with total column count under coordinate descent).
+_STAGE_A_AD_MIN = 0.5e-3
+_STAGE_A_AD_MAX = 2.2e-3
+_STAGE_A_RD_MIN = 0.05e-3
+_STAGE_A_RD_MAX = 1.2e-3
+_STAGE_A_DEFAULT_N_AD = 3
+_STAGE_A_DEFAULT_N_RD = 3
+_STAGE_A_DEFAULT_ANISOTROPY_RATIO = 1.15
+_STAGE_A_DEFAULT_LAMBDA_BASE = 0.005
+
+# Default isotropic spectrum range.
+_DEFAULT_ISO_MIN = 0.0
+_DEFAULT_ISO_MAX = 3.0e-3
+_DEFAULT_N_ISO_STEPS = 31
+
+# Maximum number of fiber populations Stage A will report per voxel.
+# 1 = single dominant tract only (matches v1/v2 single-tensor output
+# layout, which has no per-population channel structure). Set to 2 to
+# allow crossing-fiber detection internally, but the output channels
+# still report only the dominant (highest-weight) population, since the
+# 11-channel layout has no slot for a second tensor.
+_MAX_FIBER_POPULATIONS = 2
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PROTOCOL ANALYSIS UTILITY
+# PROTOCOL ANALYSIS UTILITY (unchanged from v1/v2)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def analyse_protocol(bvals):
     """
     Analyse the diffusion acquisition scheme and determine which isotropic
-    model is appropriate.
-
-    Parameters
-    ----------
-    bvals : array-like (N,)
-        B-values in s/mm².
-
-    Returns
-    -------
-    b_max : float
-        Maximum b-value in the protocol.
-    n_nonzero_shells : int
-        Number of distinct non-zero b-value shells (rounded to nearest 100).
-    use_3iso : bool
-        True  → three-compartment model (RF + HF + WF)
-        False → two-compartment model  (RF + NRF)
-    reason : str
-        Human-readable explanation of the model selection decision.
+    model is appropriate. Unchanged from v1/v2.
     """
     bvals = np.asarray(bvals, dtype=np.float64)
     b_max = float(np.max(bvals))
 
-    # Round to nearest 100 s/mm² to count distinct shells
     rounded = np.round(bvals, -2)
     unique_nonzero = np.unique(rounded[rounded > 50])
     n_nonzero_shells = int(len(unique_nonzero))
@@ -188,15 +187,15 @@ def analyse_protocol(bvals):
     if b_max < B_THRESH_3ISO and n_nonzero_shells < MIN_SHELLS_3ISO:
         use_3iso = False
         reason = (
-            f"2-ISO model selected: b_max = {b_max:.0f} s/mm² < {B_THRESH_3ISO:.0f} s/mm² "
+            f"2-ISO model selected: b_max = {b_max:.0f} s/mm^2 < {B_THRESH_3ISO:.0f} s/mm^2 "
             f"AND only {n_nonzero_shells} non-zero shell(s) (minimum {MIN_SHELLS_3ISO} required "
             f"for 3-ISO). Free-water signal below noise floor; NRF = HF + WF merged."
         )
     elif b_max < B_THRESH_3ISO:
         use_3iso = False
         reason = (
-            f"2-ISO model selected: b_max = {b_max:.0f} s/mm² < {B_THRESH_3ISO:.0f} s/mm². "
-            f"At this b_max, exp(-b_max × D_free) = {np.exp(-b_max * THRESH_WAT):.4f}, "
+            f"2-ISO model selected: b_max = {b_max:.0f} s/mm^2 < {B_THRESH_3ISO:.0f} s/mm^2. "
+            f"At this b_max, exp(-b_max x D_free) = {np.exp(-b_max * THRESH_WAT):.4f}, "
             f"placing the free-water signal near the noise floor at typical SNR. "
             f"NRF = HF + WF merged for numerical stability."
         )
@@ -211,7 +210,7 @@ def analyse_protocol(bvals):
     else:
         use_3iso = True
         reason = (
-            f"3-ISO model selected: b_max = {b_max:.0f} s/mm² ≥ {B_THRESH_3ISO:.0f} s/mm² "
+            f"3-ISO model selected: b_max = {b_max:.0f} s/mm^2 >= {B_THRESH_3ISO:.0f} s/mm^2 "
             f"with {n_nonzero_shells} distinct non-zero shells. "
             f"Sufficient b-range and shell diversity to resolve RF, HF, and WF separately."
         )
@@ -220,380 +219,37 @@ def analyse_protocol(bvals):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SHARED ANALYTICAL AD/RD INITIALISATION  (2-ISO and 3-ISO versions)
-# ─────────────────────────────────────────────────────────────────────────────
-
-@njit(cache=True, fastmath=True)
-def _estimate_AD_RD_2iso(bvals, bvecs, sig_norm, fiber_dir,
-                         f_fib, f_res, f_nonrf, D_res, D_nonrf):
-    """
-    Analytical WLS estimate of (AD, RD) using a two-compartment isotropic model.
-
-    The log-signal from the isolated fibre contribution is fitted by weighted
-    least squares in (D_perp, D_parallel - D_perp), exploiting the cylindrical
-    symmetry of the tensor model.
-
-    Parameters
-    ----------
-    bvals, bvecs : arrays
-        Acquisition protocol.
-    sig_norm : array
-        Normalised signal (S / S₀).
-    fiber_dir : array (3,)
-        Dominant fibre direction (unit vector).
-    f_fib, f_res, f_nonrf : float
-        Normalised fractions (sum to 1).
-    D_res, D_nonrf : float
-        Centroid ADCs of the two isotropic compartments (mm²/s).
-
-    Returns
-    -------
-    AD_est, RD_est : float
-        Estimated diffusivities, or np.nan if the WLS system is singular.
-    """
-    ftot = f_fib + f_res + f_nonrf + 1e-12
-    ff = f_fib   / ftot
-    fr = f_res   / ftot
-    fn = f_nonrf / ftot
-
-    sum_AA = 0.0; sum_AB = 0.0; sum_BB = 0.0
-    sum_Ay = 0.0; sum_By = 0.0
-
-    for i in range(len(bvals)):
-        b       = bvals[i]
-        S_total = max(sig_norm[i], 0.01)
-        S_iso   = fr * np.exp(-b * D_res) + fn * np.exp(-b * D_nonrf)
-        S_fiber = (S_total - S_iso) / (ff + 1e-12)
-        S_fiber = max(min(S_fiber, 1.0), 0.01)
-        log_S   = np.log(S_fiber)
-
-        g     = bvecs[i]
-        cos_t = g[0]*fiber_dir[0] + g[1]*fiber_dir[1] + g[2]*fiber_dir[2]
-        cos2  = cos_t * cos_t
-        # ML-optimal weight for the log-linear model: Var(log S) ≈ σ²/S²,
-        # so optimal WLS weight is w ∝ S².  Using w = S·b over-weights
-        # high-b measurements and can bias AD estimates downward.
-        w     = S_total * S_total
-
-        sum_AA += w * b * b
-        sum_AB += w * b * b * cos2
-        sum_BB += w * b * b * cos2 * cos2
-        sum_Ay += w * b * log_S
-        sum_By += w * b * cos2 * log_S
-
-    det = sum_AA * sum_BB - sum_AB * sum_AB
-    if abs(det) < 1e-20:
-        return np.nan, np.nan
-
-    x = (sum_BB * sum_Ay - sum_AB * sum_By) / det
-    y = (sum_AA * sum_By - sum_AB * sum_Ay) / det
-
-    RD_est = max(0.05e-3, min(3.0e-3, -x))
-    AD_est = max(0.05e-3, min(3.5e-3, -x - y))
-    if AD_est < RD_est:
-        m      = (AD_est + RD_est) / 2.0
-        AD_est = m; RD_est = m
-
-    return AD_est, RD_est
-
-
-@njit(cache=True, fastmath=True)
-def _estimate_AD_RD_3iso(bvals, bvecs, sig_norm, fiber_dir,
-                         f_fib, f_res, f_hin, f_wat,
-                         D_res, D_hin, D_wat):
-    """
-    Analytical WLS estimate of (AD, RD) using a three-compartment isotropic model.
-
-    Identical mathematics to _estimate_AD_RD_2iso but subtracts three
-    isotropic contributions (restricted, hindered, free-water) before the
-    WLS step.
-
-    Returns
-    -------
-    AD_est, RD_est : float
-        Estimated diffusivities, or np.nan if the WLS system is singular.
-    """
-    ftot = f_fib + f_res + f_hin + f_wat + 1e-12
-    ff = f_fib / ftot
-    fr = f_res / ftot
-    fh = f_hin / ftot
-    fw = f_wat / ftot
-
-    sum_AA = 0.0; sum_AB = 0.0; sum_BB = 0.0
-    sum_Ay = 0.0; sum_By = 0.0
-
-    for i in range(len(bvals)):
-        b       = bvals[i]
-        S_total = max(sig_norm[i], 0.01)
-        S_iso   = (fr * np.exp(-b * D_res) +
-                   fh * np.exp(-b * D_hin) +
-                   fw * np.exp(-b * D_wat))
-        S_fiber = (S_total - S_iso) / (ff + 1e-12)
-        S_fiber = max(min(S_fiber, 1.0), 0.01)
-        log_S   = np.log(S_fiber)
-
-        g     = bvecs[i]
-        cos_t = g[0]*fiber_dir[0] + g[1]*fiber_dir[1] + g[2]*fiber_dir[2]
-        cos2  = cos_t * cos_t
-        # ML-optimal weight for the log-linear model: Var(log S) ≈ σ²/S²,
-        # so optimal WLS weight is w ∝ S².
-        w     = S_total * S_total
-
-        sum_AA += w * b * b
-        sum_AB += w * b * b * cos2
-        sum_BB += w * b * b * cos2 * cos2
-        sum_Ay += w * b * log_S
-        sum_By += w * b * cos2 * log_S
-
-    det = sum_AA * sum_BB - sum_AB * sum_AB
-    if abs(det) < 1e-20:
-        return np.nan, np.nan
-
-    x = (sum_BB * sum_Ay - sum_AB * sum_By) / det
-    y = (sum_AA * sum_By - sum_AB * sum_Ay) / det
-
-    RD_est = max(0.05e-3, min(3.0e-3, -x))
-    AD_est = max(0.05e-3, min(3.5e-3, -x - y))
-    if AD_est < RD_est:
-        m      = (AD_est + RD_est) / 2.0
-        AD_est = m; RD_est = m
-
-    return AD_est, RD_est
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SHARED ADAPTIVE GRID SEARCH REFINEMENT  (2-ISO and 3-ISO versions)
-# ─────────────────────────────────────────────────────────────────────────────
-
-@njit(cache=True, fastmath=True)
-def _refine_AD_RD_2iso(bvals, bvecs, sig_norm, fiber_dir,
-                       f_fib, f_res, f_nonrf, D_res, D_nonrf,
-                       AD_init, RD_init):
-    """
-    Coarse-then-fine 2D grid search for (AD, RD) — two-compartment isotropic model.
-
-    The search grid is centred adaptively on (AD_init, RD_init) from the
-    analytical initialisation, with range factor scaled by the estimated
-    anisotropy to minimise redundant evaluations in near-isotropic voxels.
-
-    Returns np.nan if the initialisation is np.nan (propagates gracefully).
-    """
-    if np.isnan(AD_init) or np.isnan(RD_init):
-        return np.nan, np.nan
-
-    ftot = f_fib + f_res + f_nonrf + 1e-12
-    ff = f_fib   / ftot
-    fr = f_res   / ftot
-    fn = f_nonrf / ftot
-
-    anisotropy   = abs(AD_init - RD_init) / ((AD_init + RD_init) / 2.0 + 1e-12)
-    range_factor = 0.25 if anisotropy > 0.5 else (0.35 if anisotropy > 0.2 else 0.50)
-
-    AD_min = max(0.05e-3, AD_init * (1.0 - range_factor))
-    AD_max = min(3.5e-3,  AD_init * (1.0 + range_factor))
-    RD_min = max(0.05e-3, RD_init * (1.0 - range_factor))
-    RD_max = min(3.0e-3,  RD_init * (1.0 + range_factor))
-
-    n_AD = 8; n_RD = 6
-    dAD  = (AD_max - AD_min) / (n_AD - 1) if n_AD > 1 else 0.0
-    dRD  = (RD_max - RD_min) / (n_RD - 1) if n_RD > 1 else 0.0
-
-    best_sse = 1e20
-    best_AD  = AD_init
-    best_RD  = RD_init
-
-    # Coarse grid
-    for i in range(n_AD):
-        AD = AD_min + i * dAD
-        for j in range(n_RD):
-            RD = RD_min + j * dRD
-            if AD < RD:
-                continue
-            sse = 0.0
-            for k in range(len(bvals)):
-                b     = bvals[k]
-                g     = bvecs[k]
-                cos_t = g[0]*fiber_dir[0] + g[1]*fiber_dir[1] + g[2]*fiber_dir[2]
-                D_app = RD + (AD - RD) * cos_t * cos_t
-                s_pred = (ff * np.exp(-b * D_app) +
-                          fr * np.exp(-b * D_res)  +
-                          fn * np.exp(-b * D_nonrf))
-                diff  = sig_norm[k] - s_pred
-                sse  += diff * diff
-            if sse < best_sse:
-                best_sse = sse; best_AD = AD; best_RD = RD
-
-    # Fine grid
-    AD_c = best_AD; RD_c = best_RD
-    fine_AD = dAD / 4.0 if dAD > 0.0 else 0.05e-3
-    fine_RD = dRD / 4.0 if dRD > 0.0 else 0.05e-3
-
-    for di in range(-2, 3):
-        AD = AD_c + di * fine_AD
-        if AD < AD_min or AD > AD_max:
-            continue
-        for dj in range(-2, 3):
-            RD = RD_c + dj * fine_RD
-            if RD < RD_min or RD > RD_max or AD < RD:
-                continue
-            sse = 0.0
-            for k in range(len(bvals)):
-                b     = bvals[k]
-                g     = bvecs[k]
-                cos_t = g[0]*fiber_dir[0] + g[1]*fiber_dir[1] + g[2]*fiber_dir[2]
-                D_app = RD + (AD - RD) * cos_t * cos_t
-                s_pred = (ff * np.exp(-b * D_app) +
-                          fr * np.exp(-b * D_res)  +
-                          fn * np.exp(-b * D_nonrf))
-                diff  = sig_norm[k] - s_pred
-                sse  += diff * diff
-            if sse < best_sse:
-                best_sse = sse; best_AD = AD; best_RD = RD
-
-    return best_AD, best_RD
-
-
-@njit(cache=True, fastmath=True)
-def _refine_AD_RD_3iso(bvals, bvecs, sig_norm, fiber_dir,
-                       f_fib, f_res, f_hin, f_wat,
-                       D_res, D_hin, D_wat,
-                       AD_init, RD_init):
-    """
-    Coarse-then-fine 2D grid search for (AD, RD) — three-compartment isotropic model.
-
-    Same adaptive logic as _refine_AD_RD_2iso but the residual is computed
-    against a three-compartment isotropic model.
-    """
-    if np.isnan(AD_init) or np.isnan(RD_init):
-        return np.nan, np.nan
-
-    ftot = f_fib + f_res + f_hin + f_wat + 1e-12
-    ff = f_fib / ftot
-    fr = f_res / ftot
-    fh = f_hin / ftot
-    fw = f_wat / ftot
-
-    anisotropy   = abs(AD_init - RD_init) / ((AD_init + RD_init) / 2.0 + 1e-12)
-    range_factor = 0.25 if anisotropy > 0.5 else (0.35 if anisotropy > 0.2 else 0.50)
-
-    AD_min = max(0.05e-3, AD_init * (1.0 - range_factor))
-    AD_max = min(3.5e-3,  AD_init * (1.0 + range_factor))
-    RD_min = max(0.05e-3, RD_init * (1.0 - range_factor))
-    RD_max = min(3.0e-3,  RD_init * (1.0 + range_factor))
-
-    n_AD = 8; n_RD = 6
-    dAD  = (AD_max - AD_min) / (n_AD - 1) if n_AD > 1 else 0.0
-    dRD  = (RD_max - RD_min) / (n_RD - 1) if n_RD > 1 else 0.0
-
-    best_sse = 1e20
-    best_AD  = AD_init
-    best_RD  = RD_init
-
-    # Coarse grid
-    for i in range(n_AD):
-        AD = AD_min + i * dAD
-        for j in range(n_RD):
-            RD = RD_min + j * dRD
-            if AD < RD:
-                continue
-            sse = 0.0
-            for k in range(len(bvals)):
-                b     = bvals[k]
-                g     = bvecs[k]
-                cos_t = g[0]*fiber_dir[0] + g[1]*fiber_dir[1] + g[2]*fiber_dir[2]
-                D_app = RD + (AD - RD) * cos_t * cos_t
-                s_pred = (ff * np.exp(-b * D_app) +
-                          fr * np.exp(-b * D_res)  +
-                          fh * np.exp(-b * D_hin)  +
-                          fw * np.exp(-b * D_wat))
-                diff  = sig_norm[k] - s_pred
-                sse  += diff * diff
-            if sse < best_sse:
-                best_sse = sse; best_AD = AD; best_RD = RD
-
-    # Fine grid
-    AD_c = best_AD; RD_c = best_RD
-    fine_AD = dAD / 4.0 if dAD > 0.0 else 0.05e-3
-    fine_RD = dRD / 4.0 if dRD > 0.0 else 0.05e-3
-
-    for di in range(-2, 3):
-        AD = AD_c + di * fine_AD
-        if AD < AD_min or AD > AD_max:
-            continue
-        for dj in range(-2, 3):
-            RD = RD_c + dj * fine_RD
-            if RD < RD_min or RD > RD_max or AD < RD:
-                continue
-            sse = 0.0
-            for k in range(len(bvals)):
-                b     = bvals[k]
-                g     = bvecs[k]
-                cos_t = g[0]*fiber_dir[0] + g[1]*fiber_dir[1] + g[2]*fiber_dir[2]
-                D_app = RD + (AD - RD) * cos_t * cos_t
-                s_pred = (ff * np.exp(-b * D_app) +
-                          fr * np.exp(-b * D_res)  +
-                          fh * np.exp(-b * D_hin)  +
-                          fw * np.exp(-b * D_wat))
-                diff  = sig_norm[k] - s_pred
-                sse  += diff * diff
-            if sse < best_sse:
-                best_sse = sse; best_AD = AD; best_RD = RD
-
-    return best_AD, best_RD
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# PARALLEL FITTING KERNELS
+# PARALLEL FITTING KERNELS — v3: Stage A (detection) + Stage B (estimation)
 # ─────────────────────────────────────────────────────────────────────────────
 
 @njit(parallel=True, cache=True, fastmath=True)
-def _fit_voxels_2iso(data, coords, AtA, At, bvals, bvecs,
-                     fiber_dirs, iso_grid, b0_thr,
-                     enable_step2, fiber_threshold, out):
+def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
+                        fiber_dirs, diff_pairs, n_dirs, iso_grid, b0_thr,
+                        fiber_threshold, min_weight_fraction, out):
     """
-    Numba parallel fitting kernel — two-compartment isotropic model (2-ISO).
+    v3 parallel fitting kernel — two-compartment isotropic model (2-ISO),
+    Stage A direction detection + Stage B closed-form diffusivity
+    estimation.
 
-    NOTE: AtA passed here is already regularized (AtA + diag(reg_vec)) by the
-    caller. The solver is called with reg=0.0 to avoid double-counting the
-    regularization penalty.
-
-    The design matrix A is NOT passed here; all computation uses At (the
-    transpose), which is all the solver needs. Passing A was a no-op that
-    added unnecessary memory traffic on every batch call.
-
-    b0_thr is precomputed by the caller (= 100 s/mm²) so it is not
-    recomputed redundantly for every voxel inside the parallel loop.
-
-    Writes into output channels 0, 1, 4–10.  Channels 2 (HF) and 3 (WF)
-    are left at 0.0 (caller pre-initialises them to NaN).
-
-    Output layout
-    -------------
-    out[..., 0] = FF   (Fibre fraction)
-    out[..., 1] = RF   (Restricted fraction, ADC ≤ THRESH_RES)
-    out[..., 2] = HF   ← NaN (not estimated in 2-ISO)
-    out[..., 3] = WF   ← NaN (not estimated in 2-ISO)
-    out[..., 4] = NRF  (Non-Restricted fraction = HF + WF merged)
-    out[..., 5] = AD   (NaN if FF ≤ fiber_threshold)
-    out[..., 6] = RD   (NaN if FF ≤ fiber_threshold)
-    out[..., 7] = FA   (NaN if FF ≤ fiber_threshold)
-    out[..., 8] = ADC_iso  (mean isotropic ADC, always valid)
-    out[..., 9] = AD_lin   (NaN if FF ≤ fiber_threshold)
-    out[...,10] = RD_lin   (NaN if FF ≤ fiber_threshold)
+    AtA_reg is Stage A's regularized Gram matrix (decoupled
+    lambda_aniso/lambda_iso). Output layout identical to v1/v2 (see
+    module docstring for v3 semantics of channels 5-10).
     """
     n_voxels = coords.shape[0]
-    n_dirs   = len(fiber_dirs)
-    n_iso    = len(iso_grid)
+    n_pairs = len(diff_pairs)
+    n_aniso_cols = n_dirs * n_pairs
+    n_iso = len(iso_grid)
 
     for idx in prange(n_voxels):
         x, y, z = coords[idx]
         sig = data[x, y, z]
 
-        # S₀ normalisation
-        s0  = 0.0; cnt = 0
+        s0 = 0.0
+        cnt = 0
         for i in range(len(bvals)):
             if bvals[i] < b0_thr:
-                s0 += sig[i]; cnt += 1
+                s0 += sig[i]
+                cnt += 1
         if cnt > 0:
             s0 /= cnt
         if s0 < 1e-6:
@@ -601,140 +257,112 @@ def _fit_voxels_2iso(data, coords, AtA, At, bvals, bvecs,
 
         sig_norm = sig / s0
 
-        # ── Step 1: regularised NNLS ──────────────────────────────────────
-        # AtA is already pre-regularized by the caller (differentiated scheme).
-        # Pass reg=0.0 to the solver to avoid double-counting the penalty.
-        Aty = np.zeros(AtA.shape[0])
-        for r in range(AtA.shape[0]):
+        # ── STAGE A: regularized NNLS over the exhaustive detection dictionary ──
+        Aty = np.zeros(AtA_reg.shape[0])
+        for r in range(AtA_reg.shape[0]):
             val = 0.0
             for c in range(len(sig_norm)):
                 val += At[r, c] * sig_norm[c]
             Aty[r] = val
 
-        w, _ = nnls_coordinate_descent(AtA, Aty, 0.0)
-        w_fib = w[:n_dirs]
-        w_iso = w[n_dirs:]
+        w, _ = nnls_coordinate_descent(AtA_reg, Aty, 0.0)
+        w_aniso = w[:n_aniso_cols]
+        w_iso = w[n_aniso_cols:]
 
-        # Compartment accumulation (single pass over isotropic grid)
-        f_fib_raw  = 0.0
-        for i in range(n_dirs):
-            f_fib_raw += w_fib[i]
+        f_fib_raw = 0.0
+        for i in range(n_aniso_cols):
+            f_fib_raw += w_aniso[i]
 
-        f_res_raw   = 0.0; f_nonrf_raw = 0.0
-        sum_w_iso   = 0.0; sum_wd_iso  = 0.0
-        sum_res_w   = 0.0; sum_res_wd  = 0.0
-        sum_nonrf_w = 0.0; sum_nonrf_wd = 0.0
+        f_res_raw = 0.0
+        f_nonrf_raw = 0.0
+        sum_w_iso = 0.0
+        sum_wd_iso = 0.0
+        sum_res_w = 0.0
+        sum_res_wd = 0.0
+        sum_nonrf_w = 0.0
+        sum_nonrf_wd = 0.0
 
         for i in range(n_iso):
             adc = iso_grid[i]
-            wi  = w_iso[i]
+            wi = w_iso[i]
             if adc <= THRESH_RES:
-                f_res_raw   += wi
-                sum_res_w   += wi
-                sum_res_wd  += wi * adc
+                f_res_raw += wi
+                sum_res_w += wi
+                sum_res_wd += wi * adc
             else:
-                f_nonrf_raw  += wi
-                sum_nonrf_w  += wi
+                f_nonrf_raw += wi
+                sum_nonrf_w += wi
                 sum_nonrf_wd += wi * adc
-            sum_w_iso  += wi
+            sum_w_iso += wi
             sum_wd_iso += wi * adc
 
-        mean_iso_adc = sum_wd_iso   / sum_w_iso   if sum_w_iso   > 1e-10 else 0.0
-        D_res_c      = sum_res_wd   / sum_res_w   if sum_res_w   > 1e-10 else 0.15e-3
-        D_nonrf_c    = sum_nonrf_wd / sum_nonrf_w if sum_nonrf_w > 1e-10 else 1.5e-3
+        mean_iso_adc = sum_wd_iso / sum_w_iso if sum_w_iso > 1e-10 else 0.0
+        D_res_c = sum_res_wd / sum_res_w if sum_res_w > 1e-10 else 0.15e-3
+        D_nonrf_c = sum_nonrf_wd / sum_nonrf_w if sum_nonrf_w > 1e-10 else 1.5e-3
 
         ftot = f_fib_raw + f_res_raw + f_nonrf_raw
         if ftot < 1e-10:
             continue
 
-        f_fib   = f_fib_raw   / ftot
-        f_res   = f_res_raw   / ftot
+        f_fib = f_fib_raw / ftot
+        f_res = f_res_raw / ftot
         f_nonrf = f_nonrf_raw / ftot
 
         out[x, y, z, 0] = f_fib
         out[x, y, z, 1] = f_res
-        # channels 2, 3 remain NaN (pre-initialised by caller)
         out[x, y, z, 4] = f_nonrf
         out[x, y, z, 8] = mean_iso_adc
 
-        # ── Step 2: AD / RD estimation ────────────────────────────────────
         if f_fib > fiber_threshold:
-
-            # Dominant fibre direction
-            idx_max = 0; val_max = -1.0
-            for i in range(n_dirs):
-                if w_fib[i] > val_max:
-                    val_max = w_fib[i]; idx_max = i
-            fiber_dir = fiber_dirs[idx_max]
-
-            AD_lin, RD_lin = _estimate_AD_RD_2iso(
-                bvals, bvecs, sig_norm, fiber_dir,
-                f_fib, f_res, f_nonrf, D_res_c, D_nonrf_c
+            # ── STAGE A interpretation: which direction(s) are active? ──
+            dir_indices, dir_weights = select_dominant_directions(
+                w_aniso, n_dirs, n_pairs, _MAX_FIBER_POPULATIONS, min_weight_fraction
             )
 
-            AD = AD_lin; RD = RD_lin
-            if enable_step2:
-                AD, RD = _refine_AD_RD_2iso(
-                    bvals, bvecs, sig_norm, fiber_dir,
-                    f_fib, f_res, f_nonrf, D_res_c, D_nonrf_c,
-                    AD_lin, RD_lin
+            if dir_indices[0] >= 0:
+                dominant_dir = fiber_dirs[dir_indices[0]]
+
+                # ── STAGE B: closed-form (AD, RD) conditioned on direction ──
+                AD_est, RD_est = estimate_AD_RD_conditioned(
+                    bvals, bvecs, sig_norm, dominant_dir,
+                    f_fib, f_res, f_nonrf, 0.0,
+                    D_res_c, D_nonrf_c, 0.0, False
                 )
 
-            FA = np.nan
-            if not np.isnan(AD) and not np.isnan(RD):
-                FA = compute_fiber_fa(AD, RD)
+                FA = np.nan
+                if not np.isnan(AD_est) and not np.isnan(RD_est):
+                    FA = compute_fiber_fa(AD_est, RD_est)
 
-            out[x, y, z, 5]  = AD
-            out[x, y, z, 6]  = RD
-            out[x, y, z, 7]  = FA
-            out[x, y, z, 9]  = AD_lin
-            out[x, y, z, 10] = RD_lin
+                out[x, y, z, 5] = AD_est
+                out[x, y, z, 6] = RD_est
+                out[x, y, z, 7] = FA
+                out[x, y, z, 9] = AD_est
+                out[x, y, z, 10] = RD_est
 
 
 @njit(parallel=True, cache=True, fastmath=True)
-def _fit_voxels_3iso(data, coords, AtA, At, bvals, bvecs,
-                     fiber_dirs, iso_grid, b0_thr,
-                     enable_step2, fiber_threshold, out):
+def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
+                        fiber_dirs, diff_pairs, n_dirs, iso_grid, b0_thr,
+                        fiber_threshold, min_weight_fraction, out):
     """
-    Numba parallel fitting kernel — three-compartment isotropic model (3-ISO).
-
-    NOTE: AtA passed here is already regularized (AtA + diag(reg_vec)) by the
-    caller. The solver is called with reg=0.0 to avoid double-counting the
-    regularization penalty.
-
-    The design matrix A is NOT passed here; all computation uses At (the
-    transpose). See _fit_voxels_2iso for rationale.
-
-    Writes into output channels 0–10.  All channels are valid (no NaN from
-    model choice; NaN may still appear in AD/RD/FA where FF ≤ fiber_threshold).
-
-    Output layout
-    -------------
-    out[..., 0] = FF   (Fibre fraction)
-    out[..., 1] = RF   (Restricted,  ADC ≤ THRESH_RES)
-    out[..., 2] = HF   (Hindered,    THRESH_RES < ADC ≤ THRESH_WAT)
-    out[..., 3] = WF   (Free-water,  ADC > THRESH_WAT)
-    out[..., 4] = NRF  (= HF + WF, always consistent)
-    out[..., 5] = AD   (NaN if FF ≤ fiber_threshold)
-    out[..., 6] = RD   (NaN if FF ≤ fiber_threshold)
-    out[..., 7] = FA   (NaN if FF ≤ fiber_threshold)
-    out[..., 8] = ADC_iso
-    out[..., 9] = AD_lin
-    out[...,10] = RD_lin
+    v3 parallel fitting kernel — three-compartment isotropic model
+    (3-ISO). Same Stage A / Stage B structure as `_fit_voxels_2iso_v3`.
     """
     n_voxels = coords.shape[0]
-    n_dirs   = len(fiber_dirs)
-    n_iso    = len(iso_grid)
+    n_pairs = len(diff_pairs)
+    n_aniso_cols = n_dirs * n_pairs
+    n_iso = len(iso_grid)
 
     for idx in prange(n_voxels):
         x, y, z = coords[idx]
         sig = data[x, y, z]
 
-        # S₀ normalisation
-        s0 = 0.0; cnt = 0
+        s0 = 0.0
+        cnt = 0
         for i in range(len(bvals)):
             if bvals[i] < b0_thr:
-                s0 += sig[i]; cnt += 1
+                s0 += sig[i]
+                cnt += 1
         if cnt > 0:
             s0 /= cnt
         if s0 < 1e-6:
@@ -742,42 +370,49 @@ def _fit_voxels_3iso(data, coords, AtA, At, bvals, bvecs,
 
         sig_norm = sig / s0
 
-        # ── Step 1: regularised NNLS ──────────────────────────────────────
-        Aty = np.zeros(AtA.shape[0])
-        for r in range(AtA.shape[0]):
+        Aty = np.zeros(AtA_reg.shape[0])
+        for r in range(AtA_reg.shape[0]):
             val = 0.0
             for c in range(len(sig_norm)):
                 val += At[r, c] * sig_norm[c]
             Aty[r] = val
 
-        w, _ = nnls_coordinate_descent(AtA, Aty, 0.0)
-        w_fib = w[:n_dirs]
-        w_iso = w[n_dirs:]
+        w, _ = nnls_coordinate_descent(AtA_reg, Aty, 0.0)
+        w_aniso = w[:n_aniso_cols]
+        w_iso = w[n_aniso_cols:]
 
-        # Compartment accumulation — three-compartment partition
         f_fib_raw = 0.0
-        for i in range(n_dirs):
-            f_fib_raw += w_fib[i]
+        for i in range(n_aniso_cols):
+            f_fib_raw += w_aniso[i]
 
-        f_res_raw = 0.0; f_hin_raw = 0.0; f_wat_raw = 0.0
-        sum_w_iso  = 0.0; sum_wd_iso = 0.0
-        sum_res_w  = 0.0; sum_res_wd = 0.0
-        sum_hin_w  = 0.0; sum_hin_wd = 0.0
-        sum_wat_w  = 0.0; sum_wat_wd = 0.0
+        f_res_raw = 0.0
+        f_hin_raw = 0.0
+        f_wat_raw = 0.0
+        sum_w_iso = 0.0
+        sum_wd_iso = 0.0
+        sum_res_w = 0.0
+        sum_res_wd = 0.0
+        sum_hin_w = 0.0
+        sum_hin_wd = 0.0
+        sum_wat_w = 0.0
+        sum_wat_wd = 0.0
 
         for i in range(n_iso):
             adc = iso_grid[i]
-            wi  = w_iso[i]
+            wi = w_iso[i]
             if adc <= THRESH_RES:
                 f_res_raw += wi
-                sum_res_w += wi; sum_res_wd += wi * adc
+                sum_res_w += wi
+                sum_res_wd += wi * adc
             elif adc <= THRESH_WAT:
                 f_hin_raw += wi
-                sum_hin_w += wi; sum_hin_wd += wi * adc
+                sum_hin_w += wi
+                sum_hin_wd += wi * adc
             else:
                 f_wat_raw += wi
-                sum_wat_w += wi; sum_wat_wd += wi * adc
-            sum_w_iso  += wi
+                sum_wat_w += wi
+                sum_wat_wd += wi * adc
+            sum_w_iso += wi
             sum_wd_iso += wi * adc
 
         mean_iso_adc = sum_wd_iso / sum_w_iso if sum_w_iso > 1e-10 else 0.0
@@ -798,43 +433,32 @@ def _fit_voxels_3iso(data, coords, AtA, At, bvals, bvecs,
         out[x, y, z, 1] = f_res
         out[x, y, z, 2] = f_hin
         out[x, y, z, 3] = f_wat
-        out[x, y, z, 4] = f_hin + f_wat    # NRF = HF + WF, always consistent
+        out[x, y, z, 4] = f_hin + f_wat
         out[x, y, z, 8] = mean_iso_adc
 
-        # ── Step 2: AD / RD estimation ────────────────────────────────────
         if f_fib > fiber_threshold:
-
-            # Dominant fibre direction
-            idx_max = 0; val_max = -1.0
-            for i in range(n_dirs):
-                if w_fib[i] > val_max:
-                    val_max = w_fib[i]; idx_max = i
-            fiber_dir = fiber_dirs[idx_max]
-
-            AD_lin, RD_lin = _estimate_AD_RD_3iso(
-                bvals, bvecs, sig_norm, fiber_dir,
-                f_fib, f_res, f_hin, f_wat,
-                D_res_c, D_hin_c, D_wat_c
+            dir_indices, dir_weights = select_dominant_directions(
+                w_aniso, n_dirs, n_pairs, _MAX_FIBER_POPULATIONS, min_weight_fraction
             )
 
-            AD = AD_lin; RD = RD_lin
-            if enable_step2:
-                AD, RD = _refine_AD_RD_3iso(
-                    bvals, bvecs, sig_norm, fiber_dir,
+            if dir_indices[0] >= 0:
+                dominant_dir = fiber_dirs[dir_indices[0]]
+
+                AD_est, RD_est = estimate_AD_RD_conditioned(
+                    bvals, bvecs, sig_norm, dominant_dir,
                     f_fib, f_res, f_hin, f_wat,
-                    D_res_c, D_hin_c, D_wat_c,
-                    AD_lin, RD_lin
+                    D_res_c, D_hin_c, D_wat_c, True
                 )
 
-            FA = np.nan
-            if not np.isnan(AD) and not np.isnan(RD):
-                FA = compute_fiber_fa(AD, RD)
+                FA = np.nan
+                if not np.isnan(AD_est) and not np.isnan(RD_est):
+                    FA = compute_fiber_fa(AD_est, RD_est)
 
-            out[x, y, z, 5]  = AD
-            out[x, y, z, 6]  = RD
-            out[x, y, z, 7]  = FA
-            out[x, y, z, 9]  = AD_lin
-            out[x, y, z, 10] = RD_lin
+                out[x, y, z, 5] = AD_est
+                out[x, y, z, 6] = RD_est
+                out[x, y, z, 7] = FA
+                out[x, y, z, 9] = AD_est
+                out[x, y, z, 10] = RD_est
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -843,98 +467,133 @@ def _fit_voxels_3iso(data, coords, AtA, At, bvals, bvecs,
 
 class DBSI_Adaptive:
     """
-    Adaptive DBSI model that automatically selects between the two-compartment
-    (2-ISO) and three-compartment (3-ISO) isotropic decomposition based on the
-    maximum b-value and the shell diversity of the input acquisition protocol.
+    Adaptive DBSI model (v3) using a hybrid two-stage anisotropic
+    estimation: Stage A detects dominant fiber direction(s) from an
+    exhaustive (direction x AD/RD-pair) dictionary under heavy sparsity
+    regularization; Stage B estimates AD/RD via closed-form WLS
+    conditioned on the detected direction(s).
 
-    Selection rule
-    --------------
-    3-ISO (RF + HF + WF) if:  b_max ≥ B_THRESH_3ISO  AND  n_shells ≥ MIN_SHELLS_3ISO
+    Selection rule (isotropic block — unchanged from v1/v2)
+    -------------------------------------------------------------
+    3-ISO (RF + HF + WF) if:  b_max >= B_THRESH_3ISO  AND  n_shells >= MIN_SHELLS_3ISO
     2-ISO (RF + NRF)     otherwise.
 
-    The rule is evaluated automatically in ``fit()`` and is logged to stdout.
-    It can be overridden by passing ``force_n_iso=2`` or ``force_n_iso=3``.
+    Stage A dictionary sizing
+    ------------------------------
+    By default, M (hemisphere directions) is derived automatically from
+    the acquisition protocol via `utils.autoconfig.autoconfigure_dictionary`
+    (same logic as v2). n_ad, n_rd, anisotropy_ratio default to a coarse
+    Stage-A-appropriate grid (3x3, ratio 1.15) rather than the
+    protocol-scaled denser grids v2 used, because Stage A's job
+    (direction detection) does not benefit from a finer (AD,RD) grid —
+    see module docstring.
 
     Parameters
     ----------
     n_iso : int or None
-        Number of isotropic ADC basis points (auto-calibrated if None).
-    reg_lambda : float or None
-        L2 regularisation strength (auto-calibrated if None).
-    enable_step2 : bool
-        Whether to refine AD/RD via adaptive grid search (Step 2). Default: True.
-    n_dirs : int
-        Number of fibre directions on the Fibonacci hemisphere. Default: 100.
+        Number of isotropic ADC basis points. Defaults to 31 if None.
+    lambda_aniso : float or None
+        Stage A regularisation strength for the anisotropic block
+        (auto-calibrated if None).
+    lambda_iso : float or None
+        Stage A regularisation strength for the isotropic block
+        (auto-calibrated if None).
+    n_dirs : int or None
+        Number of fibre directions on the Fibonacci hemisphere for
+        Stage A. If None, derived automatically from the protocol.
+    n_ad, n_rd : int or None
+        Number of AD / RD grid steps for Stage A's detection dictionary.
+        Default: 3, 3 (deliberately coarse — see module docstring).
+    anisotropy_ratio : float or None
+        Minimum AD/RD ratio for admissible Stage A pairs. Default: 1.15.
+    ad_range, rd_range : tuple (float, float)
+        Physical bounds for Stage A's AD / RD grids, mm^2/s.
     iso_range : tuple (float, float)
-        ADC range [mm²/s] of the isotropic basis. Default: (0.0, 3.5e-3).
+        ADC range [mm^2/s] of the isotropic basis. Default: (0.0, 3.0e-3).
     fiber_threshold : float
         Minimum fibre fraction for AD/RD/FA estimation. Default: 0.15.
+    min_weight_fraction : float
+        Minimum fraction of total Stage A anisotropic weight a direction
+        must carry to be reported as a fiber population. Default: 0.05.
     force_n_iso : int or None
-        Override automatic model selection (2 or 3). None = automatic.
+        Override automatic isotropic-model selection (2 or 3).
+
+    Notes
+    -----
+    There is no `enable_step2` parameter: the non-linear Step 2
+    refinement stage from v1 has been eliminated since v2 and remains
+    eliminated in v3. AD/RD are obtained as Stage B's closed-form
+    estimate conditioned on Stage A's detected direction.
     """
 
-    # Output channel index map — identical for both model modes
     CH = {
-        'FF':       0,
-        'RF':       1,
-        'HF':       2,   # NaN in 2-ISO mode
-        'WF':       3,   # NaN in 2-ISO mode
-        'NRF':      4,
-        'AD':       5,
-        'RD':       6,
-        'FA':       7,
-        'ADC_iso':  8,
-        'AD_lin':   9,
-        'RD_lin':   10,
+        'FF': 0,
+        'RF': 1,
+        'HF': 2,
+        'WF': 3,
+        'NRF': 4,
+        'AD': 5,
+        'RD': 6,
+        'FA': 7,
+        'ADC_iso': 8,
+        'AD_lin': 9,
+        'RD_lin': 10,
     }
     N_CHANNELS = 11
 
-    def __init__(self, n_iso=None, reg_lambda=None, enable_step2=True,
-                 n_dirs=200, iso_range=(0.0, 3.5e-3),
-                 fiber_threshold=FIBER_THRESHOLD, force_n_iso=None):
-        self.n_iso           = n_iso
-        self.reg_lambda      = reg_lambda
-        self.enable_step2    = enable_step2
-        self.n_dirs          = n_dirs
-        self.iso_range       = iso_range
+    def __init__(self, n_iso=None, lambda_aniso=None, lambda_iso=None,
+                 n_dirs=None, n_ad=_STAGE_A_DEFAULT_N_AD, n_rd=_STAGE_A_DEFAULT_N_RD,
+                 anisotropy_ratio=_STAGE_A_DEFAULT_ANISOTROPY_RATIO,
+                 ad_range=(_STAGE_A_AD_MIN, _STAGE_A_AD_MAX),
+                 rd_range=(_STAGE_A_RD_MIN, _STAGE_A_RD_MAX),
+                 iso_range=(_DEFAULT_ISO_MIN, _DEFAULT_ISO_MAX),
+                 fiber_threshold=FIBER_THRESHOLD,
+                 min_weight_fraction=0.05, force_n_iso=None):
+        self.n_iso = n_iso
+        self.lambda_aniso = lambda_aniso
+        self.lambda_iso = lambda_iso
+        self.n_dirs = n_dirs
+        self.n_ad = n_ad
+        self.n_rd = n_rd
+        self.anisotropy_ratio = anisotropy_ratio
+        self.ad_range = ad_range
+        self.rd_range = rd_range
+        self.iso_range = iso_range
         self.fiber_threshold = fiber_threshold
-        self.force_n_iso     = force_n_iso
+        self.min_weight_fraction = min_weight_fraction
+        self.force_n_iso = force_n_iso
 
-        # Set after fit()
-        self.model_mode_     = None    # 2 or 3
-        self.b_max_          = None
-        self.n_shells_       = None
+        self.model_mode_ = None
+        self.b_max_ = None
+        self.n_shells_ = None
+        self.n_aniso_cols_ = None
+        self.diff_pairs_ = None
 
     # ------------------------------------------------------------------
     def fit(self, data, bvals, bvecs, mask, run_calibration=True):
         """
-        Fit the adaptive DBSI model to 4D diffusion MRI data.
+        Fit the v3 hybrid two-stage adaptive DBSI model to 4D diffusion
+        MRI data.
 
         Parameters
         ----------
         data : ndarray (X, Y, Z, N)
-            Raw DWI signal. Rician bias correction is applied internally.
         bvals : array (N,)
-            B-values in s/mm².
         bvecs : array (N, 3) or (3, N)
-            Gradient directions (unit vectors; orientation auto-detected).
         mask : ndarray (X, Y, Z) bool
-            Brain mask.
         run_calibration : bool
-            Whether to run Monte Carlo calibration for (n_iso, reg_lambda).
+            Whether to run calibration for (lambda_aniso, lambda_iso).
 
         Returns
         -------
         results : ndarray (X, Y, Z, 11)
-            See class docstring for channel layout.
         model_mode : int
-            2 or 3 — the isotropic model actually used.
+            2 or 3.
         """
         print("\n" + "="*70)
-        print("  DBSI ADAPTIVE PIPELINE")
+        print("  DBSI ADAPTIVE PIPELINE — v3 (Hybrid Two-Stage Architecture)")
         print("="*70)
 
-        # ── Gradient normalisation ─────────────────────────────────────────
         bvecs = np.asarray(bvecs, dtype=np.float64)
         if bvecs.shape[0] == 3 and bvecs.shape[1] != 3:
             bvecs = bvecs.T
@@ -942,9 +601,9 @@ class DBSI_Adaptive:
         norms[norms == 0] = 1.0
         bvecs = bvecs / norms
 
-        # ── Model selection ────────────────────────────────────────────────
+        # ── Isotropic model selection ──────────────────────────────────────
         b_max, n_shells, use_3iso, reason = analyse_protocol(bvals)
-        self.b_max_    = b_max
+        self.b_max_ = b_max
         self.n_shells_ = n_shells
 
         if self.force_n_iso is not None:
@@ -960,121 +619,159 @@ class DBSI_Adaptive:
         model_mode = 3 if use_3iso else 2
         self.model_mode_ = model_mode
 
-        print(f"\n  Model selection: {reason}")
+        print(f"\n  Isotropic model selection: {reason}")
         print(f"\n  Active model: {model_mode}-ISO "
               f"({'RF + HF + WF' if use_3iso else 'RF + NRF (HF+WF merged)'})")
-        print(f"  b_max detected: {b_max:.0f} s/mm²  |  "
+        print(f"  b_max detected: {b_max:.0f} s/mm^2  |  "
               f"Non-zero shells: {n_shells}")
 
+        # ── Stage A dictionary autoconfiguration ─────────────────────────
+        print("\n1. Autoconfiguring Stage A detection dictionary...")
+        M_auto, n_ad_auto, n_rd_auto, ratio_auto = autoconfigure_dictionary(bvals, bvecs)
+
+        if self.n_dirs is None:
+            self.n_dirs = M_auto
+        # n_ad / n_rd / anisotropy_ratio intentionally do NOT default to
+        # the protocol-scaled (potentially dense) autoconfigured values
+        # here: Stage A is deliberately kept coarse on the (AD,RD) axis
+        # regardless of protocol richness (see module docstring and class
+        # docstring). Use the constructor's explicit n_ad/n_rd/
+        # anisotropy_ratio arguments (default 3x3, ratio 1.15) unless the
+        # caller overrides them.
+
+        print(f"   M (hemisphere directions): {self.n_dirs}")
+        print(f"   Stage A n_ad x n_rd grid: {self.n_ad} x {self.n_rd} "
+              f"(deliberately coarse — detection only, not diffusivity recovery)")
+        print(f"   anisotropy_ratio: {self.anisotropy_ratio:.2f}")
+
+        diff_pairs = generate_exhaustive_diffusivity_pairs(
+            ad_min=self.ad_range[0], ad_max=self.ad_range[1], n_ad=self.n_ad,
+            rd_min=self.rd_range[0], rd_max=self.rd_range[1], n_rd=self.n_rd,
+            anisotropy_ratio=self.anisotropy_ratio,
+        )
+        self.diff_pairs_ = diff_pairs
+        n_pairs = len(diff_pairs)
+        n_aniso_cols = self.n_dirs * n_pairs
+        self.n_aniso_cols_ = n_aniso_cols
+
+        print(f"   (AD, RD) admissible pairs: {n_pairs} / {self.n_ad * self.n_rd} "
+              f"(after anisotropy_ratio filter)")
+        print(f"   Stage A dictionary columns: {n_aniso_cols} "
+              f"({self.n_dirs} dirs x {n_pairs} pairs)")
+
         # ── SNR estimation ─────────────────────────────────────────────────
-        print("\n1. Estimating SNR...")
+        print("\n2. Estimating SNR...")
         snr, sigma = estimate_snr_robust(data, bvals, mask, verbose=True)
 
-        # ── Monte Carlo calibration ────────────────────────────────────────
-        if run_calibration and (self.n_iso is None or self.reg_lambda is None):
-            print("\n2. Running Monte Carlo Calibration (multi-scenario)...")
-            self.n_iso, self.reg_lambda = optimize_hyperparameters(
-                bvals, bvecs, snr, n_mc=1000
+        # ── Isotropic grid ──────────────────────────────────────────────────
+        if self.n_iso is None:
+            self.n_iso = _DEFAULT_N_ISO_STEPS
+        iso_grid = generate_isotropic_grid(
+            d_min=self.iso_range[0], d_max=self.iso_range[1], n_steps=self.n_iso
+        )
+
+        # ── Calibration of (lambda_aniso, lambda_iso) ───────────────────────
+        if run_calibration and (self.lambda_aniso is None or self.lambda_iso is None):
+            print("\n3. Running hyperparameter calibration (Stage A lambda_aniso/lambda_iso)...")
+            self.lambda_aniso, self.lambda_iso = optimize_hyperparameters(
+                bvals, bvecs, snr,
+                n_aniso_cols=n_aniso_cols, n_iso=self.n_iso,
+                n_dirs=self.n_dirs, n_ad=self.n_ad, n_rd=self.n_rd,
+                anisotropy_ratio=self.anisotropy_ratio,
+                ad_range=self.ad_range, rd_range=self.rd_range,
             )
 
-        if self.n_iso    is None: self.n_iso    = 60
-        if self.reg_lambda is None: self.reg_lambda = 0.05
+        if self.lambda_aniso is None:
+            self.lambda_aniso = _STAGE_A_DEFAULT_LAMBDA_BASE * n_aniso_cols
+        if self.lambda_iso is None:
+            self.lambda_iso = _STAGE_A_DEFAULT_LAMBDA_BASE
 
         print(f"\n   Hyperparameters: n_iso={self.n_iso}, "
-              f"λ={self.reg_lambda:.4f}")
+              f"lambda_aniso={self.lambda_aniso:.4f}, lambda_iso={self.lambda_iso:.4f}")
         print(f"   Fibre threshold: {self.fiber_threshold:.2f}  "
               f"(AD/RD/FA valid only where FF > {self.fiber_threshold:.2f})")
+        print(f"   Stage A min_weight_fraction: {self.min_weight_fraction:.2f}")
         _thresh_str = (
-            f"RF (ADC ≤ {THRESH_RES*1e3:.1f}×10⁻³ mm²/s) | "
-            f"HF ({THRESH_RES*1e3:.1f}–{THRESH_WAT*1e3:.0f}×10⁻³ mm²/s) | "
-            f"WF (ADC > {THRESH_WAT*1e3:.0f}×10⁻³ mm²/s)"
+            f"RF (ADC <= {THRESH_RES*1e3:.1f}x10^-3 mm^2/s) | "
+            f"HF ({THRESH_RES*1e3:.1f}-{THRESH_WAT*1e3:.0f}x10^-3 mm^2/s) | "
+            f"WF (ADC > {THRESH_WAT*1e3:.0f}x10^-3 mm^2/s)"
             if use_3iso else
-            f"RF (ADC ≤ {THRESH_RES*1e3:.1f}×10⁻³ mm²/s) | "
-            f"NRF (ADC > {THRESH_RES*1e3:.1f}×10⁻³ mm²/s)"
+            f"RF (ADC <= {THRESH_RES*1e3:.1f}x10^-3 mm^2/s) | "
+            f"NRF (ADC > {THRESH_RES*1e3:.1f}x10^-3 mm^2/s)"
         )
         print(f"   Compartments: {_thresh_str}")
 
-        # ── Rician bias correction (vectorized) ───────────────────────────
-        print("\n3. Applying Rician Bias Correction...")
+        # ── Rician bias correction (vectorized, unchanged from v1/v2) ──────
+        print("\n4. Applying Rician Bias Correction...")
         coords = np.argwhere(mask)
 
-        xs, ys, zs  = coords[:, 0], coords[:, 1], coords[:, 2]
-        data_corr   = np.zeros_like(data, dtype=np.float32)
+        xs, ys, zs = coords[:, 0], coords[:, 1], coords[:, 2]
+        data_corr = np.zeros_like(data, dtype=np.float32)
         noise_floor = 2.0 * sigma**2
-        masked_sq   = data[xs, ys, zs].astype(np.float64)**2   # (n_vox, N)
-        valid_mask  = masked_sq > noise_floor
-        corrected   = np.where(valid_mask,
-                               np.sqrt(np.maximum(masked_sq - noise_floor, 0.0)),
-                               0.0).astype(np.float32)
+        masked_sq = data[xs, ys, zs].astype(np.float64)**2
+        valid_mask = masked_sq > noise_floor
+        corrected = np.where(valid_mask,
+                             np.sqrt(np.maximum(masked_sq - noise_floor, 0.0)),
+                             0.0).astype(np.float32)
         data_corr[xs, ys, zs] = corrected
         del masked_sq, valid_mask, corrected
 
-        # ── Design matrix ──────────────────────────────────────────────────
-        print("\n4. Building Design Matrix...")
+        # ── Stage A design matrix ───────────────────────────────────────────
+        print("\n5. Building Stage A Detection Dictionary...")
         fiber_dirs = generate_fibonacci_sphere_hemisphere(self.n_dirs)
-        iso_grid   = np.linspace(self.iso_range[0], self.iso_range[1],
-                                 self.n_iso)
 
-        A   = build_design_matrix(bvals, bvecs, fiber_dirs, iso_grid,
-                                  ad=DESIGN_MATRIX_AD, rd=DESIGN_MATRIX_RD)
+        A = build_design_matrix_exhaustive(bvals, bvecs, fiber_dirs, diff_pairs, iso_grid)
         AtA = A.T @ A
-        At  = A.T
+        At = A.T
 
-        # ── Differentiated regularization ─────────────────────────────────
-        n_dirs_actual = len(fiber_dirs)
-        reg_vec = np.ones(AtA.shape[0])
-        reg_vec[:n_dirs_actual] = self.reg_lambda * n_dirs_actual
-        reg_vec[n_dirs_actual:] = self.reg_lambda
-        AtA_reg = AtA + np.diag(reg_vec)
+        AtA_reg = compute_regularization_matrix(
+            AtA, n_aniso_cols, self.lambda_aniso, self.lambda_iso
+        )
 
         cond = np.linalg.cond(AtA_reg)
         print(f"   Design matrix: {A.shape}  |  "
               f"Condition number (regularized): {cond:.2e}")
-        print(f"   Regularization: λ_fiber={self.reg_lambda * n_dirs_actual:.4f}  "
-              f"λ_iso={self.reg_lambda:.4f}  (ratio = n_dirs = {n_dirs_actual})")
+        print(f"   Regularization: lambda_aniso={self.lambda_aniso:.4f}  "
+              f"lambda_iso={self.lambda_iso:.4f}")
 
         # ── Allocate output ────────────────────────────────────────────────
         results = np.zeros(data.shape[:3] + (self.N_CHANNELS,), dtype=np.float32)
-        results[..., 5]  = np.nan   # AD
-        results[..., 6]  = np.nan   # RD
-        results[..., 7]  = np.nan   # FA
-        results[..., 9]  = np.nan   # AD_lin
-        results[..., 10] = np.nan   # RD_lin
+        results[..., 5] = np.nan
+        results[..., 6] = np.nan
+        results[..., 7] = np.nan
+        results[..., 9] = np.nan
+        results[..., 10] = np.nan
         if not use_3iso:
-            results[..., 2] = np.nan   # HF
-            results[..., 3] = np.nan   # WF
+            results[..., 2] = np.nan
+            results[..., 3] = np.nan
 
         # ── Parallel voxel fitting ─────────────────────────────────────────
-        n_voxels  = len(coords)
-        batch_sz  = 10_000
+        n_voxels = len(coords)
+        batch_sz = 10_000
         n_batches = int(np.ceil(n_voxels / batch_sz))
 
-        print(f"\n5. Fitting {n_voxels:,} voxels "
-              f"[{model_mode}-ISO model]...")
+        print(f"\n6. Fitting {n_voxels:,} voxels "
+              f"[{model_mode}-ISO model, Stage A + Stage B]...")
 
-        _kernel = _fit_voxels_3iso if use_3iso else _fit_voxels_2iso
+        _kernel = _fit_voxels_3iso_v3 if use_3iso else _fit_voxels_2iso_v3
 
-        # b0 threshold: fixed at 100 s/mm² (FSL/MRtrix convention).
         b0_thr = 100.0
 
         t0 = time.time()
         with tqdm(total=n_voxels, desc="   Progress", unit="vox") as pbar:
             for i in range(n_batches):
                 start = i * batch_sz
-                end   = min((i + 1) * batch_sz, n_voxels)
-                # A is NOT passed to the kernel — it is unused there.
-                # All computation goes through AtA_reg and At.
+                end = min((i + 1) * batch_sz, n_voxels)
                 _kernel(
                     data_corr, coords[start:end], AtA_reg, At,
-                    bvals, bvecs, fiber_dirs, iso_grid,
-                    b0_thr, self.enable_step2,
-                    self.fiber_threshold, results
+                    bvals, bvecs, fiber_dirs, diff_pairs, self.n_dirs, iso_grid,
+                    b0_thr, self.fiber_threshold, self.min_weight_fraction, results
                 )
                 pbar.update(end - start)
 
-        elapsed  = time.time() - t0
+        elapsed = time.time() - t0
         n_fitted = int(np.sum(~np.isnan(results[..., 5]) & mask))
-        pct      = n_fitted / n_voxels * 100 if n_voxels > 0 else 0.0
+        pct = n_fitted / n_voxels * 100 if n_voxels > 0 else 0.0
 
         print(f"\n   Completed: {elapsed:.1f}s  "
               f"({n_voxels / elapsed:.0f} vox/s)")
@@ -1088,42 +785,34 @@ class DBSI_Adaptive:
     @staticmethod
     def output_map_names(model_mode):
         """
-        Return the ordered list of output map file names for the given model mode.
-
-        Parameters
-        ----------
-        model_mode : int
-            2 or 3 — as returned by fit().
-
-        Returns
-        -------
-        list of str
+        Return the ordered list of output map file names for the given
+        model mode. Unchanged from v1/v2.
         """
         if model_mode == 3:
             return [
-                'fiber_fraction',       # ch 0
-                'restricted_fraction',  # ch 1
-                'hindered_fraction',    # ch 2
-                'water_fraction',       # ch 3
-                'nonrestricted_fraction',  # ch 4  (= HF + WF)
-                'axial_diffusivity',    # ch 5
-                'radial_diffusivity',   # ch 6
-                'fiber_fa',             # ch 7
-                'mean_iso_adc',         # ch 8
-                'ad_linear',            # ch 9
-                'rd_linear',            # ch 10
+                'fiber_fraction',
+                'restricted_fraction',
+                'hindered_fraction',
+                'water_fraction',
+                'nonrestricted_fraction',
+                'axial_diffusivity',
+                'radial_diffusivity',
+                'fiber_fa',
+                'mean_iso_adc',
+                'ad_linear',
+                'rd_linear',
             ]
-        else:  # 2-ISO
+        else:
             return [
-                'fiber_fraction',          # ch 0
-                'restricted_fraction',     # ch 1
-                'hindered_fraction_NaN',   # ch 2  (NaN, not estimated)
-                'water_fraction_NaN',      # ch 3  (NaN, not estimated)
-                'nonrestricted_fraction',  # ch 4
-                'axial_diffusivity',       # ch 5
-                'radial_diffusivity',      # ch 6
-                'fiber_fa',                # ch 7
-                'mean_iso_adc',            # ch 8
-                'ad_linear',               # ch 9
-                'rd_linear',               # ch 10
+                'fiber_fraction',
+                'restricted_fraction',
+                'hindered_fraction_NaN',
+                'water_fraction_NaN',
+                'nonrestricted_fraction',
+                'axial_diffusivity',
+                'radial_diffusivity',
+                'fiber_fa',
+                'mean_iso_adc',
+                'ad_linear',
+                'rd_linear',
             ]

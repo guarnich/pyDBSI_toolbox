@@ -15,6 +15,16 @@ CHANGES FROM v2
 - New: `--min-weight-fraction` controls Stage A's direction-selection
   threshold (see dbsi_toolbox.core.solvers.select_dominant_directions).
 - `--n-dirs` still defaults to protocol-derived (autoconfigured) sizing.
+- New: `--calibration-method {data_driven,monte_carlo}` selects how
+  (lambda_aniso, lambda_iso) are determined. `data_driven` (default)
+  uses GCV + the discrepancy principle on a sample of this dataset's
+  own voxels (fast, no tissue-fraction priors). `monte_carlo` falls
+  back to the legacy grid search over 14 literature-derived tissue
+  scenarios. See dbsi_toolbox.calibration module docstring.
+- New: `--mc-crosscheck` runs the Monte Carlo tissue-scenario check
+  against whichever (lambda_aniso, lambda_iso) was selected, WITHOUT
+  changing it — a sanity check, recommended at least once per new
+  protocol/dataset type.
 """
 
 import argparse
@@ -49,10 +59,28 @@ def main():
                         help="Minimum AD/RD ratio for admissible Stage A pairs. Default: 1.15.")
     parser.add_argument("--min-weight-fraction", type=float, dest="min_weight_fraction", default=0.05,
                         help="Stage A direction-selection threshold. Default: 0.05.")
+    parser.add_argument("--calibration-method", choices=["data_driven", "monte_carlo"],
+                        dest="calibration_method", default="data_driven",
+                        help="Method to determine (lambda_aniso, lambda_iso). Default: data_driven "
+                             "(GCV + discrepancy principle, no tissue-fraction priors). "
+                             "'monte_carlo' falls back to the legacy 14-scenario grid search.")
+    parser.add_argument("--n-calibration-voxels", type=int, dest="n_calibration_voxels", default=200,
+                        help="Number of brain-mask voxels sampled for data-driven calibration. Default: 200.")
+    parser.add_argument("--mc-crosscheck", action="store_true", dest="run_mc_crosscheck",
+                        help="Run the Monte Carlo tissue-scenario cross-check on the selected "
+                             "lambda pair (does not change it; prints a diagnostic report).")
+    parser.add_argument("--mc-crosscheck-n-mc", type=int, dest="mc_crosscheck_n_mc", default=200,
+                        help="MC samples per scenario for the cross-check report. Default: 200.")
     parser.add_argument("--force-n-iso", type=int, choices=[2, 3], default=None,
                         help="Override automatic isotropic-model selection (2 or 3)")
     parser.add_argument("--compute-r2", action="store_true",
                         help="Compute fit quality check (R2 and RMSE)")
+    parser.add_argument("--compute-transition-confidence", action="store_true",
+                        dest="compute_transition_confidence",
+                        help="Compute RES/HIN and HIN/WAT transition-zone confidence maps "
+                             "(does not correct fractions, only flags proximity to a known "
+                             "low-confidence zone — see transition_confidence.py module "
+                             "docstring; NOT YET validated on real data).")
 
     args = parser.parse_args()
     os.makedirs(args.out, exist_ok=True)
@@ -77,10 +105,18 @@ def main():
 
     results, model_mode = model.fit(
         data, bvals, bvecs, mask,
-        run_calibration=not args.skip_calibration
+        run_calibration=not args.skip_calibration,
+        calibration_method=args.calibration_method,
+        n_calibration_voxels=args.n_calibration_voxels,
+        run_mc_crosscheck=args.run_mc_crosscheck,
+        mc_crosscheck_n_mc=args.mc_crosscheck_n_mc,
     )
 
     names = DBSI_Adaptive.output_map_names(model_mode)
+
+    if model.mc_crosscheck_report_ is not None:
+        print(f"\nMonte Carlo cross-check composite loss: "
+              f"{model.mc_crosscheck_report_['composite']:.4f}")
 
     print("\nSaving outputs...")
     for i, name in enumerate(names):
@@ -99,6 +135,16 @@ def main():
         )
         save_fit_quality(r2, rmse, affine, args.out)
         print("Fit quality maps saved.")
+
+    if args.compute_transition_confidence:
+        print("\nComputing transition-zone confidence maps...")
+        print("NOTE: these flag proximity to a known systematic bias zone near the")
+        print("compartment thresholds (see project methodological supplement); they")
+        print("do not correct fractions and have not yet been validated on real data.")
+        from dbsi_toolbox.transition_confidence import compute_transition_confidence, save_transition_confidence
+        conf_res, conf_wat = compute_transition_confidence(results, model_mode)
+        save_transition_confidence(conf_res, conf_wat, affine, args.out)
+        print("Transition-confidence maps saved.")
 
     print("\nDone!")
 

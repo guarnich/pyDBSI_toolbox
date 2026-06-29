@@ -65,8 +65,20 @@ compute_fit_quality
     single-fiber-population voxels — see `fit_quality.py` module
     docstring.
 
+compute_transition_confidence
+    Compute voxel-wise confidence maps for the RES/HIN and HIN/WAT
+    compartment boundaries, based on the systematic, n_iso-independent
+    bias zones quantified in the project methodological supplement
+    "isotropic_compartment_supplement.docx". Does NOT correct fractions
+    — only flags proximity to a known low-confidence zone. NOT YET
+    VALIDATED ON REAL DATA (see `transition_confidence.py` module
+    docstring caveats).
+
 save_fit_quality
     Save R² and RMSE maps as compressed NIfTI files.
+
+save_transition_confidence
+    Save the two transition-confidence maps as compressed NIfTI files.
 
 Output Channels (11, unified across both model modes — unchanged layout
 from v1/v2; channel semantics for 5-7, 9-10 updated, see
@@ -114,6 +126,7 @@ from .utils.tools import load_data, estimate_snr_robust
 from .utils.autoconfig import autoconfigure_dictionary
 from .calibration.optimizer import optimize_hyperparameters
 from .fit_quality import compute_fit_quality, save_fit_quality
+from .transition_confidence import compute_transition_confidence, save_transition_confidence
 
 # NOTE: `correct_rician_bias` is NOT imported here. In the source
 # `utils/tools.py` this function is entirely commented out (Koay-Basser
@@ -131,4 +144,6 @@ __all__ = [
     "optimize_hyperparameters",
     "compute_fit_quality",
     "save_fit_quality",
+    "compute_transition_confidence",
+    "save_transition_confidence",
 ]

@@ -37,6 +37,8 @@ from .basis import (
     build_isotropic_dictionary,
     generate_exhaustive_diffusivity_pairs,  # v3 Stage A
     generate_isotropic_grid,
+    generate_log_uniform_isotropic_grid,  # adaptive n_iso
+    generate_anchored_isotropic_grid,     # threshold-anchored grid (production default)
     generate_fibonacci_sphere_hemisphere,
     generate_fibonacci_sphere,
 )
@@ -56,6 +58,8 @@ __all__ = [
     "build_isotropic_dictionary",
     "generate_exhaustive_diffusivity_pairs",
     "generate_isotropic_grid",
+    "generate_log_uniform_isotropic_grid",
+    "generate_anchored_isotropic_grid",
     "generate_fibonacci_sphere_hemisphere",
     "generate_fibonacci_sphere",
     "nnls_coordinate_descent",

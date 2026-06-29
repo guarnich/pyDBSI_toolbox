@@ -112,6 +112,8 @@ from .core.basis import (
     generate_exhaustive_diffusivity_pairs,
     generate_fibonacci_sphere_hemisphere,
     generate_isotropic_grid,
+    generate_log_uniform_isotropic_grid,
+    generate_anchored_isotropic_grid,
 )
 from .core.solvers import (
     nnls_coordinate_descent,
@@ -120,7 +122,9 @@ from .core.solvers import (
     estimate_AD_RD_conditioned,
     compute_fiber_fa,
 )
-from .calibration.optimizer import optimize_hyperparameters
+from .calibration.optimizer import optimize_hyperparameters, evaluate_lambda_pair
+from .calibration.data_driven import select_lambdas_data_driven, sample_calibration_voxels
+from .calibration.adaptive_n_iso import select_n_iso_svd
 
 from .utils.tools import estimate_snr_robust
 from .utils.autoconfig import autoconfigure_dictionary
@@ -157,7 +161,21 @@ _STAGE_A_DEFAULT_LAMBDA_BASE = 0.005
 # Default isotropic spectrum range.
 _DEFAULT_ISO_MIN = 0.0
 _DEFAULT_ISO_MAX = 3.0e-3
-_DEFAULT_N_ISO_STEPS = 31
+_DEFAULT_N_ISO_STEPS = 31    # Legacy fixed default — NO LONGER USED as the
+                             # automatic default; see select_n_iso_svd for the
+                             # adaptive default now used when n_iso is left at
+                             # None. Retained only for explicit external
+                             # reference / backward compatibility.
+
+# Extended upper bound for the ADAPTIVE isotropic grid's d_max, used
+# only on the adaptive (n_iso=None) path — see fit()'s grid construction
+# block. Project methodological supplement "isotropic_compartment_
+# supplement.docx" (Section 4) mapped the HIN/WAT transition zone as
+# extending to approximately 5.0e-3 mm^2/s on the high side; extending
+# the grid this far ensures at least one column genuinely represents
+# free water above the 3.0e-3 threshold rather than relying solely on a
+# single anchor column exactly at the boundary.
+_ISO_GRID_D_MAX_EXTENDED = 5.0e-3
 
 # Maximum number of fiber populations Stage A will report per voxel.
 # 1 = single dominant tract only (matches v1/v2 single-tensor output
@@ -524,6 +542,14 @@ class DBSI_Adaptive:
     refinement stage from v1 has been eliminated since v2 and remains
     eliminated in v3. AD/RD are obtained as Stage B's closed-form
     estimate conditioned on Stage A's detected direction.
+
+    (lambda_aniso, lambda_iso) calibration defaults to the data-driven
+    method (GCV + discrepancy principle, see `calibration.data_driven`)
+    rather than the legacy Monte Carlo tissue-scenario grid search — see
+    `fit()`'s `calibration_method` parameter. After fitting,
+    `self.mc_crosscheck_report_` holds the Monte Carlo cross-check
+    report (see `fit()`'s `run_mc_crosscheck` parameter) if that was
+    requested, else `None`.
     """
 
     CH = {
@@ -568,9 +594,12 @@ class DBSI_Adaptive:
         self.n_shells_ = None
         self.n_aniso_cols_ = None
         self.diff_pairs_ = None
+        self.mc_crosscheck_report_ = None
 
     # ------------------------------------------------------------------
-    def fit(self, data, bvals, bvecs, mask, run_calibration=True):
+    def fit(self, data, bvals, bvecs, mask, run_calibration=True,
+           calibration_method='data_driven', n_calibration_voxels=200,
+           run_mc_crosscheck=False, mc_crosscheck_n_mc=200):
         """
         Fit the v3 hybrid two-stage adaptive DBSI model to 4D diffusion
         MRI data.
@@ -582,7 +611,47 @@ class DBSI_Adaptive:
         bvecs : array (N, 3) or (3, N)
         mask : ndarray (X, Y, Z) bool
         run_calibration : bool
-            Whether to run calibration for (lambda_aniso, lambda_iso).
+            Whether to run calibration for (lambda_aniso, lambda_iso) at
+            all (if False, falls back to the fixed default lambda_base
+            heuristic; see class docstring).
+        calibration_method : {'data_driven', 'monte_carlo'}
+            Which method determines the actual (lambda_aniso, lambda_iso)
+            used for fitting:
+              'data_driven' (default) — GCV (lambda_iso) + discrepancy
+                principle (lambda_aniso), computed from a sample of this
+                dataset's own brain-mask voxels (see
+                `calibration.data_driven` module docstring). No tissue-
+                fraction priors; fast (a few dozen NNLS solves).
+              'monte_carlo' — the legacy full grid search over 14
+                literature-derived tissue scenarios
+                (`calibration.optimizer.optimize_hyperparameters`).
+                Slower; retained as a fallback for protocols where the
+                data-driven method's assumptions are suspected to fail
+                (see `calibration.data_driven` caveats).
+        n_calibration_voxels : int
+            Number of brain-mask voxels to sample for the data-driven
+            method (ignored if calibration_method='monte_carlo'). 150-300
+            is a reasonable range based on project stability analysis
+            (see `calibration.data_driven.sample_calibration_voxels`
+            docstring); with real datasets containing hundreds of
+            thousands of brain voxels, this is a small, cheap sample.
+        run_mc_crosscheck : bool
+            If True, after determining (lambda_aniso, lambda_iso) by
+            whichever `calibration_method` was used, additionally run
+            the Monte Carlo tissue-scenario cross-check
+            (`calibration.optimizer.evaluate_lambda_pair`) and print its
+            report. This does NOT change the lambda values used for
+            fitting — it only reports whether the chosen pair behaves
+            sensibly across known tissue regimes, as an independent
+            sanity check (see project methodology: Monte Carlo scenarios
+            are a verification tool, not the source of lambda).
+            Recommended to enable at least once per new protocol/dataset
+            type before trusting the data-driven selection unsupervised.
+        mc_crosscheck_n_mc : int
+            MC samples per scenario for the cross-check report (only
+            used if run_mc_crosscheck=True). Lower than the legacy grid
+            search's default since only one pair is being evaluated, not
+            a full grid.
 
         Returns
         -------
@@ -659,27 +728,117 @@ class DBSI_Adaptive:
         print(f"   Stage A dictionary columns: {n_aniso_cols} "
               f"({self.n_dirs} dirs x {n_pairs} pairs)")
 
+        fiber_dirs = generate_fibonacci_sphere_hemisphere(self.n_dirs)
+
         # ── SNR estimation ─────────────────────────────────────────────────
         print("\n2. Estimating SNR...")
         snr, sigma = estimate_snr_robust(data, bvals, mask, verbose=True)
 
         # ── Isotropic grid ──────────────────────────────────────────────────
+        # n_iso defaults to the SVD-based adaptive estimate (protocol- and
+        # SNR-aware, with an empirically-validated floor — see
+        # calibration.adaptive_n_iso module docstring) rather than the
+        # legacy fixed value of 31. The grid itself is THRESHOLD-ANCHORED
+        # log-uniform (Borgia et al. 1998 spectral-resolution rationale,
+        # plus exact-boundary anchoring — see
+        # core.basis.generate_anchored_isotropic_grid docstring and
+        # project methodological supplement "isotropic_compartment_
+        # supplement.docx" Section 4) rather than plain linear when
+        # n_iso is adaptively determined, since the two were validated
+        # together in project synthetic testing.
+        #
+        # If the caller explicitly set n_iso in the constructor, that
+        # exact value is honoured and the LINEAR grid is used instead
+        # (matching the original v1/v2/v3 behaviour for explicit
+        # overrides) — adaptive selection only engages when n_iso is left
+        # at its default (None).
         if self.n_iso is None:
-            self.n_iso = _DEFAULT_N_ISO_STEPS
-        iso_grid = generate_isotropic_grid(
-            d_min=self.iso_range[0], d_max=self.iso_range[1], n_steps=self.n_iso
-        )
+            self.n_iso, _svd_diag = select_n_iso_svd(bvals, snr)
+            print(f"\n   Adaptive n_iso selection: n_iso={self.n_iso} "
+                  f"(raw SVD answer: {_svd_diag['n_iso_raw']}, "
+                  f"floor_applied={_svd_diag['floor_applied']})")
+            # d_max is extended beyond the nominal iso_range upper bound
+            # (default 3.0e-3) up to _ISO_GRID_D_MAX_EXTENDED (5.0e-3) so
+            # the grid has at least one column genuinely representing
+            # free water ABOVE the HIN/WAT threshold, rather than only
+            # a single anchor column exactly at the threshold edge. This
+            # does not eliminate the HIN/WAT transition zone documented
+            # in the methodological supplement (the zone is a property
+            # of the signal, not the grid), but it ensures the grid
+            # itself is not an additional, avoidable source of WAT
+            # under-representation on top of that.
+            iso_d_max = max(self.iso_range[1], _ISO_GRID_D_MAX_EXTENDED)
+            iso_grid = generate_anchored_isotropic_grid(
+                d_min=max(self.iso_range[0], 0.1e-3), d_max=iso_d_max,
+                n_steps=self.n_iso, thresh_res=THRESH_RES, thresh_wat=THRESH_WAT,
+            )
+        else:
+            iso_grid = generate_isotropic_grid(
+                d_min=self.iso_range[0], d_max=self.iso_range[1], n_steps=self.n_iso
+            )
+
+        # ── Rician bias correction (vectorized, unchanged from v1/v2) ──────
+        # Moved before calibration: the data-driven calibration path
+        # samples real voxel signals from this dataset, and should see
+        # the SAME corrected signal the actual Stage A/B fit will use —
+        # calibrating against uncorrected signal would target a subtly
+        # different noise level than what is actually fit.
+        print("\n3. Applying Rician Bias Correction...")
+        coords = np.argwhere(mask)
+
+        xs, ys, zs = coords[:, 0], coords[:, 1], coords[:, 2]
+        data_corr = np.zeros_like(data, dtype=np.float32)
+        noise_floor = 2.0 * sigma**2
+        masked_sq = data[xs, ys, zs].astype(np.float64)**2
+        valid_mask = masked_sq > noise_floor
+        corrected = np.where(valid_mask,
+                             np.sqrt(np.maximum(masked_sq - noise_floor, 0.0)),
+                             0.0).astype(np.float32)
+        data_corr[xs, ys, zs] = corrected
+        del masked_sq, valid_mask, corrected
 
         # ── Calibration of (lambda_aniso, lambda_iso) ───────────────────────
         if run_calibration and (self.lambda_aniso is None or self.lambda_iso is None):
-            print("\n3. Running hyperparameter calibration (Stage A lambda_aniso/lambda_iso)...")
-            self.lambda_aniso, self.lambda_iso = optimize_hyperparameters(
-                bvals, bvecs, snr,
-                n_aniso_cols=n_aniso_cols, n_iso=self.n_iso,
-                n_dirs=self.n_dirs, n_ad=self.n_ad, n_rd=self.n_rd,
-                anisotropy_ratio=self.anisotropy_ratio,
-                ad_range=self.ad_range, rd_range=self.rd_range,
-            )
+
+            if calibration_method == 'data_driven':
+                print(f"\n4. Calibrating (lambda_aniso, lambda_iso) — DATA-DRIVEN "
+                      f"(GCV + discrepancy principle)...")
+                y_cal, sigma_cal = sample_calibration_voxels(
+                    data_corr, mask, bvals, n_voxels=n_calibration_voxels,
+                    seed=0,
+                )
+                print(f"   Sampled {len(y_cal)} calibration voxels from the brain mask "
+                      f"(sigma_normalised={sigma_cal:.5f})")
+                self.lambda_aniso, self.lambda_iso, _dd_diag = select_lambdas_data_driven(
+                    bvals, bvecs, fiber_dirs, diff_pairs, iso_grid, y_cal, sigma_cal,
+                )
+                print(f"   Data-driven result: lambda_aniso={self.lambda_aniso:.4f}, "
+                      f"lambda_iso={self.lambda_iso:.4f}")
+                if _dd_diag.get('discrepancy', {}).get('floor_applied'):
+                    print(f"   [WARNING] Safety floor was applied to lambda_aniso "
+                          f"(raw discrepancy-principle answer was below 10% of "
+                          f"lambda_iso, indicating an ill-conditioned/near-zero "
+                          f"regularization scenario). Consider increasing "
+                          f"n_calibration_voxels and/or running the Monte Carlo "
+                          f"cross-check (run_mc_crosscheck=True) before trusting "
+                          f"this result.")
+
+            elif calibration_method == 'monte_carlo':
+                print(f"\n4. Calibrating (lambda_aniso, lambda_iso) — MONTE CARLO "
+                      f"(14 tissue scenarios, full grid search)...")
+                self.lambda_aniso, self.lambda_iso = optimize_hyperparameters(
+                    bvals, bvecs, snr,
+                    n_aniso_cols=n_aniso_cols, n_iso=self.n_iso,
+                    n_dirs=self.n_dirs, n_ad=self.n_ad, n_rd=self.n_rd,
+                    anisotropy_ratio=self.anisotropy_ratio,
+                    ad_range=self.ad_range, rd_range=self.rd_range,
+                )
+
+            else:
+                raise ValueError(
+                    f"calibration_method must be 'data_driven' or 'monte_carlo', "
+                    f"got {calibration_method!r}."
+                )
 
         if self.lambda_aniso is None:
             self.lambda_aniso = _STAGE_A_DEFAULT_LAMBDA_BASE * n_aniso_cols
@@ -701,24 +860,24 @@ class DBSI_Adaptive:
         )
         print(f"   Compartments: {_thresh_str}")
 
-        # ── Rician bias correction (vectorized, unchanged from v1/v2) ──────
-        print("\n4. Applying Rician Bias Correction...")
-        coords = np.argwhere(mask)
-
-        xs, ys, zs = coords[:, 0], coords[:, 1], coords[:, 2]
-        data_corr = np.zeros_like(data, dtype=np.float32)
-        noise_floor = 2.0 * sigma**2
-        masked_sq = data[xs, ys, zs].astype(np.float64)**2
-        valid_mask = masked_sq > noise_floor
-        corrected = np.where(valid_mask,
-                             np.sqrt(np.maximum(masked_sq - noise_floor, 0.0)),
-                             0.0).astype(np.float32)
-        data_corr[xs, ys, zs] = corrected
-        del masked_sq, valid_mask, corrected
+        # ── Monte Carlo cross-check (optional, does not change lambda) ─────
+        if run_mc_crosscheck:
+            print(f"\n   Running Monte Carlo cross-check of the selected lambda pair "
+                  f"against 14 tissue scenarios...")
+            _crosscheck_report = evaluate_lambda_pair(
+                bvals, bvecs, snr, self.lambda_aniso, self.lambda_iso,
+                n_mc=mc_crosscheck_n_mc,
+                n_dirs=self.n_dirs, n_ad=self.n_ad, n_rd=self.n_rd,
+                anisotropy_ratio=self.anisotropy_ratio,
+                ad_range=self.ad_range, rd_range=self.rd_range,
+                iso_range=self.iso_range, n_iso=self.n_iso,
+                min_weight_fraction=self.min_weight_fraction,
+                verbose=True,
+            )
+            self.mc_crosscheck_report_ = _crosscheck_report
 
         # ── Stage A design matrix ───────────────────────────────────────────
         print("\n5. Building Stage A Detection Dictionary...")
-        fiber_dirs = generate_fibonacci_sphere_hemisphere(self.n_dirs)
 
         A = build_design_matrix_exhaustive(bvals, bvecs, fiber_dirs, diff_pairs, iso_grid)
         AtA = A.T @ A

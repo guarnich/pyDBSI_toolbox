@@ -254,18 +254,15 @@ def build_design_matrix_exhaustive(bvals, bvecs, fiber_dirs, diff_pairs, iso_gri
 
 def generate_isotropic_grid(d_min=0.0, d_max=3.0e-3, n_steps=31):
     """
-    Generate the isotropic ADC spectrum ("sphere radii").
+    Generate the isotropic ADC spectrum ("sphere radii") on a LINEAR grid.
 
     A classic range is [0, 3.0e-3] mm^2/s with 31 steps (~0.1e-3 mm^2/s
     increments). Note: this linear grid is the v2-document default; see
-    the toolbox's N_iso/spectral-resolution work
-    (`calibration.protocol_optimizer`, log-uniform grid per Borgia 1998)
-    for the spectrally-justified alternative. The two are not
-    interchangeable — callers should be explicit about which grid
-    construction they need. This function exists to provide the simple,
-    literature-standard linear spectrum described in the v2 design
-    document; it does not replace the log-uniform grid where that has
-    been adopted elsewhere in the pipeline.
+    `generate_log_uniform_isotropic_grid` for the spectrally-motivated
+    alternative (Borgia et al. 1998), used together with the SVD-based
+    adaptive n_iso selection in `calibration.adaptive_n_iso`. The two
+    are not interchangeable — callers should be explicit about which
+    grid construction they need.
 
     Parameters
     ----------
@@ -280,6 +277,131 @@ def generate_isotropic_grid(d_min=0.0, d_max=3.0e-3, n_steps=31):
     """
     iso_grid = np.linspace(d_min, d_max, n_steps)
     return np.array(iso_grid, dtype=np.float64)
+
+
+def generate_log_uniform_isotropic_grid(d_min=0.1e-3, d_max=3.0e-3, n_steps=12):
+    """
+    Generate the isotropic ADC spectrum on a LOG-UNIFORM (geometric) grid.
+
+    For Laplace-inversion-type problems (fitting a sum of decaying
+    exponentials exp(-b*D) — exactly the isotropic DBSI block), a linear
+    ADC grid over-samples the high-ADC region (where the signal decays
+    fast and is noise-dominated) and under-samples the low-ADC region
+    (where decay is slow and biologically critical for quantifying
+    cellularity/restriction). A log-uniform grid matches the
+    sensitivity profile of the exponential kernel far more evenly across
+    the range (Borgia et al. 1998; Whittall & MacKay's 25-points-per-
+    decade convention for multi-exponential T2/diffusion spectra).
+
+    d_min is deliberately NOT 0.0: a log-uniform grid cannot include 0
+    (undefined), and including an ADC=0 column would in any case create
+    a constant column in the design matrix (exp(0)=1 for every
+    measurement), which is degenerate for any non-negative least
+    squares fit — see project validation notes on why the grid must not
+    start at ADC=0.
+
+    Parameters
+    ----------
+    d_min, d_max : float
+        Isotropic ADC range, mm^2/s. Default (0.1e-3, 3.0e-3) matches
+        the range used by the SVD-based adaptive n_iso selection in
+        `calibration.adaptive_n_iso`.
+    n_steps : int
+        Number of grid points. Typically set by
+        `calibration.adaptive_n_iso.select_n_iso_svd` rather than left
+        at the default here.
+
+    Returns
+    -------
+    iso_grid : ndarray (n_steps,), float64
+    """
+    iso_grid = np.geomspace(d_min, d_max, n_steps)
+    return np.array(iso_grid, dtype=np.float64)
+
+
+def generate_anchored_isotropic_grid(d_min=0.1e-3, d_max=3.0e-3, n_steps=12,
+                                     thresh_res=0.3e-3, thresh_wat=3.0e-3,
+                                     epsilon=1e-6):
+    """
+    Generate the log-uniform isotropic ADC grid (see
+    `generate_log_uniform_isotropic_grid`), but additionally force the
+    grid point closest to each compartment threshold to sit EXACTLY at
+    that threshold, offset by a small epsilon to the side that the
+    production compartment-classification rule (adc <= threshold, see
+    `model_Niso_adaptive_ff_thr.py`) assigns to the INTENDED compartment.
+
+    WHY THIS ANCHORING MATTERS (discovered during transition-zone
+    validation, see project methodological supplement
+    "isotropic_compartment_supplement.docx")
+    -----------------------------------------------------------------------
+    Without anchoring, a plain log-uniform grid can place its nearest
+    point slightly on the WRONG side of a threshold purely by geometric
+    coincidence of where geomspace() happens to land — e.g. a point at
+    3.0000001e-3 when the true free-water signal should be assigned to
+    the >3.0e-3 (WAT) bin, but the column itself, if generated to land
+    at exactly 3.0e-3 or fractionally below, would be silently
+    misclassified as HIN by the `adc <= THRESH_WAT` rule. This was
+    caught as an artifact in early testing where it produced an
+    apparent "complete free-water detection failure" that was purely a
+    boundary-classification bug, not a genuine model limitation.
+
+    Anchoring does NOT remove the separate, genuine transition-zone
+    bias documented in the methodological supplement (Section 4): a
+    true diffusivity near a threshold remains intrinsically hard to
+    assign correctly regardless of grid anchoring, because the SIGNAL
+    ITSELF is ambiguous there, not just the column's nominal position.
+    Anchoring only ensures the grid's own bookkeeping does not ADD a
+    spurious, avoidable misclassification on top of that genuine
+    physical ambiguity.
+
+    Parameters
+    ----------
+    d_min, d_max : float
+        Isotropic ADC range, mm^2/s.
+    n_steps : int
+        Number of grid points.
+    thresh_res, thresh_wat : float
+        Compartment boundaries to anchor to (must match the thresholds
+        used by the actual fitting/classification code).
+    epsilon : float
+        Offset magnitude, mm^2/s. Default 1e-6 (0.001x10^-3) is far
+        below any physiologically meaningful ADC difference and well
+        below typical grid spacing, so it does not materially change
+        the column's signal decay curve, while reliably placing it on
+        the correct side of strict/non-strict threshold comparisons.
+
+    Returns
+    -------
+    iso_grid : ndarray (n_steps,), float64
+        Sorted, unique. May contain fewer than n_steps points if
+        anchoring caused two points to coincide after rounding (rare;
+        only possible for very small n_steps where grid spacing is
+        already comparable to epsilon).
+    """
+    grid = generate_log_uniform_isotropic_grid(d_min=d_min, d_max=d_max, n_steps=n_steps)
+
+    for thresh in (thresh_res, thresh_wat):
+        # Use <= / >= (not strict <) so a threshold that coincides
+        # exactly with the grid's own d_min/d_max boundary (the common
+        # case for thresh_wat when d_max defaults to 3.0e-3) is still
+        # anchored — the anchor offset is what determines its
+        # compartment assignment, not its distance from the grid edge.
+        if d_min <= thresh <= d_max:
+            idx_closest = int(np.argmin(np.abs(grid - thresh)))
+            if thresh == thresh_res:
+                # RES bin is "adc <= thresh_res" -> anchor point must be
+                # AT OR BELOW the threshold to be classified as RES.
+                grid[idx_closest] = thresh - epsilon
+            else:
+                # HIN bin is "adc <= thresh_wat" -> the WAT anchor point
+                # must be ABOVE the threshold to be classified as WAT,
+                # not absorbed into HIN. If this pushes the point
+                # beyond d_max, extend d_max slightly to accommodate it
+                # rather than silently clamping WF representation out
+                # of the grid entirely.
+                grid[idx_closest] = thresh + epsilon
+
+    return np.array(np.unique(grid), dtype=np.float64)
 
 
 @njit(cache=True, fastmath=True)

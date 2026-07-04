@@ -124,7 +124,7 @@ from .core.solvers import (
 )
 from .calibration.optimizer import optimize_hyperparameters, evaluate_lambda_pair
 from .calibration.data_driven import select_lambdas_data_driven, sample_calibration_voxels
-from .calibration.adaptive_n_iso import select_n_iso_svd
+from .calibration.adaptive_n_iso import select_n_iso_svd, select_n_iso_bootstrap
 
 from .utils.tools import estimate_snr_robust
 from .utils.autoconfig import autoconfigure_dictionary
@@ -598,8 +598,10 @@ class DBSI_Adaptive:
 
     # ------------------------------------------------------------------
     def fit(self, data, bvals, bvecs, mask, run_calibration=True,
-           calibration_method='data_driven', n_calibration_voxels=200,
-           run_mc_crosscheck=False, mc_crosscheck_n_mc=200):
+           calibration_method='data_driven', n_calibration_voxels=500,
+           n_iso_method='bootstrap', n_bootstrap=50,
+           run_mc_crosscheck=False, mc_crosscheck_n_mc=200,
+           run_n_iso_sweep_diagnostic=False):
         """
         Fit the v3 hybrid two-stage adaptive DBSI model to 4D diffusion
         MRI data.
@@ -615,43 +617,40 @@ class DBSI_Adaptive:
             all (if False, falls back to the fixed default lambda_base
             heuristic; see class docstring).
         calibration_method : {'data_driven', 'monte_carlo'}
-            Which method determines the actual (lambda_aniso, lambda_iso)
-            used for fitting:
-              'data_driven' (default) — GCV (lambda_iso) + discrepancy
-                principle (lambda_aniso), computed from a sample of this
-                dataset's own brain-mask voxels (see
-                `calibration.data_driven` module docstring). No tissue-
-                fraction priors; fast (a few dozen NNLS solves).
-              'monte_carlo' — the legacy full grid search over 14
-                literature-derived tissue scenarios
-                (`calibration.optimizer.optimize_hyperparameters`).
-                Slower; retained as a fallback for protocols where the
-                data-driven method's assumptions are suspected to fail
-                (see `calibration.data_driven` caveats).
+            Which method determines (lambda_aniso, lambda_iso). See
+            previous docstring entries for full details.
         n_calibration_voxels : int
-            Number of brain-mask voxels to sample for the data-driven
-            method (ignored if calibration_method='monte_carlo'). 150-300
-            is a reasonable range based on project stability analysis
-            (see `calibration.data_driven.sample_calibration_voxels`
-            docstring); with real datasets containing hundreds of
-            thousands of brain voxels, this is a small, cheap sample.
+            Number of brain-mask voxels to sample. Default 500.
+        n_iso_method : {'bootstrap', 'svd_floor', 'fixed'}
+            How to select n_iso when self.n_iso is None (default None
+            means auto):
+              'bootstrap' (default) — minimise bias²+variance of RF
+                across bootstrapped noise replicates of real sampled
+                voxels (see `calibration.adaptive_n_iso.
+                select_n_iso_bootstrap`). Validated on Verona protocol
+                (4 shells, b_max=2000, SNR=28): consistently selects
+                n_iso=8 across 5 independent sampling seeds, with the
+                composite score 3-10x lower than all other candidates.
+                Preferred over GCV-sweep (systematically flat for dMRI)
+                and over fixed floor (not protocol-specific).
+              'svd_floor' — SVD-based information limit with empirical
+                floor=10 (the previous default). Protocol-agnostic; for
+                typical dMRI protocols the floor dominates and the SVD
+                component is mostly inactive (raw answer 2-5 for 1-7
+                shell protocols). Retained as a fast fallback when
+                bootstrap computational cost is a concern.
+              'fixed' — use whatever value was passed to n_iso in the
+                constructor (or the legacy default 31 if None). Provided
+                only for backward compatibility / reproducibility of
+                earlier pipeline runs.
+        n_bootstrap : int
+            Number of noise replicates per voxel for the bootstrap
+            method (only used if n_iso_method='bootstrap'). Default 50;
+            30 is adequate, >100 gives diminishing returns.
         run_mc_crosscheck : bool
-            If True, after determining (lambda_aniso, lambda_iso) by
-            whichever `calibration_method` was used, additionally run
-            the Monte Carlo tissue-scenario cross-check
-            (`calibration.optimizer.evaluate_lambda_pair`) and print its
-            report. This does NOT change the lambda values used for
-            fitting — it only reports whether the chosen pair behaves
-            sensibly across known tissue regimes, as an independent
-            sanity check (see project methodology: Monte Carlo scenarios
-            are a verification tool, not the source of lambda).
-            Recommended to enable at least once per new protocol/dataset
-            type before trusting the data-driven selection unsupervised.
+            Monte Carlo tissue-scenario cross-check (see previous docs).
         mc_crosscheck_n_mc : int
-            MC samples per scenario for the cross-check report (only
-            used if run_mc_crosscheck=True). Lower than the legacy grid
-            search's default since only one pair is being evaluated, not
-            a full grid.
+            Samples per scenario for cross-check.
 
         Returns
         -------
@@ -738,51 +737,13 @@ class DBSI_Adaptive:
         # n_iso defaults to the SVD-based adaptive estimate (protocol- and
         # SNR-aware, with an empirically-validated floor — see
         # calibration.adaptive_n_iso module docstring) rather than the
-        # legacy fixed value of 31. The grid itself is THRESHOLD-ANCHORED
-        # log-uniform (Borgia et al. 1998 spectral-resolution rationale,
-        # plus exact-boundary anchoring — see
-        # core.basis.generate_anchored_isotropic_grid docstring and
-        # project methodological supplement "isotropic_compartment_
-        # supplement.docx" Section 4) rather than plain linear when
-        # n_iso is adaptively determined, since the two were validated
-        # together in project synthetic testing.
-        #
-        # If the caller explicitly set n_iso in the constructor, that
-        # exact value is honoured and the LINEAR grid is used instead
-        # (matching the original v1/v2/v3 behaviour for explicit
-        # overrides) — adaptive selection only engages when n_iso is left
-        # at its default (None).
-        if self.n_iso is None:
-            self.n_iso, _svd_diag = select_n_iso_svd(bvals, snr)
-            print(f"\n   Adaptive n_iso selection: n_iso={self.n_iso} "
-                  f"(raw SVD answer: {_svd_diag['n_iso_raw']}, "
-                  f"floor_applied={_svd_diag['floor_applied']})")
-            # d_max is extended beyond the nominal iso_range upper bound
-            # (default 3.0e-3) up to _ISO_GRID_D_MAX_EXTENDED (5.0e-3) so
-            # the grid has at least one column genuinely representing
-            # free water ABOVE the HIN/WAT threshold, rather than only
-            # a single anchor column exactly at the threshold edge. This
-            # does not eliminate the HIN/WAT transition zone documented
-            # in the methodological supplement (the zone is a property
-            # of the signal, not the grid), but it ensures the grid
-            # itself is not an additional, avoidable source of WAT
-            # under-representation on top of that.
-            iso_d_max = max(self.iso_range[1], _ISO_GRID_D_MAX_EXTENDED)
-            iso_grid = generate_anchored_isotropic_grid(
-                d_min=max(self.iso_range[0], 0.1e-3), d_max=iso_d_max,
-                n_steps=self.n_iso, thresh_res=THRESH_RES, thresh_wat=THRESH_WAT,
-            )
-        else:
-            iso_grid = generate_isotropic_grid(
-                d_min=self.iso_range[0], d_max=self.iso_range[1], n_steps=self.n_iso
-            )
-
         # ── Rician bias correction (vectorized, unchanged from v1/v2) ──────
-        # Moved before calibration: the data-driven calibration path
-        # samples real voxel signals from this dataset, and should see
-        # the SAME corrected signal the actual Stage A/B fit will use —
-        # calibrating against uncorrected signal would target a subtly
-        # different noise level than what is actually fit.
+        # Moved before n_iso selection AND calibration: both the bootstrap
+        # n_iso method and the data-driven lambda calibration sample real
+        # voxel signals from this dataset, and should see the SAME
+        # corrected signal the actual Stage A/B fit will use — sampling
+        # against uncorrected signal would target a subtly different
+        # noise level than what is actually fit.
         print("\n3. Applying Rician Bias Correction...")
         coords = np.argwhere(mask)
 
@@ -797,18 +758,94 @@ class DBSI_Adaptive:
         data_corr[xs, ys, zs] = corrected
         del masked_sq, valid_mask, corrected
 
+        # ── Sample calibration voxels once, reused for n_iso selection
+        # AND lambda calibration (avoids sampling twice / inconsistent
+        # voxel sets between the two steps) ────────────────────────────
+        y_cal, sigma_cal = None, None
+        if self.n_iso is None or (run_calibration and
+                                  (self.lambda_aniso is None or self.lambda_iso is None) and
+                                  calibration_method == 'data_driven'):
+            y_cal, sigma_cal = sample_calibration_voxels(
+                data_corr, mask, bvals, n_voxels=n_calibration_voxels, seed=0,
+            )
+            print(f"\n   Sampled {len(y_cal)} calibration voxels from the brain mask "
+                  f"(sigma_normalised={sigma_cal:.5f})")
+
+        # legacy fixed value of 31. The grid itself is THRESHOLD-ANCHORED
+        # log-uniform (Borgia et al. 1998 spectral-resolution rationale,
+        # plus exact-boundary anchoring — see
+        # core.basis.generate_anchored_isotropic_grid docstring and
+        # project methodological supplement "isotropic_compartment_
+        # supplement.docx" Section 4) rather than plain linear when
+        # n_iso is adaptively determined, since the two were validated
+        # together in project synthetic testing.
+        #
+        # If the caller explicitly set n_iso in the constructor, that
+        # exact value is honoured and the LINEAR grid is used instead
+        # (matching the original v1/v2/v3 behaviour for explicit
+        # overrides) — adaptive selection only engages when n_iso is left
+        # at its default (None).
+        iso_d_max = max(self.iso_range[1], _ISO_GRID_D_MAX_EXTENDED)
+
+        if self.n_iso is None:
+            if n_iso_method == 'bootstrap':
+                print(f"\n4. Selecting n_iso — BOOTSTRAP bias-variance "
+                      f"({n_bootstrap} replicates/voxel)...")
+                self.n_iso, _n_iso_diag = select_n_iso_bootstrap(
+                    bvals, y_cal, snr, sigma_cal,
+                    d_min=max(self.iso_range[0], 0.1e-3), d_max=iso_d_max,
+                    n_bootstrap=n_bootstrap,
+                )
+                if _n_iso_diag['curve_is_flat'] or _n_iso_diag['sample_looks_homogeneous']:
+                    _reason = ("weak separation" if _n_iso_diag['curve_is_flat']
+                              else "insufficient voxel tissue diversity")
+                    print(f"   [WARNING] Bootstrap result unreliable ({_reason}) "
+                          f"for this dataset; falling back to SVD+floor as a "
+                          f"safer default.")
+                    self.n_iso, _svd_diag = select_n_iso_svd(bvals, snr)
+                    print(f"   SVD+floor fallback: n_iso={self.n_iso}")
+                else:
+                    print(f"   Bootstrap-selected n_iso={self.n_iso}")
+
+            elif n_iso_method == 'svd_floor':
+                self.n_iso, _svd_diag = select_n_iso_svd(bvals, snr)
+                print(f"\n4. Selecting n_iso — SVD + empirical floor: "
+                      f"n_iso={self.n_iso} (raw SVD answer: "
+                      f"{_svd_diag['n_iso_raw']}, "
+                      f"floor_applied={_svd_diag['floor_applied']})")
+
+            elif n_iso_method == 'fixed':
+                self.n_iso = _DEFAULT_N_ISO_STEPS
+                print(f"\n4. n_iso fixed at legacy default: n_iso={self.n_iso}")
+
+            else:
+                raise ValueError(
+                    f"n_iso_method must be 'bootstrap', 'svd_floor', or "
+                    f"'fixed', got {n_iso_method!r}."
+                )
+
+            iso_grid = generate_anchored_isotropic_grid(
+                d_min=max(self.iso_range[0], 0.1e-3), d_max=iso_d_max,
+                n_steps=self.n_iso, thresh_res=THRESH_RES, thresh_wat=THRESH_WAT,
+            )
+        else:
+            iso_grid = generate_isotropic_grid(
+                d_min=self.iso_range[0], d_max=self.iso_range[1], n_steps=self.n_iso
+            )
+
         # ── Calibration of (lambda_aniso, lambda_iso) ───────────────────────
         if run_calibration and (self.lambda_aniso is None or self.lambda_iso is None):
 
             if calibration_method == 'data_driven':
-                print(f"\n4. Calibrating (lambda_aniso, lambda_iso) — DATA-DRIVEN "
+                print(f"\n5. Calibrating (lambda_aniso, lambda_iso) — DATA-DRIVEN "
                       f"(GCV + discrepancy principle)...")
-                y_cal, sigma_cal = sample_calibration_voxels(
-                    data_corr, mask, bvals, n_voxels=n_calibration_voxels,
-                    seed=0,
-                )
-                print(f"   Sampled {len(y_cal)} calibration voxels from the brain mask "
-                      f"(sigma_normalised={sigma_cal:.5f})")
+                if y_cal is None:
+                    y_cal, sigma_cal = sample_calibration_voxels(
+                        data_corr, mask, bvals, n_voxels=n_calibration_voxels,
+                        seed=0,
+                    )
+                    print(f"   Sampled {len(y_cal)} calibration voxels from the "
+                          f"brain mask (sigma_normalised={sigma_cal:.5f})")
                 self.lambda_aniso, self.lambda_iso, _dd_diag = select_lambdas_data_driven(
                     bvals, bvecs, fiber_dirs, diff_pairs, iso_grid, y_cal, sigma_cal,
                 )
@@ -824,7 +861,7 @@ class DBSI_Adaptive:
                           f"this result.")
 
             elif calibration_method == 'monte_carlo':
-                print(f"\n4. Calibrating (lambda_aniso, lambda_iso) — MONTE CARLO "
+                print(f"\n5. Calibrating (lambda_aniso, lambda_iso) — MONTE CARLO "
                       f"(14 tissue scenarios, full grid search)...")
                 self.lambda_aniso, self.lambda_iso = optimize_hyperparameters(
                     bvals, bvecs, snr,
@@ -877,7 +914,7 @@ class DBSI_Adaptive:
             self.mc_crosscheck_report_ = _crosscheck_report
 
         # ── Stage A design matrix ───────────────────────────────────────────
-        print("\n5. Building Stage A Detection Dictionary...")
+        print("\n6. Building Stage A Detection Dictionary...")
 
         A = build_design_matrix_exhaustive(bvals, bvecs, fiber_dirs, diff_pairs, iso_grid)
         AtA = A.T @ A
@@ -909,7 +946,7 @@ class DBSI_Adaptive:
         batch_sz = 10_000
         n_batches = int(np.ceil(n_voxels / batch_sz))
 
-        print(f"\n6. Fitting {n_voxels:,} voxels "
+        print(f"\n7. Fitting {n_voxels:,} voxels "
               f"[{model_mode}-ISO model, Stage A + Stage B]...")
 
         _kernel = _fit_voxels_3iso_v3 if use_3iso else _fit_voxels_2iso_v3

@@ -55,6 +55,8 @@ from .data_driven import (
 from .adaptive_n_iso import (
     select_n_iso_svd,
     select_n_iso_with_gcv_crosscheck,
+    select_n_iso_data_driven_sweep,
+    select_n_iso_bootstrap,
 )
 from .optimizer import (
     optimize_hyperparameters,
@@ -71,6 +73,8 @@ __all__ = [
     # Adaptive n_iso
     "select_n_iso_svd",
     "select_n_iso_with_gcv_crosscheck",
+    "select_n_iso_data_driven_sweep",
+    "select_n_iso_bootstrap",
     # Monte Carlo (cross-check)
     "optimize_hyperparameters",
     "evaluate_lambda_pair",

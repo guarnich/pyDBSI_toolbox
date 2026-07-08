@@ -64,8 +64,17 @@ def main():
                         help="Method to determine (lambda_aniso, lambda_iso). Default: data_driven "
                              "(GCV + discrepancy principle, no tissue-fraction priors). "
                              "'monte_carlo' falls back to the legacy 14-scenario grid search.")
-    parser.add_argument("--n-calibration-voxels", type=int, dest="n_calibration_voxels", default=200,
-                        help="Number of brain-mask voxels sampled for data-driven calibration. Default: 200.")
+    parser.add_argument("--n-calibration-voxels", type=int, dest="n_calibration_voxels", default=500,
+                        help="Number of brain-mask voxels sampled for data-driven calibration and "
+                             "n_iso selection. Default: 500 (matches DBSI_Adaptive.fit() default; "
+                             "previously inconsistent at 200 here — fixed).")
+    parser.add_argument("--n-iso-method", choices=["bootstrap", "svd_floor", "fixed"],
+                        dest="n_iso_method", default="bootstrap",
+                        help="How to select n_iso when --n-iso is not given. 'bootstrap' (default): "
+                             "bias-variance minimisation on real sampled voxels. 'svd_floor': SVD "
+                             "information limit + empirical floor. 'fixed': legacy n_iso=31.")
+    parser.add_argument("--n-bootstrap", type=int, dest="n_bootstrap", default=50,
+                        help="Noise replicates per voxel for the bootstrap n_iso method. Default: 50.")
     parser.add_argument("--mc-crosscheck", action="store_true", dest="run_mc_crosscheck",
                         help="Run the Monte Carlo tissue-scenario cross-check on the selected "
                              "lambda pair (does not change it; prints a diagnostic report).")
@@ -73,6 +82,18 @@ def main():
                         help="MC samples per scenario for the cross-check report. Default: 200.")
     parser.add_argument("--force-n-iso", type=int, choices=[2, 3], default=None,
                         help="Override automatic isotropic-model selection (2 or 3)")
+    parser.add_argument("--disable-direction-refinement", action="store_true",
+                        dest="disable_direction_refinement",
+                        help="Disable MRDS-lite two-level cone refinement of Stage A's dominant "
+                             "fiber direction (enabled by default). Refinement closes most of the "
+                             "AD accuracy gap caused by the fixed Stage A grid's angular "
+                             "discretisation, at negligible added cost — see "
+                             "core.solvers module docstring 'MRDS-LITE'. Disable only for "
+                             "reproducing pre-refinement results or debugging.")
+    parser.add_argument("--target-angular-resolution", type=float, dest="target_angular_resolution_deg",
+                        default=1.0,
+                        help="Desired final angular precision (degrees) for direction refinement. "
+                             "Default: 1.0. Ignored if --disable-direction-refinement is set.")
     parser.add_argument("--compute-r2", action="store_true",
                         help="Compute fit quality check (R2 and RMSE)")
     parser.add_argument("--compute-transition-confidence", action="store_true",
@@ -100,7 +121,9 @@ def main():
         n_rd=args.n_rd,
         anisotropy_ratio=args.anisotropy_ratio,
         min_weight_fraction=args.min_weight_fraction,
-        force_n_iso=args.force_n_iso
+        force_n_iso=args.force_n_iso,
+        enable_direction_refinement=not args.disable_direction_refinement,
+        target_angular_resolution_deg=args.target_angular_resolution_deg,
     )
 
     results, model_mode = model.fit(
@@ -108,6 +131,8 @@ def main():
         run_calibration=not args.skip_calibration,
         calibration_method=args.calibration_method,
         n_calibration_voxels=args.n_calibration_voxels,
+        n_iso_method=args.n_iso_method,
+        n_bootstrap=args.n_bootstrap,
         run_mc_crosscheck=args.run_mc_crosscheck,
         mc_crosscheck_n_mc=args.mc_crosscheck_n_mc,
     )

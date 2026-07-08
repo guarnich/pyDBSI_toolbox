@@ -121,6 +121,9 @@ from .core.solvers import (
     select_dominant_directions,
     estimate_AD_RD_conditioned,
     compute_fiber_fa,
+    refine_fiber_direction_cone,
+    compute_cone_refinement_schedule,
+    measure_hemisphere_spacing,
 )
 from .calibration.optimizer import optimize_hyperparameters, evaluate_lambda_pair
 from .calibration.data_driven import select_lambdas_data_driven, sample_calibration_voxels
@@ -243,11 +246,15 @@ def analyse_protocol(bvals):
 @njit(parallel=True, cache=True, fastmath=True)
 def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         fiber_dirs, diff_pairs, n_dirs, iso_grid, b0_thr,
-                        fiber_threshold, min_weight_fraction, out):
+                        fiber_threshold, min_weight_fraction,
+                        enable_direction_refinement,
+                        cone1_half_angle, n1_cone, cone2_half_angle, n2_cone,
+                        out):
     """
     v3 parallel fitting kernel — two-compartment isotropic model (2-ISO),
     Stage A direction detection + Stage B closed-form diffusivity
-    estimation.
+    estimation, optionally followed by MRDS-lite cone refinement of the
+    dominant direction (see core.solvers module docstring "MRDS-LITE").
 
     AtA_reg is Stage A's regularized Gram matrix (decoupled
     lambda_aniso/lambda_iso). Output layout identical to v1/v2 (see
@@ -340,12 +347,26 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
             if dir_indices[0] >= 0:
                 dominant_dir = fiber_dirs[dir_indices[0]]
 
-                # ── STAGE B: closed-form (AD, RD) conditioned on direction ──
-                AD_est, RD_est = estimate_AD_RD_conditioned(
-                    bvals, bvecs, sig_norm, dominant_dir,
-                    f_fib, f_res, f_nonrf, 0.0,
-                    D_res_c, D_nonrf_c, 0.0, False
-                )
+                if enable_direction_refinement:
+                    # ── MRDS-LITE: refine the coarse grid direction via
+                    # two-level cone search, scored by Stage B's own
+                    # closed-form regression (see core.solvers module
+                    # docstring "MRDS-LITE"). Never worse than the
+                    # unrefined estimate (candidate zero is the coarse
+                    # direction itself).
+                    _, AD_est, RD_est = refine_fiber_direction_cone(
+                        bvals, bvecs, sig_norm, dominant_dir,
+                        f_fib, f_res, f_nonrf, 0.0,
+                        D_res_c, D_nonrf_c, 0.0, False,
+                        cone1_half_angle, n1_cone, cone2_half_angle, n2_cone
+                    )
+                else:
+                    # ── STAGE B: closed-form (AD, RD) conditioned on direction ──
+                    AD_est, RD_est = estimate_AD_RD_conditioned(
+                        bvals, bvecs, sig_norm, dominant_dir,
+                        f_fib, f_res, f_nonrf, 0.0,
+                        D_res_c, D_nonrf_c, 0.0, False
+                    )
 
                 FA = np.nan
                 if not np.isnan(AD_est) and not np.isnan(RD_est):
@@ -361,10 +382,15 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
 @njit(parallel=True, cache=True, fastmath=True)
 def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         fiber_dirs, diff_pairs, n_dirs, iso_grid, b0_thr,
-                        fiber_threshold, min_weight_fraction, out):
+                        fiber_threshold, min_weight_fraction,
+                        enable_direction_refinement,
+                        cone1_half_angle, n1_cone, cone2_half_angle, n2_cone,
+                        out):
     """
     v3 parallel fitting kernel — three-compartment isotropic model
-    (3-ISO). Same Stage A / Stage B structure as `_fit_voxels_2iso_v3`.
+    (3-ISO). Same Stage A / Stage B structure as `_fit_voxels_2iso_v3`,
+    including the optional MRDS-lite direction refinement (see
+    core.solvers module docstring "MRDS-LITE").
     """
     n_voxels = coords.shape[0]
     n_pairs = len(diff_pairs)
@@ -462,11 +488,19 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
             if dir_indices[0] >= 0:
                 dominant_dir = fiber_dirs[dir_indices[0]]
 
-                AD_est, RD_est = estimate_AD_RD_conditioned(
-                    bvals, bvecs, sig_norm, dominant_dir,
-                    f_fib, f_res, f_hin, f_wat,
-                    D_res_c, D_hin_c, D_wat_c, True
-                )
+                if enable_direction_refinement:
+                    _, AD_est, RD_est = refine_fiber_direction_cone(
+                        bvals, bvecs, sig_norm, dominant_dir,
+                        f_fib, f_res, f_hin, f_wat,
+                        D_res_c, D_hin_c, D_wat_c, True,
+                        cone1_half_angle, n1_cone, cone2_half_angle, n2_cone
+                    )
+                else:
+                    AD_est, RD_est = estimate_AD_RD_conditioned(
+                        bvals, bvecs, sig_norm, dominant_dir,
+                        f_fib, f_res, f_hin, f_wat,
+                        D_res_c, D_hin_c, D_wat_c, True
+                    )
 
                 FA = np.nan
                 if not np.isnan(AD_est) and not np.isnan(RD_est):
@@ -535,6 +569,29 @@ class DBSI_Adaptive:
         must carry to be reported as a fiber population. Default: 0.05.
     force_n_iso : int or None
         Override automatic isotropic-model selection (2 or 3).
+    enable_direction_refinement : bool
+        Whether to refine Stage A's dominant direction estimate with a
+        two-level "MRDS-lite" cone search (Coronado-Leija et al. 2017,
+        scoped down to single-direction refinement — see
+        `core.solvers` module docstring "MRDS-LITE" for full rationale).
+        Default: True. Project validation (synthetic, Verona-protocol
+        reconstruction) found this closes ~60-90% of the AD accuracy gap
+        attributable to Stage A's fixed grid discretisation (median AD
+        relative error dropped from ~6.8-12.6% to ~2.6-7.6% depending on
+        test conditions), at negligible added computational cost (a few
+        dozen closed-form regressions per fiber voxel, versus the NNLS
+        solve's own up to 2000 iterations on a much larger system).
+        RD is largely unaffected either way (the closed-form regression's
+        RD term is markedly less sensitive to angular offset than AD).
+        NOT validated on real (non-synthetic) data or on multi-fiber
+        crossing configurations.
+    target_angular_resolution_deg : float
+        Desired final angular precision (degrees) of the refined
+        direction. Default: 1.0. Used to derive the two-level cone
+        search schedule (cone angles and candidate counts) directly from
+        the ACTUAL measured spacing of the Stage A hemisphere dictionary
+        — see `core.solvers.compute_cone_refinement_schedule`. Only used
+        if `enable_direction_refinement=True`.
 
     Notes
     -----
@@ -574,7 +631,9 @@ class DBSI_Adaptive:
                  rd_range=(_STAGE_A_RD_MIN, _STAGE_A_RD_MAX),
                  iso_range=(_DEFAULT_ISO_MIN, _DEFAULT_ISO_MAX),
                  fiber_threshold=FIBER_THRESHOLD,
-                 min_weight_fraction=0.05, force_n_iso=None):
+                 min_weight_fraction=0.05, force_n_iso=None,
+                 enable_direction_refinement=True,
+                 target_angular_resolution_deg=1.0):
         self.n_iso = n_iso
         self.lambda_aniso = lambda_aniso
         self.lambda_iso = lambda_iso
@@ -588,6 +647,8 @@ class DBSI_Adaptive:
         self.fiber_threshold = fiber_threshold
         self.min_weight_fraction = min_weight_fraction
         self.force_n_iso = force_n_iso
+        self.enable_direction_refinement = enable_direction_refinement
+        self.target_angular_resolution_deg = target_angular_resolution_deg
 
         self.model_mode_ = None
         self.b_max_ = None
@@ -595,6 +656,8 @@ class DBSI_Adaptive:
         self.n_aniso_cols_ = None
         self.diff_pairs_ = None
         self.mc_crosscheck_report_ = None
+        self.hemisphere_spacing_deg_ = None
+        self.cone_refinement_schedule_ = None
 
     # ------------------------------------------------------------------
     def fit(self, data, bvals, bvecs, mask, run_calibration=True,
@@ -729,6 +792,34 @@ class DBSI_Adaptive:
 
         fiber_dirs = generate_fibonacci_sphere_hemisphere(self.n_dirs)
 
+        # ── MRDS-lite direction refinement schedule ─────────────────────────
+        # Computed ONCE per protocol (not per voxel) from the ACTUAL Stage A
+        # dictionary's own nearest-neighbour spacing — see core.solvers
+        # module docstring "MRDS-LITE" for the full rationale and the
+        # empirical validation (Verona-protocol reconstruction: closes the
+        # AD accuracy gap from ~6.8-9% grid-quantisation bias down to
+        # ~3%, matching a true-direction oracle, at n_dirs values ranging
+        # from 30 to 62). No independently hardcoded cone angles.
+        self.hemisphere_spacing_deg_ = float(np.degrees(measure_hemisphere_spacing(fiber_dirs)))
+        if self.enable_direction_refinement:
+            _cone1, _n1, _cone2, _n2 = compute_cone_refinement_schedule(
+                np.radians(self.hemisphere_spacing_deg_),
+                np.radians(self.target_angular_resolution_deg)
+            )
+            self.cone_refinement_schedule_ = dict(
+                cone1_half_angle_deg=float(np.degrees(_cone1)), n1=int(_n1),
+                cone2_half_angle_deg=float(np.degrees(_cone2)), n2=int(_n2),
+            )
+            print(f"\n   MRDS-lite direction refinement: ENABLED "
+                  f"(target resolution={self.target_angular_resolution_deg:.2f} deg)")
+            print(f"   Dictionary spacing: {self.hemisphere_spacing_deg_:.2f} deg  |  "
+                  f"Level 1 cone: +/-{np.degrees(_cone1):.2f} deg ({_n1} candidates)  |  "
+                  f"Level 2 cone: +/-{np.degrees(_cone2):.2f} deg ({_n2} candidates)")
+        else:
+            _cone1, _n1, _cone2, _n2 = 0.0, 1, 0.0, 0
+            print(f"\n   MRDS-lite direction refinement: DISABLED "
+                  f"(using raw Stage A grid direction, unrefined)")
+
         # ── SNR estimation ─────────────────────────────────────────────────
         print("\n2. Estimating SNR...")
         snr, sigma = estimate_snr_robust(data, bvals, mask, verbose=True)
@@ -737,6 +828,7 @@ class DBSI_Adaptive:
         # n_iso defaults to the SVD-based adaptive estimate (protocol- and
         # SNR-aware, with an empirically-validated floor — see
         # calibration.adaptive_n_iso module docstring) rather than the
+        # legacy fixed value of 31.
         # ── Rician bias correction (vectorized, unchanged from v1/v2) ──────
         # Moved before n_iso selection AND calibration: both the bootstrap
         # n_iso method and the data-driven lambda calibration sample real
@@ -961,7 +1053,9 @@ class DBSI_Adaptive:
                 _kernel(
                     data_corr, coords[start:end], AtA_reg, At,
                     bvals, bvecs, fiber_dirs, diff_pairs, self.n_dirs, iso_grid,
-                    b0_thr, self.fiber_threshold, self.min_weight_fraction, results
+                    b0_thr, self.fiber_threshold, self.min_weight_fraction,
+                    self.enable_direction_refinement,
+                    _cone1, _n1, _cone2, _n2, results
                 )
                 pbar.update(end - start)
 

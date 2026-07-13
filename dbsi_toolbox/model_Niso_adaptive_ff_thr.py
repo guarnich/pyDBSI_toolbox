@@ -128,6 +128,7 @@ from .core.solvers import (
 from .calibration.optimizer import optimize_hyperparameters, evaluate_lambda_pair
 from .calibration.data_driven import select_lambdas_data_driven, sample_calibration_voxels
 from .calibration.adaptive_n_iso import select_n_iso_svd, select_n_iso_bootstrap
+from .calibration.mc_sure import crosscheck_lambda_iso_sure, crosscheck_n_iso_sure
 
 from .utils.tools import estimate_snr_robust
 from .utils.autoconfig import autoconfigure_dictionary
@@ -656,6 +657,7 @@ class DBSI_Adaptive:
         self.n_aniso_cols_ = None
         self.diff_pairs_ = None
         self.mc_crosscheck_report_ = None
+        self.sure_crosscheck_report_ = None
         self.hemisphere_spacing_deg_ = None
         self.cone_refinement_schedule_ = None
 
@@ -664,6 +666,7 @@ class DBSI_Adaptive:
            calibration_method='data_driven', n_calibration_voxels=500,
            n_iso_method='bootstrap', n_bootstrap=50,
            run_mc_crosscheck=False, mc_crosscheck_n_mc=200,
+           run_sure_crosscheck=False, sure_crosscheck_n_probes=15,
            run_n_iso_sweep_diagnostic=False):
         """
         Fit the v3 hybrid two-stage adaptive DBSI model to 4D diffusion
@@ -714,6 +717,29 @@ class DBSI_Adaptive:
             Monte Carlo tissue-scenario cross-check (see previous docs).
         mc_crosscheck_n_mc : int
             Samples per scenario for cross-check.
+        run_sure_crosscheck : bool
+            If True, after determining n_iso and lambda_iso by whichever
+            method was used, additionally cross-check BOTH against
+            Monte Carlo SURE (Stein's Unbiased Risk Estimate; Ramani,
+            Blu & Unser 2008) — a risk criterion that, unlike GCV, is
+            formally exact for the actual constrained NNLS estimator
+            used in this toolbox, not just its unconstrained linear
+            approximation. Does NOT change n_iso/lambda_iso — only
+            reports whether they fall within a low-risk neighbourhood
+            under this independent, NNLS-correct criterion (see
+            `calibration.mc_sure` module docstring for the full
+            rationale and the empirical finding that shaped this
+            design: the risk landscape here is typically a flat valley,
+            so this is a REGIME check, not a more precise point
+            estimate). Meaningfully more expensive than GCV alone (each
+            evaluated candidate re-solves NNLS ~1+sure_crosscheck_n_probes
+            times per sampled voxel); recommended as an occasional
+            sanity check per new protocol, not a per-run default.
+        sure_crosscheck_n_probes : int
+            Number of random probes per voxel for the Monte Carlo SURE
+            divergence estimate (only used if run_sure_crosscheck=True).
+            Default 15 — see `calibration.mc_sure._mc_sure_risk`
+            docstring for the empirical basis of this default.
 
         Returns
         -------
@@ -1004,6 +1030,38 @@ class DBSI_Adaptive:
                 verbose=True,
             )
             self.mc_crosscheck_report_ = _crosscheck_report
+
+        # ── Monte Carlo SURE cross-check (optional, does not change n_iso/lambda) ──
+        if run_sure_crosscheck:
+            print(f"\n   Running Monte Carlo SURE cross-check of n_iso and lambda_iso "
+                  f"(NNLS-correct risk criterion — see calibration.mc_sure module "
+                  f"docstring)...")
+            if y_cal is None:
+                y_cal, sigma_cal = sample_calibration_voxels(
+                    data_corr, mask, bvals, n_voxels=n_calibration_voxels, seed=0,
+                )
+                print(f"   Sampled {len(y_cal)} calibration voxels for SURE cross-check "
+                      f"(sigma_normalised={sigma_cal:.5f})")
+
+            _sure_lambda_agrees, _sure_lambda_report = crosscheck_lambda_iso_sure(
+                bvals, iso_grid, y_cal, sigma_cal, self.lambda_iso,
+                n_probes=sure_crosscheck_n_probes, verbose=True,
+            )
+            _sure_n_iso_agrees, _sure_n_iso_report = crosscheck_n_iso_sure(
+                bvals, y_cal, sigma_cal, self.n_iso,
+                d_min=max(self.iso_range[0], 0.1e-3),
+                d_max=max(self.iso_range[1], _ISO_GRID_D_MAX_EXTENDED),
+                n_probes=sure_crosscheck_n_probes, verbose=True,
+            )
+            self.sure_crosscheck_report_ = dict(
+                lambda_iso=_sure_lambda_report, n_iso=_sure_n_iso_report,
+                lambda_iso_agrees=_sure_lambda_agrees, n_iso_agrees=_sure_n_iso_agrees,
+            )
+            if not (_sure_lambda_agrees and _sure_n_iso_agrees):
+                print(f"\n   [NOTE] Monte Carlo SURE flagged a disagreement above — "
+                      f"this does not automatically change the fit, but is worth "
+                      f"investigating for this dataset/protocol before trusting the "
+                      f"data-driven n_iso/lambda_iso selection unsupervised.")
 
         # ── Stage A design matrix ───────────────────────────────────────────
         print("\n6. Building Stage A Detection Dictionary...")

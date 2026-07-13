@@ -24,6 +24,20 @@ TWO COMPLEMENTARY PATHS
    fallback if the data-driven method's assumptions are suspected to
    fail for a given protocol.
 
+3. MONTE CARLO SURE (cross-check) — `calibration.mc_sure`
+   Stein's Unbiased Risk Estimate, evaluated via randomized probes
+   (Ramani, Blu & Unser 2008), gives a risk criterion that is formally
+   exact for the actual constrained NNLS estimator used in this
+   toolbox — unlike GCV, which is derived for an unconstrained linear
+   estimator and is therefore an approximation once the non-negativity
+   constraint binds. Use `crosscheck_lambda_iso_sure` /
+   `crosscheck_n_iso_sure` to verify that a candidate n_iso/lambda_iso
+   (from the data-driven path) falls within a low-risk neighbourhood
+   under this independent criterion. See `mc_sure.py` module docstring
+   for the empirical finding that shaped this module's design: the risk
+   landscape here is typically a flat valley, so these functions report
+   AGREEMENT/DISAGREEMENT with a candidate, not a new point estimate.
+
 Recommended usage pattern
 -----------------------------
     from dbsi_toolbox.calibration import (
@@ -63,6 +77,10 @@ from .optimizer import (
     evaluate_lambda_pair,
     generate_synthetic_signal,
 )
+from .mc_sure import (
+    crosscheck_lambda_iso_sure,
+    crosscheck_n_iso_sure,
+)
 
 __all__ = [
     # Data-driven (primary)
@@ -79,4 +97,7 @@ __all__ = [
     "optimize_hyperparameters",
     "evaluate_lambda_pair",
     "generate_synthetic_signal",
+    # Monte Carlo SURE (cross-check)
+    "crosscheck_lambda_iso_sure",
+    "crosscheck_n_iso_sure",
 ]

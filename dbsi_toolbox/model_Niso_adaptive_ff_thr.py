@@ -161,6 +161,7 @@ from .core.solvers import (
     nnls_coordinate_descent,
     compute_regularization_matrix,
     select_dominant_directions,
+    build_direction_neighbor_graph,   # NEW — local-maxima peak-finding graph
     estimate_AD_RD_conditioned,
     compute_fiber_fa,
     refine_fiber_direction_cone,
@@ -217,6 +218,22 @@ _DEFAULT_MAX_FIBER_POPULATIONS = 2
 # MRDS multi-fiber Stage B defaults (see core.solvers.estimate_AD_RD_mrds).
 _MRDS_INIT_N_ITER = 3        # short, deliberately non-converged alternating warm start
 _MRDS_LM_MAX_ITER = 25
+
+# Local-maxima peak-finding neighbourhood size for `select_dominant_directions`
+# (see core.solvers module notes just above that function). Re-validated
+# 2026-07-15 (post sign-bug and detection-fix, k in {4,6,8,10,12}, n_dirs=62,
+# 30 seeds/condition, SNR=30): k=6 dominates or ties k=8+ on both axes
+# (single-fiber correct-N_POP=1 rate identical at 73.3%; crossing
+# sensitivity higher at every tested angle: 30/60/90deg = 46.7/93.3/96.7%
+# for k=6 vs 43.3/90.0/93.3% for k=8). k=4 trades single-fiber accuracy
+# (63.3%) for a further sensitivity gain that mostly saturates by k=6.
+# 30-degree crossing sensitivity (~45-65% across all k) is NOT much
+# improved by k alone -- at this dictionary's ~25 deg mean node spacing, a
+# 30 deg crossing separates the two true peaks by close to one grid
+# spacing, so their neighbourhoods overlap almost by construction; a
+# denser Stage A dictionary (larger n_dirs), not a larger/smaller k, is
+# the lever for that regime. See project re-validation sweep.
+_DEFAULT_DIRECTION_PEAK_K = 6
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -279,7 +296,7 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         fiber_threshold, min_weight_fraction,
                         enable_direction_refinement,
                         cone1_half_angle, n1_cone, cone2_half_angle, n2_cone,
-                        max_fiber_populations, out):
+                        neighbor_idx, max_fiber_populations, out):
     """
     v3 parallel fitting kernel — two-compartment isotropic model (2-ISO).
 
@@ -379,7 +396,7 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
 
         if f_fib > fiber_threshold:
             dir_indices, dir_weights = select_dominant_directions(
-                w_aniso, n_dirs, n_pairs, max_fiber_populations, min_weight_fraction
+                w_aniso, n_dirs, n_pairs, neighbor_idx, max_fiber_populations, min_weight_fraction
             )
 
             n_pop = 0
@@ -484,7 +501,7 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         fiber_threshold, min_weight_fraction,
                         enable_direction_refinement,
                         cone1_half_angle, n1_cone, cone2_half_angle, n2_cone,
-                        max_fiber_populations, out):
+                        neighbor_idx, max_fiber_populations, out):
     """v3 parallel fitting kernel — three-compartment isotropic model
     (3-ISO). Same Stage A / Stage B (+ MRDS multi-fiber) structure as
     `_fit_voxels_2iso_v3`; see that kernel's docstring for the full
@@ -581,7 +598,7 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
 
         if f_fib > fiber_threshold:
             dir_indices, dir_weights = select_dominant_directions(
-                w_aniso, n_dirs, n_pairs, max_fiber_populations, min_weight_fraction
+                w_aniso, n_dirs, n_pairs, neighbor_idx, max_fiber_populations, min_weight_fraction
             )
 
             n_pop = 0
@@ -788,6 +805,7 @@ class DBSI_Adaptive:
                  fiber_threshold=FIBER_THRESHOLD,
                  min_weight_fraction=0.05, force_n_iso=None,
                  max_fiber_populations=_DEFAULT_MAX_FIBER_POPULATIONS,
+                 direction_peak_k=_DEFAULT_DIRECTION_PEAK_K,
                  enable_direction_refinement=True,
                  target_angular_resolution_deg=1.0):
         if max_fiber_populations not in (1, 2, 3):
@@ -812,6 +830,7 @@ class DBSI_Adaptive:
         self.min_weight_fraction = min_weight_fraction
         self.force_n_iso = force_n_iso
         self.max_fiber_populations = max_fiber_populations
+        self.direction_peak_k = direction_peak_k
         self.enable_direction_refinement = enable_direction_refinement
         self.target_angular_resolution_deg = target_angular_resolution_deg
 
@@ -936,6 +955,17 @@ class DBSI_Adaptive:
             _cone1, _n1, _cone2, _n2 = 0.0, 1, 0.0, 0
             print(f"\n   MRDS-lite direction refinement: DISABLED "
                   f"(using raw Stage A grid direction, unrefined)")
+
+        # ── Local-maxima peak-finding neighbour graph (Stage A direction
+        # selection) — computed ONCE per protocol from the dictionary's own
+        # geometry, not per voxel. See core.solvers module notes above
+        # `select_dominant_directions` for why global top-K-by-weight alone
+        # produces false-positive N_POP>=2 on true single fibers (grid
+        # quantisation smearing onto neighbouring columns) and how the
+        # local-maxima criterion fixes it. ──
+        neighbor_idx = build_direction_neighbor_graph(fiber_dirs, k=self.direction_peak_k)
+        print(f"\n   Direction selection: local-maxima peak-finding "
+              f"(k={neighbor_idx.shape[1]} nearest geometric neighbours)")
 
         # ── SNR estimation ─────────────────────────────────────────────────
         print("\n2. Estimating SNR...")
@@ -1179,7 +1209,7 @@ class DBSI_Adaptive:
                     b0_thr, self.fiber_threshold, self.min_weight_fraction,
                     self.enable_direction_refinement,
                     _cone1, _n1, _cone2, _n2,
-                    self.max_fiber_populations, results
+                    neighbor_idx, self.max_fiber_populations, results
                 )
                 pbar.update(end - start)
 

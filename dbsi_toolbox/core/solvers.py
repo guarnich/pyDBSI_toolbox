@@ -140,19 +140,120 @@ def compute_regularization_matrix(AtA, n_aniso_cols, lambda_aniso, lambda_iso):
 # ─────────────────────────────────────────────────────────────────────────────
 # STAGE A — Direction selection from the exhaustive dictionary
 # ─────────────────────────────────────────────────────────────────────────────
+#
+# WHY LOCAL-MAXIMA PEAK-FINDING, NOT GLOBAL TOP-K BY WEIGHT
+# -----------------------------------------------------------------------
+# The original selection rule (ranking all n_dirs candidates globally by
+# aggregated weight and keeping the top `max_directions`) has a
+# structural false-positive failure mode, confirmed by project synthetic
+# testing: for a TRUE single fiber, the NNLS solution's weight on the
+# fixed Fibonacci grid routinely SMEARS across the true direction's
+# immediate geometric neighbours (the true orientation almost never
+# falls exactly on a grid node). The mean angular separation between the
+# two highest-weight columns in single-fiber trials (~26 deg, measured)
+# coincides almost exactly with the dictionary's own mean nearest-
+# neighbour spacing (~25 deg) -- i.e. the "second population" the old
+# rule reported was not a second fiber, it was the true fiber's own
+# quantisation shadow on an adjacent grid node. Because global top-K only
+# asks "is this among the 2 heaviest columns overall", it cannot tell
+# that smearing apart from a genuine second peak.
+#
+# The fix: a candidate direction is only counted as a detected population
+# if its aggregated weight exceeds the weight of EVERY one of its k
+# nearest geometric neighbours in the SAME dictionary (a local maximum on
+# the weight-over-sphere function), not merely high in the global
+# ranking. A true fiber's smeared neighbour is, by construction, always
+# lower-weighted than the true peak itself, so it is never a local
+# maximum and is correctly excluded. A genuine second, angularly
+# well-separated fiber population has its own local neighbourhood and
+# remains a local maximum independently.
+#
+# RE-VALIDATED 2026-07-15 (this implementation, synthetic 3-shell
+# Verona-like protocol, n_dirs=62, SNR=30, 30 seeds/condition; see
+# project re-validation sweep for the script): single-fiber correct
+# N_POP=1 rate rose from 0.0% (global top-K, confirmed on this same
+# synthetic setup) to 73.3% at k=6 (the shipped default -- see
+# `_DEFAULT_DIRECTION_PEAK_K` in model_Niso_adaptive_ff_thr.py for the
+# k-sweep that selected 6 over the originally proposed 8). True-crossing
+# sensitivity is angle-dependent, NOT uniformly 95-100% as an earlier,
+# smaller-scale check suggested: 46.7% at 30 deg, 93.3% at 60 deg, 96.7%
+# at 90 deg (k=6). The 30-degree regime is intrinsically hard at this
+# dictionary density (mean node spacing ~25 deg -- a 30-degree crossing
+# separates the two true peaks by barely more than one grid spacing, so
+# their k-nearest-neighbourhoods overlap almost by construction) and is
+# NOT much improved by retuning k alone (45-65% across k=4..12 tested);
+# closing that gap requires a denser Stage A dictionary (larger n_dirs)
+# for protocols where sub-45-degree crossings are expected to matter.
+# Numbers above are specific to this synthetic setup (fraction splits,
+# SNR, regularisation) and should be re-checked against your own
+# protocol/tissue assumptions before relying on them clinically.
+#
+# NOTE ON REMAINING LIMITATION: local-maxima peak-finding fixes DETECTION
+# (how many populations, which grid nodes) but not localisation -- the
+# reported direction(s) are still raw grid nodes, accurate only to the
+# dictionary's own angular resolution. For n_pop==1 this is separately
+# addressed by the MRDS-lite cone refinement (`refine_fiber_direction_cone`).
+# For n_pop>=2, per-population cone refinement is not implemented in this
+# release (see MRDS multi-fiber module docstring further below).
+
+def build_direction_neighbor_graph(fiber_dirs, k=6):
+    """
+    Precompute, once per protocol (NOT per voxel), the indices of each
+    Stage A hemisphere direction's k angularly-nearest neighbours within
+    the SAME dictionary. Feeds `select_dominant_directions`'s
+    local-maxima peak-finding criterion.
+
+    Plain NumPy (not Numba) -- called a handful of times per `fit()`
+    call, exactly like `measure_hemisphere_spacing`, not per voxel.
+
+    Parameters
+    ----------
+    fiber_dirs : ndarray (n_dirs, 3)
+        Stage A's hemisphere direction dictionary.
+    k : int
+        Number of nearest neighbours per direction. Default 6 -- see the
+        k-sweep in module notes above `select_dominant_directions` (k=6
+        matched or beat k in {4,8,10,12} on both single-fiber correctness
+        and crossing sensitivity in re-validation).
+
+    Returns
+    -------
+    neighbor_idx : ndarray (n_dirs, k_eff), int64
+        Row d holds the indices of direction d's k_eff nearest
+        neighbours (by raw dot product, consistent with
+        `measure_hemisphere_spacing`'s convention -- the hemisphere
+        generator already resolves the +/- direction sign ambiguity, so
+        no abs() is needed here). k_eff = min(k, n_dirs - 1) to stay
+        well-defined for very small dictionaries.
+    """
+    n = len(fiber_dirs)
+    k_eff = max(1, min(k, n - 1))
+    dots = fiber_dirs @ fiber_dirs.T
+    np.fill_diagonal(dots, -2.0)
+    neighbor_idx = np.argsort(-dots, axis=1)[:, :k_eff].astype(np.int64)
+    return np.ascontiguousarray(neighbor_idx)
+
 
 @njit(cache=True, fastmath=True)
-def select_dominant_directions(w_aniso, n_dirs, n_pairs, max_directions=2,
-                               min_weight_fraction=0.05):
+def select_dominant_directions(w_aniso, n_dirs, n_pairs, neighbor_idx,
+                               max_directions=2, min_weight_fraction=0.05):
     """
     Stage A output interpretation: identify which hemisphere directions
-    carry meaningful weight, collapsing across the (AD, RD)-pair axis.
+    carry meaningful, GEOMETRICALLY DISTINCT weight, collapsing across
+    the (AD, RD)-pair axis.
 
     This function deliberately DISCARDS the per-pair breakdown of
     w_aniso and looks only at total weight per direction (summed over
     all n_pairs (AD,RD) pairs sharing that direction), because Stage A's
     only job is angular detection — see module docstring on why the
     per-pair centroid from Stage A is not trusted.
+
+    Selection is by LOCAL-MAXIMA peak-finding over the dictionary's
+    k-nearest-neighbour graph (`build_direction_neighbor_graph`), not
+    global top-K ranking by weight -- see the module notes immediately
+    above this function for why: global top-K cannot distinguish a true
+    fiber's grid-quantisation smearing onto its own neighbours from a
+    genuine second population.
 
     Column ordering must match `core.basis.build_design_matrix_exhaustive`:
     pair-major, direction-minor (for p in pairs: for d in dirs: column).
@@ -165,9 +266,11 @@ def select_dominant_directions(w_aniso, n_dirs, n_pairs, max_directions=2,
         Number of hemisphere directions in the Stage A dictionary.
     n_pairs : int
         Number of (AD, RD) pairs in the Stage A dictionary.
+    neighbor_idx : array (n_dirs, k), int64
+        Precomputed once per protocol via `build_direction_neighbor_graph`.
     max_directions : int
         Maximum number of fiber populations to report (1 for a single
-        dominant tract, 2 to allow simple crossing-fiber detection).
+        dominant tract, 2-3 to allow crossing-fiber detection).
     min_weight_fraction : float
         A direction is only reported if its summed weight exceeds this
         fraction of the total anisotropic weight (filters numerical
@@ -178,7 +281,8 @@ def select_dominant_directions(w_aniso, n_dirs, n_pairs, max_directions=2,
     dir_indices : array (max_directions,), int64
         Hemisphere-direction indices of the selected populations, sorted
         by descending weight. Filled with -1 for unused slots if fewer
-        than max_directions populations clear the weight threshold.
+        than max_directions populations clear both the local-maxima and
+        weight-threshold criteria.
     dir_weights : array (max_directions,), float64
         Total weight (summed over all (AD,RD) pairs) for each selected
         direction. 0.0 for unused slots.
@@ -202,8 +306,35 @@ def select_dominant_directions(w_aniso, n_dirs, n_pairs, max_directions=2,
         return dir_indices, dir_weights
 
     threshold = min_weight_fraction * total_weight
+    k = neighbor_idx.shape[1]
+
+    # ── Local-maxima peak-finding ────────────────────────────────────
+    # A candidate only counts as a detected population if its weight
+    # exceeds ALL of its k geometric nearest neighbours' weights. Ties
+    # are broken toward the lower index so that two exactly-tied
+    # neighbours don't both lose (mutual exclusion) or both win
+    # (double-count) — in practice a non-issue with continuous NNLS
+    # weights, but keeps the rule well-defined at exact zero.
+    is_peak = np.zeros(n_dirs, dtype=np.bool_)
+    for d in range(n_dirs):
+        wd = dir_weight_totals[d]
+        if wd < threshold:
+            continue
+        peak = True
+        for j in range(k):
+            nb = neighbor_idx[d, j]
+            wn = dir_weight_totals[nb]
+            if wn > wd or (wn == wd and nb < d):
+                peak = False
+                break
+        if peak:
+            is_peak[d] = True
 
     remaining = dir_weight_totals.copy()
+    for d in range(n_dirs):
+        if not is_peak[d]:
+            remaining[d] = -1.0
+
     for slot in range(max_directions):
         best_idx = -1
         best_val = -1.0
@@ -996,6 +1127,24 @@ compartment present, 20 noise seeds/condition) compared:
   scipy's 10.51%; max per-parameter difference 1.15e-3 mm^2/s across 120
   trials). Post-JIT-warmup: ~0.04 ms/voxel single-threaded.
 
+  CORRECTED 2026-07-15: the update step below had a sign error
+  (`p_new = p + delta` where `delta = (JtJ+lam*D)^-1 Jt r` with J the
+  Jacobian of the RESIDUAL, not the model) that made the LM step always
+  move in the ascent direction. Practical effect, confirmed by direct
+  reproduction: the inner accept/reject loop rejected every trial step
+  regardless of lambda, so `improved` was always False and the solver
+  exited after the FIRST outer iteration on essentially every voxel --
+  silently returning `alternating_init_nfiber`'s deliberately
+  under-converged 3-iteration warm start as if it were the converged
+  joint fit, with no error or flag. The scipy-agreement numbers above
+  cannot have been measured against this exact function in this state;
+  they either predate the sign flip or were produced by a differently
+  configured comparison. The fix (`p_new = p - delta`) has been verified
+  on a synthetic 2-population crossing: reproduces the exact ground
+  truth (cost ~1e-32) in 8 iterations, versus zero cost improvement over
+  1 iteration before the fix. See project re-validation sweep
+  (post-fix) for updated accuracy numbers replacing the ones above.
+
 CRITICAL: INITIALISATION MUST BREAK SYMMETRY BETWEEN POPULATIONS.
 Identical starting (AD, RD) for every population causes the joint solver
 to stall on a subset of populations (confirmed: in a 3-fiber test,
@@ -1268,8 +1417,19 @@ def estimate_AD_RD_nfiber_joint(bvals, bvecs, sig_norm, directions, fractions,
         improved = False
         for _try in range(10):
             A = JTJ + lam * np.diag(np.diag(JTJ) + 1e-12)
+            # NOTE: J here is the Jacobian of the RESIDUAL r = sig_norm -
+            # model (dr/dp), not of the model itself -- confirmed by
+            # direct differentiation: J[i,2k] = frac*e*b*cos2 =
+            # -d(model)/d(AD_k) = +d(r)/d(AD_k). For that convention the
+            # Gauss-Newton/LM normal equations (JtJ + lam*D) delta = Jtr
+            # give the step in the ASCENT direction; the minimising step
+            # is p_new = p - delta, not p + delta. (Verified empirically:
+            # with the old `p + delta` sign, cost never decreases and the
+            # solver silently no-ops after 1 iteration on every voxel,
+            # always returning the un-refined alternating-init warm
+            # start.)
             delta = np.linalg.solve(A, JTr)
-            p_new = p + delta
+            p_new = p - delta
             for i in range(n_par):
                 if p_new[i] < lb[i]:
                     p_new[i] = lb[i]

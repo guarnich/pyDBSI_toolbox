@@ -94,8 +94,15 @@ from ..core.solvers import (
     nnls_coordinate_descent,
     compute_regularization_matrix,
     select_dominant_directions,
+    build_direction_neighbor_graph,
     estimate_AD_RD_conditioned,
 )
+
+# Neighbourhood size for select_dominant_directions' local-maxima
+# criterion, matching DBSI_Adaptive's default (see
+# model_Niso_adaptive_ff_thr._DEFAULT_DIRECTION_PEAK_K). Not imported
+# from there to avoid a circular import (that module imports this one).
+_DEFAULT_DIRECTION_PEAK_K = 6
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -311,7 +318,8 @@ def generate_synthetic_signal(bvals, bvecs, snr, f_fiber=0.5, f_cell=0.3):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _evaluate_scenario(sc, rng, bvals, bvecs, fiber_dirs, n_dirs, n_pairs,
-                       iso_grid, AtA_reg, At, snr, n_mc, min_weight_fraction):
+                       iso_grid, AtA_reg, At, snr, n_mc, min_weight_fraction,
+                       neighbor_idx):
     """
     Evaluate one tissue scenario's fraction + AD/RD recovery loss for a
     GIVEN (already-regularized) AtA_reg. Shared by both the grid-search
@@ -381,7 +389,7 @@ def _evaluate_scenario(sc, rng, bvals, bvecs, fiber_dirs, n_dirs, n_pairs,
         # fraction (AD/RD are not defined otherwise).
         if f_fiber > 0.15 and f_tot_hat > 1e-10:
             dir_indices, dir_weights = select_dominant_directions(
-                w_aniso, n_dirs, n_pairs, 1, min_weight_fraction
+                w_aniso, n_dirs, n_pairs, neighbor_idx, 1, min_weight_fraction
             )
             if dir_indices[0] >= 0:
                 recovered_dir = fiber_dirs[dir_indices[0]]
@@ -498,6 +506,7 @@ def evaluate_lambda_pair(bvals, bvecs, snr, lambda_aniso, lambda_iso, n_mc=200,
     )
     n_pairs = len(diff_pairs)
     fiber_dirs = generate_fibonacci_sphere_hemisphere(n_dirs)
+    neighbor_idx = build_direction_neighbor_graph(fiber_dirs, k=_DEFAULT_DIRECTION_PEAK_K)
     iso_grid = generate_isotropic_grid(d_min=iso_range[0], d_max=iso_range[1],
                                        n_steps=n_iso)
     n_aniso_cols_actual = n_dirs * n_pairs
@@ -532,7 +541,7 @@ def evaluate_lambda_pair(bvals, bvecs, snr, lambda_aniso, lambda_iso, n_mc=200,
 
         loss, diag = _evaluate_scenario(
             sc, rng, bvals, bvecs, fiber_dirs, n_dirs, n_pairs, iso_grid,
-            AtA_reg, At, snr, n_mc, min_weight_fraction
+            AtA_reg, At, snr, n_mc, min_weight_fraction, neighbor_idx
         )
         sc_losses[sc_name] = loss
         sc_diagnostics[sc_name] = diag
@@ -631,6 +640,7 @@ def optimize_hyperparameters(bvals, bvecs, snr, n_mc=200,
     n_pairs = len(diff_pairs)
 
     fiber_dirs = generate_fibonacci_sphere_hemisphere(n_dirs)
+    neighbor_idx = build_direction_neighbor_graph(fiber_dirs, k=_DEFAULT_DIRECTION_PEAK_K)
     iso_grid = generate_isotropic_grid(d_min=iso_range[0], d_max=iso_range[1],
                                        n_steps=n_iso)
 
@@ -693,7 +703,7 @@ def optimize_hyperparameters(bvals, bvecs, snr, n_mc=200,
 
             loss, _diag = _evaluate_scenario(
                 sc, rng, bvals, bvecs, fiber_dirs, n_dirs, n_pairs, iso_grid,
-                AtA_reg, At, snr, n_mc, min_weight_fraction
+                AtA_reg, At, snr, n_mc, min_weight_fraction, neighbor_idx
             )
             sc_losses[sc_name] = loss
 

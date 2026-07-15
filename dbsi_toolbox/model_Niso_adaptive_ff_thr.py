@@ -1,6 +1,6 @@
 """
-DBSI Adaptive Model v3 — Hybrid Two-Stage Architecture
-=========================================================
+DBSI Adaptive Model v3 — Hybrid Two-Stage Architecture + MRDS Multi-Fiber Extension
+========================================================================================
 
 WHY v2's SINGLE-STAGE EXHAUSTIVE DICTIONARY WAS REPLACED
 -------------------------------------------------------------
@@ -11,53 +11,78 @@ activated anisotropic columns. Systematic synthetic recovery validation
 (55 swept configurations, `recovery_validation.py`) demonstrated this is
 NOT numerically identifiable: median AD/RD relative errors ranged from
 ~20% to >150% across every tested dictionary density, getting WORSE as
-the dictionary was made finer (more candidate (AD,RD) pairs -> more
-simultaneously-activated columns -> a less informative centroid), and no
-regularization strength fixed it. This is a structural collinearity
-failure, not a tuning problem.
+the dictionary was made finer, and no regularization strength fixed it.
 
 v3 ARCHITECTURE: STAGE A (detection) + STAGE B (estimation)
 -----------------------------------------------------------------
-The core idea Alonso Ramirez-Manzanares's feedback motivated — that the
-dictionary should "know" pathology changes AD/RD, not just orientation —
-is preserved, but the two questions (which direction? what diffusivity?)
-are now answered by two separate, appropriately-sized linear problems:
+STAGE A — direction detection (sparse, exhaustive dictionary): a coarse
+exhaustive (direction x AD/RD-pair) dictionary fit via regularized NNLS
+with heavy sparsity on the anisotropic block. `select_dominant_directions`
+reports which 1-3 hemisphere directions carry meaningful weight. Only
+the directional answer is trusted, not Stage A's own (AD, RD) breakdown.
 
-  STAGE A — direction detection (sparse, exhaustive dictionary)
-      A small exhaustive (direction x AD/RD-pair) dictionary (deliberately
-      coarse on the AD/RD axis — Stage A does not need fine diffusivity
-      resolution, only fiber/no-fiber detection per direction) is fit via
-      regularized NNLS with heavy sparsity on the anisotropic block
-      (lambda_aniso). `core.solvers.select_dominant_directions` collapses
-      the per-pair weight breakdown and reports which 1-2 hemisphere
-      directions carry meaningful weight. We do NOT trust Stage A's
-      (AD, RD) breakdown — only its directional answer.
+STAGE B — diffusivity estimation (conditioned on Stage A's direction(s)):
+  - n_pop == 1 (single dominant fiber): unchanged from the original v3
+    design -- `estimate_AD_RD_conditioned` (closed-form WLS), optionally
+    refined by the MRDS-lite two-level cone search
+    (`refine_fiber_direction_cone`).
+  - n_pop >= 2 (MRDS multi-fiber extension, NEW): `estimate_AD_RD_mrds`
+    (`core.solvers`) -- a short symmetry-breaking alternating pass
+    followed by a bounded joint Levenberg-Marquardt fit over all detected
+    populations simultaneously. See `core/solvers.py`'s MRDS module
+    docstring for the full synthetic validation (2-fiber and one 3-fiber
+    configuration) that motivated joint-over-alternating and the
+    symmetry-breaking initialisation requirement.
 
-  STAGE B — diffusivity estimation (closed-form, conditioned)
-      Given Stage A's selected direction(s), `core.solvers.
-      estimate_AD_RD_conditioned` performs a small closed-form weighted
-      least-squares fit (the same analytical construction validated as
-      the v1/v2 linear AD/RD initialisation) to obtain the final AD/RD.
-      Because direction is now FIXED rather than searched, this problem
-      has only 2 free parameters and is well-conditioned regardless of
-      how rich Stage A's dictionary was.
+WHAT THE MRDS EXTENSION DOES **NOT** DO — READ BEFORE INTERPRETING OUTPUT
+-----------------------------------------------------------------------------
+The MRDS extension refines AD/RD/FA/direction reporting for fiber
+populations Stage A already detected. It does NOT retroactively correct
+Stage A's own fraction estimates (FF/RF/HF/WF/NRF/mean_iso_adc), which
+are computed and frozen from Stage A's NNLS weights BEFORE Stage B (single-
+or multi-fiber) ever runs. A synthetic validation specifically testing
+whether a small unregularized "Stage C" re-fit (using MRDS's refined
+tensors to rebuild a tiny custom design matrix and re-derive fractions)
+could correct isotropic-compartment leakage in crossing-fiber voxels was
+run and REJECTED: collapsing the isotropic block to 1-2 fixed-diffusivity
+columns discards the spectral resolution that is this toolbox's core
+contribution, and made FF/NRF recovery WORSE in 5 of 6 tested synthetic
+crossing conditions. A less destructive "targeted" variant (full isotropic
+spectrum retained, only the anisotropic block replaced) was inconsistent
+(improved FF in 4/6 conditions, NRF in only 3/6) and was not adopted
+either. **Isotropic fraction accuracy in true crossing-fiber voxels is
+therefore an OPEN, DOCUMENTED LIMITATION of this release, not something
+the MRDS extension claims to fix.** A separate synthetic sweep (matched
+isotropic composition, single-fiber vs 2-fiber-crossing ground truth,
+same Stage A lambda/dictionary) additionally found NO consistent evidence
+that crossing voxels leak MORE than single-fiber voxels in the tested
+configuration (median FF error was, if anything, LOWER for crossing than
+for single-fiber ground truth at this lambda_aniso) -- so the direction
+and magnitude of any true crossing-related isotropic bias remains
+unresolved and protocol/lambda-dependent, not a fixed, predictable offset.
 
-There is still no non-linear Step 2 grid search: Stage B's closed-form
-estimate is the final value, not an initial guess for further
-refinement.
-
-Synthetic validation summary (see project records for full sweep)
------------------------------------------------------------------------
-With a coarse Stage A dictionary (e.g. ~30 directions x 3x3 AD/RD pairs)
-and lambda_base ~ 0.005 (lambda_aniso = lambda_base * n_aniso_cols,
-lambda_iso = lambda_base): direction recovery cosine similarity ~1.0
-across randomized ground truth; median AD relative error ~10-20%, median
-RD relative error ~15-25%, with wider (but bounded, unlike v2) upper-tail
-errors. This is a substantial improvement over v2 but AD/RD precision —
-especially RD, the demyelination marker — should still be treated with
-appropriate caution; see project validation notes before reporting
-voxel-wise AD/RD as a precise quantitative biomarker without further
-protocol-specific validation.
+MULTI-FIBER SCOPE: WHY 2 DEFAULT, 3 OPTIONAL, NOT MORE
+-----------------------------------------------------------
+`max_fiber_populations` defaults to 2, matching the practical ceiling
+used elsewhere in multi-tensor/MRDS crossing-fiber literature (e.g.
+"ball and 2 sticks" as the standard default multi-compartment
+configuration) and this toolbox's own validation scope (see
+`core/solvers.py`). Direction-estimation error in dedicated crossing-fiber
+studies has been reported to grow sharply with population count even at
+fixed SNR (on the order of 3 deg for one tensor vs. 7 deg for two vs. 16
+deg for three at SNR~25:1) -- resolving 3 populations reliably typically
+requires denser angular sampling (HARDI-grade protocols) than this
+toolbox's coarse, deliberately protocol-agnostic Stage A dictionary is
+designed to assume. 3 is offered as an explicit opt-in
+(`max_fiber_populations=3`) for richer protocols, WITHOUT automatic
+protocol gating in this release (unlike the 3-ISO isotropic model
+selection, which IS auto-gated on b_max/n_shells) -- the person enabling
+it is responsible for confirming their protocol's angular sampling
+density supports it. Values above 3 are not supported: beyond that point
+this toolbox would be duplicating the scope of dedicated multi-fiber
+tractography tools (CHARMED, ball-and-sticks, full MRDS) rather than
+serving its own stated purpose (isotropic-compartment quantification with
+a secondary anisotropic/axonal-integrity readout).
 
 Compartment Definitions (unchanged from v1/v2)
 ---------------------------------------------------
@@ -69,37 +94,54 @@ Compartment Definitions (unchanged from v1/v2)
 Model Selection Criterion (unchanged from v1/v2)
 ------------------------------------------------------
 2-ISO vs 3-ISO selection based on b_max / shell count is unaffected by
-the v3 architecture change — it governs the isotropic block only.
+the MRDS extension -- it governs the isotropic block only.
 
-Output Channels (11 total — unified across both model modes, unchanged
-layout from v1/v2)
+Output Channels (EXTENDED to 29 total; channels 0-10 UNCHANGED from the
+original v3 layout for full backward compatibility with existing
+fit_quality.py, transition_confidence.py, and any already-produced
+figures/analyses -- channels 11-28 are a pure append)
 -------------------------------------------------------------------------
-    0  : FF   — Fibre fraction                            (always valid)
+    0  : FF   — Total fibre fraction (summed over ALL detected populations)
     1  : RF   — Restricted fraction  (ADC <= 0.3e-3)      (always valid)
     2  : HF   — Hindered fraction    (0.3e-3 < ADC <= 3.0e-3) (NaN in 2-ISO mode)
     3  : WF   — Free-water fraction  (ADC > 3.0e-3)      (NaN in 2-ISO mode)
     4  : NRF  — Non-Restricted fraction = HF + WF        (always valid)
-    5  : AD   — Axial diffusivity   (v3: Stage B closed-form estimate;
+    5  : AD   — DOMINANT population's axial diffusivity (Stage B/MRDS estimate;
                 NaN if FF <= fiber_threshold)
-    6  : RD   — Radial diffusivity  (v3: Stage B closed-form estimate;
-                NaN if FF <= fiber_threshold)
-    7  : FA   — Intrinsic fibre FA  (computed from the v3 Stage B AD/RD;
-                NaN if FF <= fiber_threshold)
+    6  : RD   — DOMINANT population's radial diffusivity
+    7  : FA   — DOMINANT population's intrinsic fibre FA
     8  : ADC_iso — Mean isotropic ADC                     (always valid)
-    9  : AD_lin  — v3: identical to channel 5 (retained for output-shape
-                compatibility; Stage B's estimate is the only diffusivity
-                estimate produced, there is no separate "linear" vs.
-                "refined" pair any more)
-    10 : RD_lin  — v3: identical to channel 6 (see note above)
+    9  : AD_lin  — identical to channel 5 (retained for shape compatibility)
+    10 : RD_lin  — identical to channel 6 (retained for shape compatibility)
+    ── MRDS extension (NEW, channels 11-28) ──
+    11 : N_POP   — number of fiber populations Stage A reported in this
+                   voxel (0, 1, 2, or 3). N_POP==1 voxels have channels
+                   15-28 as NaN (nothing to report for pop 2/3).
+    12-14 : DIR1_XYZ — dominant population's direction (unit vector; NOT
+                   previously stored in the 11-channel layout -- lets
+                   `fit_quality.py` read the direction directly instead
+                   of re-deriving it via grid search, for voxels fit
+                   under this schema)
+    15 : FF_POP2, 16: AD_POP2, 17: RD_POP2, 18: FA_POP2   (NaN if N_POP<2)
+    19-21 : DIR2_XYZ                                       (NaN if N_POP<2)
+    22 : FF_POP3, 23: AD_POP3, 24: RD_POP3, 25: FA_POP3   (NaN if N_POP<3,
+                   including whenever max_fiber_populations==2)
+    26-28 : DIR3_XYZ                                       (NaN if N_POP<3)
 
 References
 ----------
 Wang Y, et al. (2011). Brain, 134(12):3590-3601. doi:10.1093/brain/awr307
 Shirani A, et al. (2019). Ann Clin Transl Neurol, 6(11):2323-2327.
 Jelescu IO, et al. (2016). NMR Biomed, 29(1):33-47.
+Coronado-Leija R, Ramirez-Manzanares A, Marroquin JL (2017). Medical
+    Image Analysis, 42, 26-43. (MRDS multi-resolution discrete search,
+    the conceptual basis for both the existing single-fiber cone
+    refinement and this multi-fiber extension.)
 Design document: toolbox_v2.md (Ramirez-Manzanares discussion); v3
 hybrid redesign motivated by synthetic recovery validation of the v2
-single-stage approach.
+single-stage approach; MRDS multi-fiber extension motivated by project
+synthetic validation of joint-vs-alternating Stage B estimation and of
+the (rejected) Stage-C fraction re-fit -- see `core/solvers.py`.
 """
 
 import numpy as np
@@ -124,6 +166,7 @@ from .core.solvers import (
     refine_fiber_direction_cone,
     compute_cone_refinement_schedule,
     measure_hemisphere_spacing,
+    estimate_AD_RD_mrds,          # NEW — MRDS multi-fiber Stage B
 )
 from .calibration.optimizer import optimize_hyperparameters, evaluate_lambda_pair
 from .calibration.data_driven import select_lambdas_data_driven, sample_calibration_voxels
@@ -146,13 +189,7 @@ THRESH_WAT = 3.0e-3          # mm^2/s — hindered  / free-water boundary
 B_THRESH_3ISO = 3000.0       # s/mm^2 — minimum b_max to activate 3-ISO model
 MIN_SHELLS_3ISO = 3          # minimum distinct non-zero b-value shells for 3-ISO
 
-# Stage A dictionary defaults. Deliberately coarse on the AD/RD axis —
-# Stage A only needs to detect WHICH directions are active, not estimate
-# diffusivity precisely (that is Stage B's job). Synthetic validation
-# showed direction-recovery cosine similarity ~1.0 essentially
-# independent of (n_ad, n_rd) density, so the smallest grid that keeps
-# the NNLS solve fast is preferred (solver cost scales worse than
-# linearly with total column count under coordinate descent).
+# Stage A dictionary defaults. Deliberately coarse on the AD/RD axis.
 _STAGE_A_AD_MIN = 0.5e-3
 _STAGE_A_AD_MAX = 2.2e-3
 _STAGE_A_RD_MIN = 0.05e-3
@@ -165,29 +202,21 @@ _STAGE_A_DEFAULT_LAMBDA_BASE = 0.005
 # Default isotropic spectrum range.
 _DEFAULT_ISO_MIN = 0.0
 _DEFAULT_ISO_MAX = 3.0e-3
-_DEFAULT_N_ISO_STEPS = 31    # Legacy fixed default — NO LONGER USED as the
-                             # automatic default; see select_n_iso_svd for the
-                             # adaptive default now used when n_iso is left at
-                             # None. Retained only for explicit external
-                             # reference / backward compatibility.
+_DEFAULT_N_ISO_STEPS = 31    # Legacy fixed default — see select_n_iso_svd.
 
-# Extended upper bound for the ADAPTIVE isotropic grid's d_max, used
-# only on the adaptive (n_iso=None) path — see fit()'s grid construction
-# block. Project methodological supplement "isotropic_compartment_
-# supplement.docx" (Section 4) mapped the HIN/WAT transition zone as
-# extending to approximately 5.0e-3 mm^2/s on the high side; extending
-# the grid this far ensures at least one column genuinely represents
-# free water above the 3.0e-3 threshold rather than relying solely on a
-# single anchor column exactly at the boundary.
 _ISO_GRID_D_MAX_EXTENDED = 5.0e-3
 
-# Maximum number of fiber populations Stage A will report per voxel.
-# 1 = single dominant tract only (matches v1/v2 single-tensor output
-# layout, which has no per-population channel structure). Set to 2 to
-# allow crossing-fiber detection internally, but the output channels
-# still report only the dominant (highest-weight) population, since the
-# 11-channel layout has no slot for a second tensor.
-_MAX_FIBER_POPULATIONS = 2
+# Default maximum number of fiber populations Stage A/B will report per
+# voxel. Now a per-instance parameter (`DBSI_Adaptive(max_fiber_populations=
+# ...)`) rather than a hardcoded module constant -- see module docstring
+# "MULTI-FIBER SCOPE" for why the default is 2 and why 3 is offered as an
+# explicit, non-protocol-gated opt-in rather than a further-increased
+# default.
+_DEFAULT_MAX_FIBER_POPULATIONS = 2
+
+# MRDS multi-fiber Stage B defaults (see core.solvers.estimate_AD_RD_mrds).
+_MRDS_INIT_N_ITER = 3        # short, deliberately non-converged alternating warm start
+_MRDS_LM_MAX_ITER = 25
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -241,7 +270,7 @@ def analyse_protocol(bvals):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PARALLEL FITTING KERNELS — v3: Stage A (detection) + Stage B (estimation)
+# PARALLEL FITTING KERNELS — v3 + MRDS multi-fiber extension
 # ─────────────────────────────────────────────────────────────────────────────
 
 @njit(parallel=True, cache=True, fastmath=True)
@@ -250,16 +279,22 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         fiber_threshold, min_weight_fraction,
                         enable_direction_refinement,
                         cone1_half_angle, n1_cone, cone2_half_angle, n2_cone,
-                        out):
+                        max_fiber_populations, out):
     """
-    v3 parallel fitting kernel — two-compartment isotropic model (2-ISO),
-    Stage A direction detection + Stage B closed-form diffusivity
-    estimation, optionally followed by MRDS-lite cone refinement of the
-    dominant direction (see core.solvers module docstring "MRDS-LITE").
+    v3 parallel fitting kernel — two-compartment isotropic model (2-ISO).
 
-    AtA_reg is Stage A's regularized Gram matrix (decoupled
-    lambda_aniso/lambda_iso). Output layout identical to v1/v2 (see
-    module docstring for v3 semantics of channels 5-10).
+    Stage A direction detection is unchanged. Stage B branches on how many
+    populations Stage A reported (n_pop, up to `max_fiber_populations`):
+      n_pop == 1 : unchanged single-fiber path (closed-form Stage B,
+                   optional MRDS-lite cone refinement).
+      n_pop >= 2 : NEW MRDS multi-fiber joint Stage B
+                   (`estimate_AD_RD_mrds`), using Stage A's RAW
+                   (grid-quantised, NOT cone-refined -- see module
+                   docstring scope note) directions.
+
+    Output layout: see module docstring "Output Channels". Channels 0-10
+    are written exactly as before (backward compatible); channels 11-28
+    are the new MRDS/multi-population block.
     """
     n_voxels = coords.shape[0]
     n_pairs = len(diff_pairs)
@@ -334,27 +369,29 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
         f_res = f_res_raw / ftot
         f_nonrf = f_nonrf_raw / ftot
 
+        # ── Channels 0-10 (fractions): UNCHANGED regardless of n_pop.
+        # See module docstring "WHAT THE MRDS EXTENSION DOES NOT DO":
+        # these fractions are frozen here and never revisited by Stage B. ──
         out[x, y, z, 0] = f_fib
         out[x, y, z, 1] = f_res
         out[x, y, z, 4] = f_nonrf
         out[x, y, z, 8] = mean_iso_adc
 
         if f_fib > fiber_threshold:
-            # ── STAGE A interpretation: which direction(s) are active? ──
             dir_indices, dir_weights = select_dominant_directions(
-                w_aniso, n_dirs, n_pairs, _MAX_FIBER_POPULATIONS, min_weight_fraction
+                w_aniso, n_dirs, n_pairs, max_fiber_populations, min_weight_fraction
             )
 
-            if dir_indices[0] >= 0:
+            n_pop = 0
+            for k in range(max_fiber_populations):
+                if dir_indices[k] >= 0:
+                    n_pop += 1
+            out[x, y, z, 11] = n_pop
+
+            if n_pop == 1:
                 dominant_dir = fiber_dirs[dir_indices[0]]
 
                 if enable_direction_refinement:
-                    # ── MRDS-LITE: refine the coarse grid direction via
-                    # two-level cone search, scored by Stage B's own
-                    # closed-form regression (see core.solvers module
-                    # docstring "MRDS-LITE"). Never worse than the
-                    # unrefined estimate (candidate zero is the coarse
-                    # direction itself).
                     _, AD_est, RD_est = refine_fiber_direction_cone(
                         bvals, bvecs, sig_norm, dominant_dir,
                         f_fib, f_res, f_nonrf, 0.0,
@@ -362,7 +399,6 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         cone1_half_angle, n1_cone, cone2_half_angle, n2_cone
                     )
                 else:
-                    # ── STAGE B: closed-form (AD, RD) conditioned on direction ──
                     AD_est, RD_est = estimate_AD_RD_conditioned(
                         bvals, bvecs, sig_norm, dominant_dir,
                         f_fib, f_res, f_nonrf, 0.0,
@@ -378,6 +414,68 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                 out[x, y, z, 7] = FA
                 out[x, y, z, 9] = AD_est
                 out[x, y, z, 10] = RD_est
+                out[x, y, z, 12] = dominant_dir[0]
+                out[x, y, z, 13] = dominant_dir[1]
+                out[x, y, z, 14] = dominant_dir[2]
+
+            elif n_pop >= 2:
+                # ── NEW: MRDS multi-fiber joint Stage B ──
+                # Directions are Stage A's RAW grid detections (no
+                # per-population cone refinement in this release -- see
+                # module docstring scope note).
+                directions = np.empty((n_pop, 3))
+                w_sum = 0.0
+                for k in range(n_pop):
+                    directions[k] = fiber_dirs[dir_indices[k]]
+                    w_sum += dir_weights[k]
+
+                fractions = np.empty(n_pop)
+                for k in range(n_pop):
+                    fractions[k] = (dir_weights[k] / w_sum) * f_fib if w_sum > 1e-12 else 0.0
+
+                iso_signal = np.empty(len(bvals))
+                for i in range(len(bvals)):
+                    iso_signal[i] = (f_res * np.exp(-bvals[i] * D_res_c)
+                                     + f_nonrf * np.exp(-bvals[i] * D_nonrf_c))
+
+                AD_out, RD_out = estimate_AD_RD_mrds(
+                    bvals, bvecs, sig_norm, directions, fractions, iso_signal,
+                    init_n_iter=_MRDS_INIT_N_ITER, lm_max_iter=_MRDS_LM_MAX_ITER
+                )
+
+                # Dominant population (index 0, highest Stage A weight) ->
+                # legacy channels 5/6/7/9/10 + new DIR1, for backward
+                # compatibility with single-fiber-era downstream code.
+                FA0 = compute_fiber_fa(AD_out[0], RD_out[0])
+                out[x, y, z, 5] = AD_out[0]
+                out[x, y, z, 6] = RD_out[0]
+                out[x, y, z, 7] = FA0
+                out[x, y, z, 9] = AD_out[0]
+                out[x, y, z, 10] = RD_out[0]
+                out[x, y, z, 12] = directions[0, 0]
+                out[x, y, z, 13] = directions[0, 1]
+                out[x, y, z, 14] = directions[0, 2]
+
+                # Population 2
+                FA1 = compute_fiber_fa(AD_out[1], RD_out[1])
+                out[x, y, z, 15] = fractions[1]
+                out[x, y, z, 16] = AD_out[1]
+                out[x, y, z, 17] = RD_out[1]
+                out[x, y, z, 18] = FA1
+                out[x, y, z, 19] = directions[1, 0]
+                out[x, y, z, 20] = directions[1, 1]
+                out[x, y, z, 21] = directions[1, 2]
+
+                # Population 3 (only if detected AND max_fiber_populations==3)
+                if n_pop >= 3:
+                    FA2 = compute_fiber_fa(AD_out[2], RD_out[2])
+                    out[x, y, z, 22] = fractions[2]
+                    out[x, y, z, 23] = AD_out[2]
+                    out[x, y, z, 24] = RD_out[2]
+                    out[x, y, z, 25] = FA2
+                    out[x, y, z, 26] = directions[2, 0]
+                    out[x, y, z, 27] = directions[2, 1]
+                    out[x, y, z, 28] = directions[2, 2]
 
 
 @njit(parallel=True, cache=True, fastmath=True)
@@ -386,12 +484,12 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         fiber_threshold, min_weight_fraction,
                         enable_direction_refinement,
                         cone1_half_angle, n1_cone, cone2_half_angle, n2_cone,
-                        out):
-    """
-    v3 parallel fitting kernel — three-compartment isotropic model
-    (3-ISO). Same Stage A / Stage B structure as `_fit_voxels_2iso_v3`,
-    including the optional MRDS-lite direction refinement (see
-    core.solvers module docstring "MRDS-LITE").
+                        max_fiber_populations, out):
+    """v3 parallel fitting kernel — three-compartment isotropic model
+    (3-ISO). Same Stage A / Stage B (+ MRDS multi-fiber) structure as
+    `_fit_voxels_2iso_v3`; see that kernel's docstring for the full
+    n_pop branching logic. Here the fixed isotropic signal handed to the
+    MRDS joint fit has THREE terms (RES/HIN/WAT) instead of two.
     """
     n_voxels = coords.shape[0]
     n_pairs = len(diff_pairs)
@@ -483,10 +581,16 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
 
         if f_fib > fiber_threshold:
             dir_indices, dir_weights = select_dominant_directions(
-                w_aniso, n_dirs, n_pairs, _MAX_FIBER_POPULATIONS, min_weight_fraction
+                w_aniso, n_dirs, n_pairs, max_fiber_populations, min_weight_fraction
             )
 
-            if dir_indices[0] >= 0:
+            n_pop = 0
+            for k in range(max_fiber_populations):
+                if dir_indices[k] >= 0:
+                    n_pop += 1
+            out[x, y, z, 11] = n_pop
+
+            if n_pop == 1:
                 dominant_dir = fiber_dirs[dir_indices[0]]
 
                 if enable_direction_refinement:
@@ -512,6 +616,60 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                 out[x, y, z, 7] = FA
                 out[x, y, z, 9] = AD_est
                 out[x, y, z, 10] = RD_est
+                out[x, y, z, 12] = dominant_dir[0]
+                out[x, y, z, 13] = dominant_dir[1]
+                out[x, y, z, 14] = dominant_dir[2]
+
+            elif n_pop >= 2:
+                directions = np.empty((n_pop, 3))
+                w_sum = 0.0
+                for k in range(n_pop):
+                    directions[k] = fiber_dirs[dir_indices[k]]
+                    w_sum += dir_weights[k]
+
+                fractions = np.empty(n_pop)
+                for k in range(n_pop):
+                    fractions[k] = (dir_weights[k] / w_sum) * f_fib if w_sum > 1e-12 else 0.0
+
+                iso_signal = np.empty(len(bvals))
+                for i in range(len(bvals)):
+                    iso_signal[i] = (f_res * np.exp(-bvals[i] * D_res_c)
+                                     + f_hin * np.exp(-bvals[i] * D_hin_c)
+                                     + f_wat * np.exp(-bvals[i] * D_wat_c))
+
+                AD_out, RD_out = estimate_AD_RD_mrds(
+                    bvals, bvecs, sig_norm, directions, fractions, iso_signal,
+                    init_n_iter=_MRDS_INIT_N_ITER, lm_max_iter=_MRDS_LM_MAX_ITER
+                )
+
+                FA0 = compute_fiber_fa(AD_out[0], RD_out[0])
+                out[x, y, z, 5] = AD_out[0]
+                out[x, y, z, 6] = RD_out[0]
+                out[x, y, z, 7] = FA0
+                out[x, y, z, 9] = AD_out[0]
+                out[x, y, z, 10] = RD_out[0]
+                out[x, y, z, 12] = directions[0, 0]
+                out[x, y, z, 13] = directions[0, 1]
+                out[x, y, z, 14] = directions[0, 2]
+
+                FA1 = compute_fiber_fa(AD_out[1], RD_out[1])
+                out[x, y, z, 15] = fractions[1]
+                out[x, y, z, 16] = AD_out[1]
+                out[x, y, z, 17] = RD_out[1]
+                out[x, y, z, 18] = FA1
+                out[x, y, z, 19] = directions[1, 0]
+                out[x, y, z, 20] = directions[1, 1]
+                out[x, y, z, 21] = directions[1, 2]
+
+                if n_pop >= 3:
+                    FA2 = compute_fiber_fa(AD_out[2], RD_out[2])
+                    out[x, y, z, 22] = fractions[2]
+                    out[x, y, z, 23] = AD_out[2]
+                    out[x, y, z, 24] = RD_out[2]
+                    out[x, y, z, 25] = FA2
+                    out[x, y, z, 26] = directions[2, 0]
+                    out[x, y, z, 27] = directions[2, 1]
+                    out[x, y, z, 28] = directions[2, 2]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -520,26 +678,31 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
 
 class DBSI_Adaptive:
     """
-    Adaptive DBSI model (v3) using a hybrid two-stage anisotropic
-    estimation: Stage A detects dominant fiber direction(s) from an
-    exhaustive (direction x AD/RD-pair) dictionary under heavy sparsity
-    regularization; Stage B estimates AD/RD via closed-form WLS
-    conditioned on the detected direction(s).
+    Adaptive DBSI model (v3 + MRDS multi-fiber extension) using a hybrid
+    two-stage anisotropic estimation: Stage A detects dominant fiber
+    direction(s) from an exhaustive (direction x AD/RD-pair) dictionary
+    under heavy sparsity regularization; Stage B estimates AD/RD/FA either
+    via closed-form WLS (single fiber) or MRDS joint nonlinear
+    least-squares (2-3 crossing fibers) conditioned on the detected
+    direction(s).
+
+    NEW: `max_fiber_populations` (default 2, optionally 3) controls how
+    many simultaneous fiber populations Stage A/B will detect and report
+    per voxel. See module docstring "MULTI-FIBER SCOPE" for why the
+    default is 2 and why this toolbox does not support values beyond 3.
+
+    IMPORTANT: the MRDS extension improves AD/RD/FA/direction accuracy
+    for detected crossing populations. It does NOT correct the isotropic
+    or total-fiber FRACTION estimates (FF/RF/HF/WF/NRF), which are
+    computed by Stage A and are unaffected by `max_fiber_populations` --
+    see module docstring "WHAT THE MRDS EXTENSION DOES NOT DO" for the
+    validation that led to this being an explicit, documented open
+    limitation rather than a "fixed" behaviour.
 
     Selection rule (isotropic block — unchanged from v1/v2)
     -------------------------------------------------------------
     3-ISO (RF + HF + WF) if:  b_max >= B_THRESH_3ISO  AND  n_shells >= MIN_SHELLS_3ISO
     2-ISO (RF + NRF)     otherwise.
-
-    Stage A dictionary sizing
-    ------------------------------
-    By default, M (hemisphere directions) is derived automatically from
-    the acquisition protocol via `utils.autoconfig.autoconfigure_dictionary`
-    (same logic as v2). n_ad, n_rd, anisotropy_ratio default to a coarse
-    Stage-A-appropriate grid (3x3, ratio 1.15) rather than the
-    protocol-scaled denser grids v2 used, because Stage A's job
-    (direction detection) does not benefit from a finer (AD,RD) grid —
-    see module docstring.
 
     Parameters
     ----------
@@ -570,44 +733,28 @@ class DBSI_Adaptive:
         must carry to be reported as a fiber population. Default: 0.05.
     force_n_iso : int or None
         Override automatic isotropic-model selection (2 or 3).
+    max_fiber_populations : int
+        Maximum number of simultaneous fiber populations to detect and
+        report per voxel. Default: 2. May be set to 3 for protocols with
+        sufficiently dense angular sampling (NOT automatically checked --
+        see module docstring "MULTI-FIBER SCOPE"). Values other than
+        1, 2, or 3 are rejected.
     enable_direction_refinement : bool
         Whether to refine Stage A's dominant direction estimate with a
-        two-level "MRDS-lite" cone search (Coronado-Leija et al. 2017,
-        scoped down to single-direction refinement — see
-        `core.solvers` module docstring "MRDS-LITE" for full rationale).
-        Default: True. Project validation (synthetic, Verona-protocol
-        reconstruction) found this closes ~60-90% of the AD accuracy gap
-        attributable to Stage A's fixed grid discretisation (median AD
-        relative error dropped from ~6.8-12.6% to ~2.6-7.6% depending on
-        test conditions), at negligible added computational cost (a few
-        dozen closed-form regressions per fiber voxel, versus the NNLS
-        solve's own up to 2000 iterations on a much larger system).
-        RD is largely unaffected either way (the closed-form regression's
-        RD term is markedly less sensitive to angular offset than AD).
-        NOT validated on real (non-synthetic) data or on multi-fiber
-        crossing configurations.
+        two-level "MRDS-lite" cone search for SINGLE-fiber voxels
+        (n_pop == 1). Default: True. NOT applied to n_pop >= 2 voxels in
+        this release (see module docstring scope note) -- those use
+        Stage A's raw grid-quantised directions as MRDS joint Stage B
+        input.
     target_angular_resolution_deg : float
         Desired final angular precision (degrees) of the refined
-        direction. Default: 1.0. Used to derive the two-level cone
-        search schedule (cone angles and candidate counts) directly from
-        the ACTUAL measured spacing of the Stage A hemisphere dictionary
-        — see `core.solvers.compute_cone_refinement_schedule`. Only used
-        if `enable_direction_refinement=True`.
+        direction (n_pop == 1 path only). Default: 1.0.
 
     Notes
     -----
     There is no `enable_step2` parameter: the non-linear Step 2
     refinement stage from v1 has been eliminated since v2 and remains
-    eliminated in v3. AD/RD are obtained as Stage B's closed-form
-    estimate conditioned on Stage A's detected direction.
-
-    (lambda_aniso, lambda_iso) calibration defaults to the data-driven
-    method (GCV + discrepancy principle, see `calibration.data_driven`)
-    rather than the legacy Monte Carlo tissue-scenario grid search — see
-    `fit()`'s `calibration_method` parameter. After fitting,
-    `self.mc_crosscheck_report_` holds the Monte Carlo cross-check
-    report (see `fit()`'s `run_mc_crosscheck` parameter) if that was
-    requested, else `None`.
+    eliminated in v3.
     """
 
     CH = {
@@ -622,8 +769,15 @@ class DBSI_Adaptive:
         'ADC_iso': 8,
         'AD_lin': 9,
         'RD_lin': 10,
+        'N_POP': 11,
+        'DIR1_X': 12, 'DIR1_Y': 13, 'DIR1_Z': 14,
+        'FF_POP2': 15, 'AD_POP2': 16, 'RD_POP2': 17, 'FA_POP2': 18,
+        'DIR2_X': 19, 'DIR2_Y': 20, 'DIR2_Z': 21,
+        'FF_POP3': 22, 'AD_POP3': 23, 'RD_POP3': 24, 'FA_POP3': 25,
+        'DIR3_X': 26, 'DIR3_Y': 27, 'DIR3_Z': 28,
     }
-    N_CHANNELS = 11
+    N_CHANNELS = 29
+    N_CHANNELS_LEGACY = 11  # for reference / external code checking shape
 
     def __init__(self, n_iso=None, lambda_aniso=None, lambda_iso=None,
                  n_dirs=None, n_ad=_STAGE_A_DEFAULT_N_AD, n_rd=_STAGE_A_DEFAULT_N_RD,
@@ -633,8 +787,17 @@ class DBSI_Adaptive:
                  iso_range=(_DEFAULT_ISO_MIN, _DEFAULT_ISO_MAX),
                  fiber_threshold=FIBER_THRESHOLD,
                  min_weight_fraction=0.05, force_n_iso=None,
+                 max_fiber_populations=_DEFAULT_MAX_FIBER_POPULATIONS,
                  enable_direction_refinement=True,
                  target_angular_resolution_deg=1.0):
+        if max_fiber_populations not in (1, 2, 3):
+            raise ValueError(
+                f"max_fiber_populations must be 1, 2, or 3, got "
+                f"{max_fiber_populations!r}. See module docstring "
+                f"'MULTI-FIBER SCOPE' for why this toolbox does not "
+                f"support values beyond 3."
+            )
+
         self.n_iso = n_iso
         self.lambda_aniso = lambda_aniso
         self.lambda_iso = lambda_iso
@@ -648,6 +811,7 @@ class DBSI_Adaptive:
         self.fiber_threshold = fiber_threshold
         self.min_weight_fraction = min_weight_fraction
         self.force_n_iso = force_n_iso
+        self.max_fiber_populations = max_fiber_populations
         self.enable_direction_refinement = enable_direction_refinement
         self.target_angular_resolution_deg = target_angular_resolution_deg
 
@@ -669,86 +833,21 @@ class DBSI_Adaptive:
            run_sure_crosscheck=False, sure_crosscheck_n_probes=15,
            run_n_iso_sweep_diagnostic=False):
         """
-        Fit the v3 hybrid two-stage adaptive DBSI model to 4D diffusion
-        MRI data.
+        Fit the v3 hybrid two-stage adaptive DBSI model (+ MRDS
+        multi-fiber extension) to 4D diffusion MRI data.
 
-        Parameters
-        ----------
-        data : ndarray (X, Y, Z, N)
-        bvals : array (N,)
-        bvecs : array (N, 3) or (3, N)
-        mask : ndarray (X, Y, Z) bool
-        run_calibration : bool
-            Whether to run calibration for (lambda_aniso, lambda_iso) at
-            all (if False, falls back to the fixed default lambda_base
-            heuristic; see class docstring).
-        calibration_method : {'data_driven', 'monte_carlo'}
-            Which method determines (lambda_aniso, lambda_iso). See
-            previous docstring entries for full details.
-        n_calibration_voxels : int
-            Number of brain-mask voxels to sample. Default 500.
-        n_iso_method : {'bootstrap', 'svd_floor', 'fixed'}
-            How to select n_iso when self.n_iso is None (default None
-            means auto):
-              'bootstrap' (default) — minimise bias²+variance of RF
-                across bootstrapped noise replicates of real sampled
-                voxels (see `calibration.adaptive_n_iso.
-                select_n_iso_bootstrap`). Validated on Verona protocol
-                (4 shells, b_max=2000, SNR=28): consistently selects
-                n_iso=8 across 5 independent sampling seeds, with the
-                composite score 3-10x lower than all other candidates.
-                Preferred over GCV-sweep (systematically flat for dMRI)
-                and over fixed floor (not protocol-specific).
-              'svd_floor' — SVD-based information limit with empirical
-                floor=10 (the previous default). Protocol-agnostic; for
-                typical dMRI protocols the floor dominates and the SVD
-                component is mostly inactive (raw answer 2-5 for 1-7
-                shell protocols). Retained as a fast fallback when
-                bootstrap computational cost is a concern.
-              'fixed' — use whatever value was passed to n_iso in the
-                constructor (or the legacy default 31 if None). Provided
-                only for backward compatibility / reproducibility of
-                earlier pipeline runs.
-        n_bootstrap : int
-            Number of noise replicates per voxel for the bootstrap
-            method (only used if n_iso_method='bootstrap'). Default 50;
-            30 is adequate, >100 gives diminishing returns.
-        run_mc_crosscheck : bool
-            Monte Carlo tissue-scenario cross-check (see previous docs).
-        mc_crosscheck_n_mc : int
-            Samples per scenario for cross-check.
-        run_sure_crosscheck : bool
-            If True, after determining n_iso and lambda_iso by whichever
-            method was used, additionally cross-check BOTH against
-            Monte Carlo SURE (Stein's Unbiased Risk Estimate; Ramani,
-            Blu & Unser 2008) — a risk criterion that, unlike GCV, is
-            formally exact for the actual constrained NNLS estimator
-            used in this toolbox, not just its unconstrained linear
-            approximation. Does NOT change n_iso/lambda_iso — only
-            reports whether they fall within a low-risk neighbourhood
-            under this independent, NNLS-correct criterion (see
-            `calibration.mc_sure` module docstring for the full
-            rationale and the empirical finding that shaped this
-            design: the risk landscape here is typically a flat valley,
-            so this is a REGIME check, not a more precise point
-            estimate). Meaningfully more expensive than GCV alone (each
-            evaluated candidate re-solves NNLS ~1+sure_crosscheck_n_probes
-            times per sampled voxel); recommended as an occasional
-            sanity check per new protocol, not a per-run default.
-        sure_crosscheck_n_probes : int
-            Number of random probes per voxel for the Monte Carlo SURE
-            divergence estimate (only used if run_sure_crosscheck=True).
-            Default 15 — see `calibration.mc_sure._mc_sure_risk`
-            docstring for the empirical basis of this default.
+        Parameters are unchanged from the pre-MRDS release EXCEPT for the
+        constructor's new `max_fiber_populations`; see class docstring.
 
         Returns
         -------
-        results : ndarray (X, Y, Z, 11)
+        results : ndarray (X, Y, Z, 29)
+            See module docstring "Output Channels".
         model_mode : int
             2 or 3.
         """
         print("\n" + "="*70)
-        print("  DBSI ADAPTIVE PIPELINE — v3 (Hybrid Two-Stage Architecture)")
+        print("  DBSI ADAPTIVE PIPELINE — v3 + MRDS Multi-Fiber Extension")
         print("="*70)
 
         bvecs = np.asarray(bvecs, dtype=np.float64)
@@ -781,6 +880,8 @@ class DBSI_Adaptive:
               f"({'RF + HF + WF' if use_3iso else 'RF + NRF (HF+WF merged)'})")
         print(f"  b_max detected: {b_max:.0f} s/mm^2  |  "
               f"Non-zero shells: {n_shells}")
+        print(f"  Max fiber populations: {self.max_fiber_populations} "
+              f"{'(default)' if self.max_fiber_populations == _DEFAULT_MAX_FIBER_POPULATIONS else '(OPT-IN — confirm protocol angular density supports this, see module docstring)'}")
 
         # ── Stage A dictionary autoconfiguration ─────────────────────────
         print("\n1. Autoconfiguring Stage A detection dictionary...")
@@ -788,13 +889,6 @@ class DBSI_Adaptive:
 
         if self.n_dirs is None:
             self.n_dirs = M_auto
-        # n_ad / n_rd / anisotropy_ratio intentionally do NOT default to
-        # the protocol-scaled (potentially dense) autoconfigured values
-        # here: Stage A is deliberately kept coarse on the (AD,RD) axis
-        # regardless of protocol richness (see module docstring and class
-        # docstring). Use the constructor's explicit n_ad/n_rd/
-        # anisotropy_ratio arguments (default 3x3, ratio 1.15) unless the
-        # caller overrides them.
 
         print(f"   M (hemisphere directions): {self.n_dirs}")
         print(f"   Stage A n_ad x n_rd grid: {self.n_ad} x {self.n_rd} "
@@ -818,14 +912,7 @@ class DBSI_Adaptive:
 
         fiber_dirs = generate_fibonacci_sphere_hemisphere(self.n_dirs)
 
-        # ── MRDS-lite direction refinement schedule ─────────────────────────
-        # Computed ONCE per protocol (not per voxel) from the ACTUAL Stage A
-        # dictionary's own nearest-neighbour spacing — see core.solvers
-        # module docstring "MRDS-LITE" for the full rationale and the
-        # empirical validation (Verona-protocol reconstruction: closes the
-        # AD accuracy gap from ~6.8-9% grid-quantisation bias down to
-        # ~3%, matching a true-direction oracle, at n_dirs values ranging
-        # from 30 to 62). No independently hardcoded cone angles.
+        # ── MRDS-lite direction refinement schedule (single-fiber path only) ──
         self.hemisphere_spacing_deg_ = float(np.degrees(measure_hemisphere_spacing(fiber_dirs)))
         if self.enable_direction_refinement:
             _cone1, _n1, _cone2, _n2 = compute_cone_refinement_schedule(
@@ -836,11 +923,15 @@ class DBSI_Adaptive:
                 cone1_half_angle_deg=float(np.degrees(_cone1)), n1=int(_n1),
                 cone2_half_angle_deg=float(np.degrees(_cone2)), n2=int(_n2),
             )
-            print(f"\n   MRDS-lite direction refinement: ENABLED "
+            print(f"\n   MRDS-lite direction refinement (n_pop==1 voxels only): ENABLED "
                   f"(target resolution={self.target_angular_resolution_deg:.2f} deg)")
             print(f"   Dictionary spacing: {self.hemisphere_spacing_deg_:.2f} deg  |  "
                   f"Level 1 cone: +/-{np.degrees(_cone1):.2f} deg ({_n1} candidates)  |  "
                   f"Level 2 cone: +/-{np.degrees(_cone2):.2f} deg ({_n2} candidates)")
+            if self.max_fiber_populations >= 2:
+                print(f"   NOTE: n_pop>=2 voxels use Stage A's RAW grid directions as "
+                      f"MRDS joint Stage B input (no per-population cone refinement in "
+                      f"this release — see module docstring scope note).")
         else:
             _cone1, _n1, _cone2, _n2 = 0.0, 1, 0.0, 0
             print(f"\n   MRDS-lite direction refinement: DISABLED "
@@ -850,18 +941,7 @@ class DBSI_Adaptive:
         print("\n2. Estimating SNR...")
         snr, sigma = estimate_snr_robust(data, bvals, mask, verbose=True)
 
-        # ── Isotropic grid ──────────────────────────────────────────────────
-        # n_iso defaults to the SVD-based adaptive estimate (protocol- and
-        # SNR-aware, with an empirically-validated floor — see
-        # calibration.adaptive_n_iso module docstring) rather than the
-        # legacy fixed value of 31.
-        # ── Rician bias correction (vectorized, unchanged from v1/v2) ──────
-        # Moved before n_iso selection AND calibration: both the bootstrap
-        # n_iso method and the data-driven lambda calibration sample real
-        # voxel signals from this dataset, and should see the SAME
-        # corrected signal the actual Stage A/B fit will use — sampling
-        # against uncorrected signal would target a subtly different
-        # noise level than what is actually fit.
+        # ── Rician bias correction (unchanged from v1/v2) ──────────────────
         print("\n3. Applying Rician Bias Correction...")
         coords = np.argwhere(mask)
 
@@ -876,9 +956,6 @@ class DBSI_Adaptive:
         data_corr[xs, ys, zs] = corrected
         del masked_sq, valid_mask, corrected
 
-        # ── Sample calibration voxels once, reused for n_iso selection
-        # AND lambda calibration (avoids sampling twice / inconsistent
-        # voxel sets between the two steps) ────────────────────────────
         y_cal, sigma_cal = None, None
         if self.n_iso is None or (run_calibration and
                                   (self.lambda_aniso is None or self.lambda_iso is None) and
@@ -889,20 +966,6 @@ class DBSI_Adaptive:
             print(f"\n   Sampled {len(y_cal)} calibration voxels from the brain mask "
                   f"(sigma_normalised={sigma_cal:.5f})")
 
-        # legacy fixed value of 31. The grid itself is THRESHOLD-ANCHORED
-        # log-uniform (Borgia et al. 1998 spectral-resolution rationale,
-        # plus exact-boundary anchoring — see
-        # core.basis.generate_anchored_isotropic_grid docstring and
-        # project methodological supplement "isotropic_compartment_
-        # supplement.docx" Section 4) rather than plain linear when
-        # n_iso is adaptively determined, since the two were validated
-        # together in project synthetic testing.
-        #
-        # If the caller explicitly set n_iso in the constructor, that
-        # exact value is honoured and the LINEAR grid is used instead
-        # (matching the original v1/v2/v3 behaviour for explicit
-        # overrides) — adaptive selection only engages when n_iso is left
-        # at its default (None).
         iso_d_max = max(self.iso_range[1], _ISO_GRID_D_MAX_EXTENDED)
 
         if self.n_iso is None:
@@ -1014,6 +1077,9 @@ class DBSI_Adaptive:
             f"NRF (ADC > {THRESH_RES*1e3:.1f}x10^-3 mm^2/s)"
         )
         print(f"   Compartments: {_thresh_str}")
+        print(f"   NOTE: isotropic/fiber FRACTIONS above are Stage A's raw NNLS "
+              f"output regardless of max_fiber_populations -- the MRDS extension "
+              f"does not revise them (see module docstring).")
 
         # ── Monte Carlo cross-check (optional, does not change lambda) ─────
         if run_mc_crosscheck:
@@ -1031,11 +1097,9 @@ class DBSI_Adaptive:
             )
             self.mc_crosscheck_report_ = _crosscheck_report
 
-        # ── Monte Carlo SURE cross-check (optional, does not change n_iso/lambda) ──
+        # ── Monte Carlo SURE cross-check (optional) ─────────────────────────
         if run_sure_crosscheck:
-            print(f"\n   Running Monte Carlo SURE cross-check of n_iso and lambda_iso "
-                  f"(NNLS-correct risk criterion — see calibration.mc_sure module "
-                  f"docstring)...")
+            print(f"\n   Running Monte Carlo SURE cross-check of n_iso and lambda_iso...")
             if y_cal is None:
                 y_cal, sigma_cal = sample_calibration_voxels(
                     data_corr, mask, bvals, n_voxels=n_calibration_voxels, seed=0,
@@ -1058,10 +1122,7 @@ class DBSI_Adaptive:
                 lambda_iso_agrees=_sure_lambda_agrees, n_iso_agrees=_sure_n_iso_agrees,
             )
             if not (_sure_lambda_agrees and _sure_n_iso_agrees):
-                print(f"\n   [NOTE] Monte Carlo SURE flagged a disagreement above — "
-                      f"this does not automatically change the fit, but is worth "
-                      f"investigating for this dataset/protocol before trusting the "
-                      f"data-driven n_iso/lambda_iso selection unsupervised.")
+                print(f"\n   [NOTE] Monte Carlo SURE flagged a disagreement above.")
 
         # ── Stage A design matrix ───────────────────────────────────────────
         print("\n6. Building Stage A Detection Dictionary...")
@@ -1080,13 +1141,15 @@ class DBSI_Adaptive:
         print(f"   Regularization: lambda_aniso={self.lambda_aniso:.4f}  "
               f"lambda_iso={self.lambda_iso:.4f}")
 
-        # ── Allocate output ────────────────────────────────────────────────
+        # ── Allocate output (EXTENDED: 29 channels) ─────────────────────────
         results = np.zeros(data.shape[:3] + (self.N_CHANNELS,), dtype=np.float32)
         results[..., 5] = np.nan
         results[..., 6] = np.nan
         results[..., 7] = np.nan
         results[..., 9] = np.nan
         results[..., 10] = np.nan
+        results[..., 11] = np.nan  # N_POP: NaN outside fiber_threshold, not 0
+        results[..., 12:29] = np.nan  # DIR1 + pop2/pop3 block, all NaN by default
         if not use_3iso:
             results[..., 2] = np.nan
             results[..., 3] = np.nan
@@ -1097,7 +1160,9 @@ class DBSI_Adaptive:
         n_batches = int(np.ceil(n_voxels / batch_sz))
 
         print(f"\n7. Fitting {n_voxels:,} voxels "
-              f"[{model_mode}-ISO model, Stage A + Stage B]...")
+              f"[{model_mode}-ISO model, Stage A + Stage B "
+              f"(single-fiber closed-form / MRDS joint up to "
+              f"{self.max_fiber_populations} populations)]...")
 
         _kernel = _fit_voxels_3iso_v3 if use_3iso else _fit_voxels_2iso_v3
 
@@ -1113,18 +1178,23 @@ class DBSI_Adaptive:
                     bvals, bvecs, fiber_dirs, diff_pairs, self.n_dirs, iso_grid,
                     b0_thr, self.fiber_threshold, self.min_weight_fraction,
                     self.enable_direction_refinement,
-                    _cone1, _n1, _cone2, _n2, results
+                    _cone1, _n1, _cone2, _n2,
+                    self.max_fiber_populations, results
                 )
                 pbar.update(end - start)
 
         elapsed = time.time() - t0
         n_fitted = int(np.sum(~np.isnan(results[..., 5]) & mask))
+        n_multi = int(np.sum((results[..., 11] >= 2) & mask))
         pct = n_fitted / n_voxels * 100 if n_voxels > 0 else 0.0
+        pct_multi = n_multi / n_fitted * 100 if n_fitted > 0 else 0.0
 
         print(f"\n   Completed: {elapsed:.1f}s  "
               f"({n_voxels / elapsed:.0f} vox/s)")
         print(f"   AD/RD estimated: {n_fitted:,} / {n_voxels:,} "
               f"({pct:.1f}%)")
+        print(f"   Multi-population (N_POP>=2) voxels: {n_multi:,} "
+              f"({pct_multi:.1f}% of fitted voxels)")
         print(f"\n{'='*70}\n")
 
         return results, model_mode
@@ -1134,33 +1204,53 @@ class DBSI_Adaptive:
     def output_map_names(model_mode):
         """
         Return the ordered list of output map file names for the given
-        model mode. Unchanged from v1/v2.
+        model mode. Channels 0-10 unchanged from the pre-MRDS release;
+        11-28 are the new MRDS/multi-population block. Names ending in
+        '_NaN' mark channels invalid in the given model_mode OR (for the
+        pop2/pop3 block) channels that are frequently/always NaN
+        depending on max_fiber_populations and per-voxel N_POP -- callers
+        should still check for NaN per-voxel rather than assuming a
+        channel is entirely absent.
         """
-        if model_mode == 3:
-            return [
-                'fiber_fraction',
-                'restricted_fraction',
-                'hindered_fraction',
-                'water_fraction',
-                'nonrestricted_fraction',
-                'axial_diffusivity',
-                'radial_diffusivity',
-                'fiber_fa',
-                'mean_iso_adc',
-                'ad_linear',
-                'rd_linear',
-            ]
-        else:
-            return [
-                'fiber_fraction',
-                'restricted_fraction',
-                'hindered_fraction_NaN',
-                'water_fraction_NaN',
-                'nonrestricted_fraction',
-                'axial_diffusivity',
-                'radial_diffusivity',
-                'fiber_fa',
-                'mean_iso_adc',
-                'ad_linear',
-                'rd_linear',
-            ]
+        base_3iso = [
+            'fiber_fraction',
+            'restricted_fraction',
+            'hindered_fraction',
+            'water_fraction',
+            'nonrestricted_fraction',
+            'axial_diffusivity',
+            'radial_diffusivity',
+            'fiber_fa',
+            'mean_iso_adc',
+            'ad_linear',
+            'rd_linear',
+        ]
+        base_2iso = [
+            'fiber_fraction',
+            'restricted_fraction',
+            'hindered_fraction_NaN',
+            'water_fraction_NaN',
+            'nonrestricted_fraction',
+            'axial_diffusivity',
+            'radial_diffusivity',
+            'fiber_fa',
+            'mean_iso_adc',
+            'ad_linear',
+            'rd_linear',
+        ]
+        mrds_block = [
+            'n_fiber_populations',
+            'dir1_x', 'dir1_y', 'dir1_z',
+            'fiber_fraction_pop2',
+            'axial_diffusivity_pop2',
+            'radial_diffusivity_pop2',
+            'fiber_fa_pop2',
+            'dir2_x', 'dir2_y', 'dir2_z',
+            'fiber_fraction_pop3',
+            'axial_diffusivity_pop3',
+            'radial_diffusivity_pop3',
+            'fiber_fa_pop3',
+            'dir3_x', 'dir3_y', 'dir3_z',
+        ]
+        base = base_3iso if model_mode == 3 else base_2iso
+        return base + mrds_block

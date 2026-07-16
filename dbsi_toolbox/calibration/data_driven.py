@@ -226,7 +226,9 @@ def select_lambda_aniso_discrepancy(AtA, At, y_voxels, n_aniso_cols,
                                      sigma, lambda_iso_fixed,
                                      lambda_lo=1e-6, lambda_hi=1e4,
                                      n_dirs=None, max_bisect_iter=40,
-                                     tol=1e-3, min_floor_factor=0.1):
+                                     tol=1e-3, min_floor_factor=0.1,
+                                     max_eig_aniso=None,
+                                     aniso_floor_fraction=0.075):
     """
     Select lambda_aniso via the discrepancy principle (Morozov 1966):
     find lambda such that the NNLS residual matches the expected noise
@@ -247,32 +249,88 @@ def select_lambda_aniso_discrepancy(AtA, At, y_voxels, n_aniso_cols,
     (sparse fiber/no-fiber per direction) is simpler than full spectral
     recovery and does not require evaluating multiple tissue scenarios.
 
-    SAFETY FLOOR (min_floor_factor)
-    ------------------------------------
+    SAFETY FLOOR — two components (min_floor_factor, aniso_floor_fraction)
+    -----------------------------------------------------------------------
     If the calibration voxel sample is small, near-noise-free, or
     unusually homogeneous (e.g. synthetic test signals with little
     inter-voxel variability), the residual at lambda_aniso -> 0 can
     already meet or undershoot the noise-matching target, causing the
     bisection to collapse to (near) zero — a pathological result: an
-    unregularized anisotropic block with thousands of collinear columns
-    has an enormous condition number (observed >1e9 in such a case
-    during testing) and produces an ill-conditioned, numerically
-    unstable fit even though it nominally "matches" the discrepancy
-    target. This is NOT a useful solution: matching the residual to the
-    noise level is necessary but not sufficient for a well-posed
-    inverse problem when the unregularized system is singular or
-    near-singular.
+    unregularized anisotropic block with hundreds of collinear columns
+    (n_aniso_cols can exceed N, the number of measurements, for typical
+    n_dirs) has an enormous condition number and produces an
+    ill-conditioned, numerically unstable fit even though it nominally
+    "matches" the discrepancy target. Matching the residual to the noise
+    level is necessary but not sufficient for a well-posed inverse
+    problem when the unregularized system is singular or near-singular.
 
-    `min_floor_factor` enforces lambda_aniso >= min_floor_factor *
-    lambda_iso_fixed * n_aniso_cols_per_iso_col_ratio is NOT used here in
-    favour of a simpler, more conservative floor:
-    lambda_aniso >= min_floor_factor * lambda_iso_fixed (i.e. the
-    anisotropic block's regularization is never allowed to drop below a
-    fraction of the isotropic block's, by default 10%). This is a
-    pragmatic safety net, not a principled derivation; it should be
-    revisited if it is found to bind frequently on real datasets (which
-    would suggest the calibration voxel sample needs to be larger or
-    more diverse — see `sample_calibration_voxels` docstring).
+    Originally this floor was a single term, `min_floor_factor *
+    lambda_iso_fixed`. Synthetic validation (crossing-fiber phantoms,
+    2 populations at 45/90 deg, tilted 25 deg out of the Stage A
+    hemisphere's equatorial boundary, SNR 20-50, n_dirs in {40, 78, 120})
+    found this collapses to a near-zero value whenever lambda_iso_fixed
+    itself is small (e.g. GCV selecting a low-n_iso, low-lambda_iso
+    regime) -- REGARDLESS of how ill-conditioned the anisotropic block
+    is. The two blocks' regularizations are calibrated independently and
+    have no principled relationship, so tying the anisotropic floor to
+    the isotropic block's scale is a category error: the same
+    min_floor_factor*lambda_iso_fixed floor was observed to leave the
+    fiber fraction almost completely leaked out of the isotropic
+    compartment (recovered FF approx 1.0 for a synthetic voxel with true
+    FF=0.80) even though the true anisotropic block condition number was
+    ~1e8.
+
+    `aniso_floor_fraction * max_eig_aniso` is a second, independent floor
+    term tied instead to the anisotropic block's OWN scale (its largest
+    unregularized eigenvalue) -- see `max_eig_aniso` parameter below. The
+    two floors are combined via max(), so either can bind. Anchoring the
+    floor to the anisotropic block's own eigenvalue scale, rather than to
+    the unrelated isotropic block's lambda_iso, remains the right
+    structural fix: the two blocks have no principled regularization
+    relationship, so the old min_floor_factor*lambda_iso_fixed-only floor
+    was a category error regardless of the point below.
+
+    ***CAVEAT ON THE DEFAULT CONSTANT (2026-07-16, unresolved)***
+    aniso_floor_fraction=0.075 was fitted from a sweep that (by mistake)
+    forced n_iso explicitly in the DBSI_Adaptive constructor for every
+    test point. Explicit n_iso routes the fit through
+    `core.basis.generate_isotropic_grid` (a plain linear grid), NOT
+    `generate_anchored_isotropic_grid` (the threshold-anchored grid the
+    real adaptive pipeline uses when n_iso is left at its default None).
+    These are materially different dictionaries, and a follow-up check
+    on the REAL pipeline (n_iso left at None, so the bootstrap-selected
+    n_iso and the anchored grid are both exercised as they would be in
+    production) found FF leakage essentially UNCHANGED across the entire
+    lambda_aniso range up to 10 for the same synthetic crossing-fiber
+    voxel that motivated this fix -- i.e. this floor term, at its
+    current default, does not fix the leakage it was designed to fix on
+    the actual pipeline. Root cause traced to the anchored grid itself:
+    at the bootstrap-selected n_iso=4 for that protocol/SNR, the
+    threshold-anchored grid is `[1e-4, 2.99e-4, 3.001e-3, 5e-3]` mm^2/s
+    -- two of the four points are spent marking the RES/HIN and HIN/WAT
+    boundaries, leaving NO column near a mid-HIN-range diffusivity like
+    0.8e-3 mm^2/s. No amount of lambda_aniso regularization can compensate
+    for a genuine coverage gap in the isotropic dictionary; the isotropic
+    signal is then more cheaply explained by a near-isotropic anisotropic
+    column than by the two far-away anchored columns. This is an
+    isotropic-side problem (likely in `calibration.adaptive_n_iso.
+    select_n_iso_bootstrap`'s bias-variance criterion selecting too
+    coarse an n_iso for this regime -- confirmed to persist even with a
+    tissue-heterogeneous calibration sample, so it is not simply a
+    calibration-sample-diversity issue either), NOT something this
+    anisotropic-side floor can or should try to compensate for.
+    DO NOT tune aniso_floor_fraction further to try to mask this -- the
+    two compartments were deliberately investigated together once (to
+    find this coupling) and are being investigated separately from here:
+    this docstring's job is to flag that the current default is
+    unvalidated on the real pipeline, not to guess a patched value. See
+    project notes for the isotropic-side follow-up.
+
+    `min_floor_factor` is retained as a secondary, more conservative
+    floor (still enforcing lambda_aniso >= min_floor_factor *
+    lambda_iso_fixed as an absolute lower bound) for backward
+    compatibility and as a fallback when `max_eig_aniso` is not supplied
+    (callers that do not pass it get the original, pre-fix behaviour).
 
     Parameters
     ----------
@@ -311,23 +369,51 @@ def select_lambda_aniso_discrepancy(AtA, At, y_voxels, n_aniso_cols,
         Minimum lambda_aniso, expressed as a fraction of
         lambda_iso_fixed (default 0.1, i.e. lambda_aniso is never
         allowed below 10% of lambda_iso_fixed). Set to 0.0 to disable
-        the floor entirely (not recommended — see rationale above).
+        this component of the floor (not recommended — see rationale
+        above). Retained as a secondary/fallback floor alongside
+        `aniso_floor_fraction`.
+    max_eig_aniso : float or None
+        Largest eigenvalue of the UNREGULARIZED anisotropic block
+        (AtA[:n_aniso_cols, :n_aniso_cols]), i.e.
+        `np.linalg.eigvalsh(AtA[:n_aniso_cols, :n_aniso_cols])[-1]`.
+        Computed once per protocol by the caller (see
+        `select_lambdas_data_driven`), not per voxel. If None, this
+        floor component is disabled and behaviour falls back to the
+        original min_floor_factor-only floor (pre-fix behaviour).
+    aniso_floor_fraction : float
+        Fraction of `max_eig_aniso` used as the (new) primary floor
+        component: lambda_aniso >= aniso_floor_fraction * max_eig_aniso
+        / n_aniso_cols. Default 0.075 -- ***UNVALIDATED on the real
+        (anchored-isotropic-grid) pipeline as of 2026-07-16; see the
+        CAVEAT in the SAFETY FLOOR section above before relying on this
+        default.*** Only used if max_eig_aniso is not None.
 
     Returns
     -------
     best_lambda_aniso : float
     diagnostics : dict
         {'target_residual2': float, 'achieved_residual2': float,
-         'n_iter': int, 'floor_applied': bool} for sanity-checking the
-         bisection converged to a residual close to the target rather
-         than hitting a bracket edge, and whether the safety floor had
-         to intervene.
+         'n_iter': int, 'floor_applied': bool,
+         'floor_component': str} for sanity-checking the bisection
+         converged to a residual close to the target rather than hitting
+         a bracket edge, whether the safety floor had to intervene, and
+         (if so) which component of the floor bound
+         ('min_floor_factor', 'aniso_floor_fraction', or 'none').
     """
     y_voxels = np.atleast_2d(np.asarray(y_voxels, dtype=np.float64))
     n_voxels, N = y_voxels.shape
 
     target_residual2 = N * sigma ** 2
-    lambda_aniso_floor = min_floor_factor * lambda_iso_fixed
+
+    floor_from_iso = min_floor_factor * lambda_iso_fixed
+    if max_eig_aniso is not None:
+        floor_from_aniso = aniso_floor_fraction * max_eig_aniso / max(n_aniso_cols, 1)
+    else:
+        floor_from_aniso = 0.0
+    lambda_aniso_floor = max(floor_from_iso, floor_from_aniso)
+    floor_component = ('none' if lambda_aniso_floor == 0.0 else
+                       'aniso_floor_fraction' if floor_from_aniso >= floor_from_iso else
+                       'min_floor_factor')
 
     n_total_cols = AtA.shape[0]
 
@@ -370,6 +456,7 @@ def select_lambda_aniso_discrepancy(AtA, At, y_voxels, n_aniso_cols,
             achieved_residual2=f_lo + target_residual2,
             n_iter=0,
             floor_applied=floor_applied,
+            floor_component=floor_component if floor_applied else 'none',
             warning="lambda_lo already exceeds target residual; "
                     "returning lambda_lo (subject to safety floor). "
                     "Check sigma estimate / dictionary size.",
@@ -380,6 +467,7 @@ def select_lambda_aniso_discrepancy(AtA, At, y_voxels, n_aniso_cols,
             achieved_residual2=f_hi + target_residual2,
             n_iter=0,
             floor_applied=False,
+            floor_component='none',
             warning="lambda_hi still under-regularizes relative to target "
                     "residual; returning lambda_hi. Consider widening the bracket.",
         )
@@ -408,6 +496,7 @@ def select_lambda_aniso_discrepancy(AtA, At, y_voxels, n_aniso_cols,
         achieved_residual2=mid_residual2,
         n_iter=n_iter,
         floor_applied=floor_applied,
+        floor_component=floor_component if floor_applied else 'none',
     )
 
 
@@ -594,10 +683,20 @@ def select_lambdas_data_driven(bvals, bvecs, fiber_dirs, diff_pairs, iso_grid,
     AtA = A.T @ A
     At = A.T
 
+    # Largest eigenvalue of the UNREGULARIZED anisotropic block, computed
+    # once per protocol (not per voxel) -- feeds the aniso_floor_fraction
+    # safety-floor component in select_lambda_aniso_discrepancy, which
+    # anchors the lambda_aniso floor to the anisotropic block's own scale
+    # instead of (as before the fix) to the unrelated isotropic block's
+    # lambda_iso. See that function's docstring for the empirical basis
+    # and caveats of this fix.
+    AtA_aniso = AtA[:n_aniso_cols, :n_aniso_cols]
+    max_eig_aniso = float(np.linalg.eigvalsh(AtA_aniso)[-1])
+
     lambda_aniso, disc_diag = select_lambda_aniso_discrepancy(
         AtA, At, y_voxels, n_aniso_cols, sigma, lambda_iso,
         lambda_lo=lambda_aniso_bracket[0], lambda_hi=lambda_aniso_bracket[1],
-        n_dirs=n_dirs,
+        n_dirs=n_dirs, max_eig_aniso=max_eig_aniso,
     )
 
     diagnostics = dict(gcv=gcv_diag, discrepancy=disc_diag)

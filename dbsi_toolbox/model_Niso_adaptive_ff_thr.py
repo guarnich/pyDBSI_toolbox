@@ -233,7 +233,36 @@ _MRDS_LM_MAX_ITER = 25
 # spacing, so their neighbourhoods overlap almost by construction; a
 # denser Stage A dictionary (larger n_dirs), not a larger/smaller k, is
 # the lever for that regime. See project re-validation sweep.
-_DEFAULT_DIRECTION_PEAK_K = 6
+#
+# CAVEAT ADDED 2026-07-16: the k=6 default above was only validated at
+# n_dirs=62. A separate synthetic check (90 deg crossing, tilted 25 deg
+# out of the hemisphere's equatorial boundary, SNR=30, n_iso=4,
+# lambda_aniso=1.0/lambda_iso=0.001 fixed) found k=6 gives COMPLETE
+# detection failure (0/27 replicates correctly reporting N_POP=2) at
+# n_dirs=12 -- the fixed k=6 neighbourhood becomes half the entire
+# dictionary at that density, so essentially every candidate suppresses
+# every other one. Progressively smaller k restored detection (k=4: 0/27,
+# k=3: 7/27, k=2: 27/27). This motivated switching the default from a
+# fixed constant to a n_dirs-scaled formula (see
+# `_default_direction_peak_k` below): k=max(2, min(6, n_dirs // 5))
+# reproduced 26-27/27 correct detection at n_dirs in {12, 20, 30, 40} in
+# that same check. This is a MUCH smaller validation than the k-sweep
+# above (one crossing angle, one SNR, one phantom) -- treat the scaled
+# default as a reasonable interim fix for very coarse dictionaries, not
+# as thoroughly validated as the original k=6-at-n_dirs=62 result.
+# Explicit `direction_peak_k=` still overrides this scaling entirely.
+_DEFAULT_DIRECTION_PEAK_K = None  # None => n_dirs-scaled (see _default_direction_peak_k)
+
+
+def _default_direction_peak_k(n_dirs):
+    """
+    n_dirs-scaled default for the local-maxima peak-finding neighbourhood
+    size `k` (see `_DEFAULT_DIRECTION_PEAK_K` comment above for the
+    empirical basis). Matches the validated k=6 default for n_dirs>=30
+    (the range the original k-sweep and this scaling agree on) and
+    degrades gracefully for coarser dictionaries.
+    """
+    return max(2, min(6, n_dirs // 5))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -963,7 +992,14 @@ class DBSI_Adaptive:
         # produces false-positive N_POP>=2 on true single fibers (grid
         # quantisation smearing onto neighbouring columns) and how the
         # local-maxima criterion fixes it. ──
-        neighbor_idx = build_direction_neighbor_graph(fiber_dirs, k=self.direction_peak_k)
+        if self.direction_peak_k is None:
+            _effective_k = _default_direction_peak_k(self.n_dirs)
+            print(f"\n   direction_peak_k not set explicitly -- using "
+                  f"n_dirs-scaled default: k={_effective_k} for n_dirs={self.n_dirs} "
+                  f"(see _DEFAULT_DIRECTION_PEAK_K comment for validation caveats)")
+        else:
+            _effective_k = self.direction_peak_k
+        neighbor_idx = build_direction_neighbor_graph(fiber_dirs, k=_effective_k)
         print(f"\n   Direction selection: local-maxima peak-finding "
               f"(k={neighbor_idx.shape[1]} nearest geometric neighbours)")
 
@@ -1063,13 +1099,25 @@ class DBSI_Adaptive:
                 print(f"   Data-driven result: lambda_aniso={self.lambda_aniso:.4f}, "
                       f"lambda_iso={self.lambda_iso:.4f}")
                 if _dd_diag.get('discrepancy', {}).get('floor_applied'):
+                    _floor_comp = _dd_diag.get('discrepancy', {}).get('floor_component', 'unknown')
                     print(f"   [WARNING] Safety floor was applied to lambda_aniso "
-                          f"(raw discrepancy-principle answer was below 10% of "
-                          f"lambda_iso, indicating an ill-conditioned/near-zero "
-                          f"regularization scenario). Consider increasing "
-                          f"n_calibration_voxels and/or running the Monte Carlo "
-                          f"cross-check (run_mc_crosscheck=True) before trusting "
-                          f"this result.")
+                          f"(component: {_floor_comp}; raw discrepancy-principle "
+                          f"answer was below the floor, indicating an "
+                          f"ill-conditioned/near-zero regularization scenario). "
+                          f"Consider increasing n_calibration_voxels and/or "
+                          f"running the Monte Carlo cross-check "
+                          f"(run_mc_crosscheck=True) before trusting this result.")
+                    if _floor_comp == 'aniso_floor_fraction':
+                        print(f"   [CAVEAT] The aniso_floor_fraction default is "
+                              f"UNVALIDATED on this (anchored-isotropic-grid) "
+                              f"pipeline as of 2026-07-16 -- it was fitted on a "
+                              f"different isotropic grid construction and did NOT "
+                              f"fix the FF leakage it targets in a known synthetic "
+                              f"crossing-fiber follow-up check. If FF looks close "
+                              f"to 1.0 with near-zero isotropic fractions, suspect "
+                              f"an isotropic-grid coverage gap (see "
+                              f"`select_lambda_aniso_discrepancy` docstring) rather "
+                              f"than trusting this floor to have fixed things.")
 
             elif calibration_method == 'monte_carlo':
                 print(f"\n5. Calibrating (lambda_aniso, lambda_iso) — MONTE CARLO "

@@ -321,7 +321,7 @@ def generate_log_uniform_isotropic_grid(d_min=0.1e-3, d_max=3.0e-3, n_steps=12):
 
 def generate_anchored_isotropic_grid(d_min=0.1e-3, d_max=3.0e-3, n_steps=12,
                                      thresh_res=0.3e-3, thresh_wat=3.0e-3,
-                                     epsilon=1e-6):
+                                     epsilon=1e-6, max_ratio=2.0):
     """
     Generate the log-uniform isotropic ADC grid (see
     `generate_log_uniform_isotropic_grid`), but additionally force the
@@ -369,37 +369,66 @@ def generate_anchored_isotropic_grid(d_min=0.1e-3, d_max=3.0e-3, n_steps=12,
         below typical grid spacing, so it does not materially change
         the column's signal decay curve, while reliably placing it on
         the correct side of strict/non-strict threshold comparisons.
+    max_ratio : float
+        Maximum allowed geometric ratio between adjacent grid atoms.
+        Oversized gaps are filled with geometric-midpoint atoms until
+        every adjacent ratio is <= max_ratio, guaranteeing that any
+        physiological isotropic D has a geometrically CLOSE atom (see
+        "COVERAGE FLOOR" below). Set to np.inf to disable the fill.
 
     Returns
     -------
-    iso_grid : ndarray (n_steps,), float64
-        Sorted, unique. May contain fewer than n_steps points if
-        anchoring caused two points to coincide after rounding (rare;
-        only possible for very small n_steps where grid spacing is
-        already comparable to epsilon).
+    iso_grid : ndarray, float64
+        Sorted, unique. NOTE: length is generally GREATER than n_steps —
+        anchoring adds up to two boundary atoms and the coverage floor
+        adds as many midpoints as needed to satisfy max_ratio. Callers
+        must read len(iso_grid) dynamically and must not assume the
+        result has exactly n_steps entries.
     """
-    grid = generate_log_uniform_isotropic_grid(d_min=d_min, d_max=d_max, n_steps=n_steps)
+    grid = list(generate_log_uniform_isotropic_grid(
+        d_min=d_min, d_max=d_max, n_steps=n_steps))
 
-    for thresh in (thresh_res, thresh_wat):
-        # Use <= / >= (not strict <) so a threshold that coincides
-        # exactly with the grid's own d_min/d_max boundary (the common
-        # case for thresh_wat when d_max defaults to 3.0e-3) is still
-        # anchored — the anchor offset is what determines its
-        # compartment assignment, not its distance from the grid edge.
+    # ── ANCHORING (AUGMENT, not relocate) ──────────────────────────────────
+    # Historical bug: the previous implementation RELOCATED the grid point
+    # closest to each threshold onto that threshold. At small n_steps over a
+    # wide (extended) range, both interior log-uniform points get consumed by
+    # the two anchors, leaving a coverage HOLE across the whole 0.3-3.0e-3
+    # (hindered) band. An isotropic signal there (e.g. D~0.8e-3) then has NO
+    # nearby atom and the NNLS dumps it onto the fiber columns -> the fiber
+    # fraction leaks to ~1.0 with near-zero isotropic fractions. (Reproduced
+    # on the synthetic crossing-fiber scenario; this is the "isotropic-grid
+    # coverage gap" flagged in select_lambda_aniso_discrepancy's docstring.)
+    #
+    # Fix: ADD the threshold anchors as extra columns without displacing the
+    # interior log-uniform points, so classification still gets an exact-
+    # boundary column while band coverage is preserved.
+    for thresh, off in ((thresh_res, -epsilon), (thresh_wat, +epsilon)):
+        # Use <= / >= (not strict <) so a threshold coinciding with the
+        # grid's own d_min/d_max boundary is still anchored — the anchor
+        # offset (not distance from the edge) sets the compartment.
         if d_min <= thresh <= d_max:
-            idx_closest = int(np.argmin(np.abs(grid - thresh)))
-            if thresh == thresh_res:
-                # RES bin is "adc <= thresh_res" -> anchor point must be
-                # AT OR BELOW the threshold to be classified as RES.
-                grid[idx_closest] = thresh - epsilon
-            else:
-                # HIN bin is "adc <= thresh_wat" -> the WAT anchor point
-                # must be ABOVE the threshold to be classified as WAT,
-                # not absorbed into HIN. If this pushes the point
-                # beyond d_max, extend d_max slightly to accommodate it
-                # rather than silently clamping WF representation out
-                # of the grid entirely.
-                grid[idx_closest] = thresh + epsilon
+            anc = thresh + off  # RES anchor sits just below thresh_res
+                                # (adc<=thresh_res -> RES); WAT anchor just
+                                # above thresh_wat (adc>thresh_wat -> WAT).
+            if not any(abs(g - anc) < epsilon for g in grid):
+                grid.append(anc)
+
+    # ── COVERAGE FLOOR (resolution guarantee) ──────────────────────────────
+    # Guarantee enough resolution that any physiological isotropic D has a
+    # nearby atom: no geometric gap may exceed `max_ratio`. Because exp(-b*D)
+    # is nonlinear in D, two atoms merely *bracketing* a true D is not enough
+    # (a convex mix of exp(-b*D1), exp(-b*D2) fits worse than the fiber block,
+    # so the signal still leaks); the neighbouring atom must be geometrically
+    # CLOSE. Fill oversized gaps with geometric-midpoint atoms until every
+    # adjacent ratio is <= max_ratio. (max_ratio=2.0 ~ 3 pts/octave: enough to
+    # localize the iso peak without over-parameterizing.)
+    while True:
+        g = np.sort(np.array(grid, dtype=np.float64))
+        ratios = g[1:] / g[:-1]
+        if len(ratios) == 0 or ratios.max() <= max_ratio:
+            break
+        j = int(np.argmax(ratios))
+        grid.append(float(np.sqrt(g[j] * g[j + 1])))
 
     return np.array(np.unique(grid), dtype=np.float64)
 

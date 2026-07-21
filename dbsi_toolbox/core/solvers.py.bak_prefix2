@@ -236,10 +236,7 @@ def build_direction_neighbor_graph(fiber_dirs, k=6):
 
 @njit(cache=True, fastmath=True)
 def select_dominant_directions(w_aniso, n_dirs, n_pairs, neighbor_idx,
-                               fiber_dirs, max_directions=2,
-                               min_weight_fraction=0.05,
-                               min_separation_cos=0.8192,
-                               min_peak_ratio=0.35):
+                               max_directions=2, min_weight_fraction=0.05):
     """
     Stage A output interpretation: identify which hemisphere directions
     carry meaningful, GEOMETRICALLY DISTINCT weight, collapsing across
@@ -251,27 +248,12 @@ def select_dominant_directions(w_aniso, n_dirs, n_pairs, neighbor_idx,
     only job is angular detection — see module docstring on why the
     per-pair centroid from Stage A is not trusted.
 
-    Detection is by LOCAL-MAXIMA peak-finding over the dictionary's
-    k-nearest-neighbour graph (`build_direction_neighbor_graph`), then
-    each local-maximum peak is scored by its ANGULAR-BASIN MASS (Voronoi
-    assignment: every direction's weight is added to the nearest peak's
-    basin), and peaks are accepted greedily in descending basin mass with
-    angular NON-MAXIMUM SUPPRESSION (a candidate within `min_separation`
-    of an already-accepted, stronger peak is suppressed as smearing skirt,
-    not a distinct population).
-
-    WHY BASIN MASS, NOT PEAK HEIGHT (fixed 2026-07-21) -------------------
-    The regularized Stage A NNLS + the (direction x AD/RD-pair) dictionary
-    SMEAR a single fiber's weight across several neighbouring columns.
-    Thresholding on a single direction's peak HEIGHT then rejects a
-    genuine but spread SECOND fiber (esp. a low-FA / demyelinated one):
-    on the tumor-like complex voxel the true 2nd fiber's peak height was
-    only ~3% of total (below min_weight_fraction=5%) while its angular
-    BASIN MASS was ~20% — clearly a real population. Thresholding on basin
-    mass recovers it. The NMS separation criterion keeps the original
-    protection against grid-quantisation smearing producing false N_POP>=2
-    (skirt peaks near the true one are suppressed), replacing the previous
-    reliance on peak-height alone.
+    Selection is by LOCAL-MAXIMA peak-finding over the dictionary's
+    k-nearest-neighbour graph (`build_direction_neighbor_graph`), not
+    global top-K ranking by weight -- see the module notes immediately
+    above this function for why: global top-K cannot distinguish a true
+    fiber's grid-quantisation smearing onto its own neighbours from a
+    genuine second population.
 
     Column ordering must match `core.basis.build_design_matrix_exhaustive`:
     pair-major, direction-minor (for p in pairs: for d in dirs: column).
@@ -286,41 +268,24 @@ def select_dominant_directions(w_aniso, n_dirs, n_pairs, neighbor_idx,
         Number of (AD, RD) pairs in the Stage A dictionary.
     neighbor_idx : array (n_dirs, k), int64
         Precomputed once per protocol via `build_direction_neighbor_graph`.
-    fiber_dirs : array (n_dirs, 3), float64
-        Unit direction vectors of the hemisphere dictionary (used for the
-        angular-basin assignment and the NMS separation test).
     max_directions : int
         Maximum number of fiber populations to report (1 for a single
         dominant tract, 2-3 to allow crossing-fiber detection).
     min_weight_fraction : float
-        A peak is only reported if its BASIN MASS exceeds this fraction of
-        the total anisotropic weight (filters numerical noise / spurious
-        near-zero peaks).
-    min_separation_cos : float
-        cos of the minimum angular separation between two accepted
-        populations. A candidate peak whose |cos| to an already-accepted
-        peak EXCEEDS this (i.e. angle SMALLER than the separation) is
-        suppressed as smearing skirt. Default 0.8192 = cos(35 deg).
-    min_peak_ratio : float
-        A secondary (non-dominant) population is only accepted if its basin
-        mass is at least this fraction of the DOMINANT population's basin
-        mass. Discriminates a genuine second fiber (carries a substantial
-        share of the dominant's weight) from a single fiber's smearing
-        skirt that noise pushed past `min_separation` (carries less). Set
-        from an empirical single-fiber-vs-crossing ratio sweep: the two
-        distributions overlap, so 0.35 trades ~7% false crossings on single
-        fibers for recovering the true 2nd fiber in ~40-80% of crossing
-        voxels (SNR 30-20). Default 0.35.
+        A direction is only reported if its summed weight exceeds this
+        fraction of the total anisotropic weight (filters numerical
+        noise / near-zero spurious directions).
 
     Returns
     -------
     dir_indices : array (max_directions,), int64
         Hemisphere-direction indices of the selected populations, sorted
-        by descending basin mass. Filled with -1 for unused slots.
+        by descending weight. Filled with -1 for unused slots if fewer
+        than max_directions populations clear both the local-maxima and
+        weight-threshold criteria.
     dir_weights : array (max_directions,), float64
-        ANGULAR-BASIN MASS (summed weight in each peak's Voronoi basin)
-        for each selected direction. 0.0 for unused slots. Used downstream
-        to split the total fiber fraction among populations.
+        Total weight (summed over all (AD,RD) pairs) for each selected
+        direction. 0.0 for unused slots.
     """
     dir_weight_totals = np.zeros(n_dirs, dtype=np.float64)
 
@@ -344,15 +309,16 @@ def select_dominant_directions(w_aniso, n_dirs, n_pairs, neighbor_idx,
     k = neighbor_idx.shape[1]
 
     # ── Local-maxima peak-finding ────────────────────────────────────
-    # A candidate counts as a peak if its weight exceeds ALL k geometric
-    # nearest neighbours'. Ties break toward the lower index (well-defined
-    # at exact zero). NOTE: the min-mass filter is applied LATER on basin
-    # mass, not here on peak height (a spread fiber's peak can be tiny).
+    # A candidate only counts as a detected population if its weight
+    # exceeds ALL of its k geometric nearest neighbours' weights. Ties
+    # are broken toward the lower index so that two exactly-tied
+    # neighbours don't both lose (mutual exclusion) or both win
+    # (double-count) — in practice a non-issue with continuous NNLS
+    # weights, but keeps the rule well-defined at exact zero.
     is_peak = np.zeros(n_dirs, dtype=np.bool_)
-    n_peaks = 0
     for d in range(n_dirs):
         wd = dir_weight_totals[d]
-        if wd <= 0.0:
+        if wd < threshold:
             continue
         peak = True
         for j in range(k):
@@ -363,81 +329,24 @@ def select_dominant_directions(w_aniso, n_dirs, n_pairs, neighbor_idx,
                 break
         if peak:
             is_peak[d] = True
-            n_peaks += 1
 
-    if n_peaks == 0:
-        return dir_indices, dir_weights
-
-    peak_idx = np.empty(n_peaks, dtype=np.int64)
-    t = 0
+    remaining = dir_weight_totals.copy()
     for d in range(n_dirs):
-        if is_peak[d]:
-            peak_idx[t] = d
-            t += 1
+        if not is_peak[d]:
+            remaining[d] = -1.0
 
-    # ── Angular-basin mass (Voronoi assignment to nearest peak) ──────
-    basin_mass = np.zeros(n_peaks, dtype=np.float64)
-    for d in range(n_dirs):
-        wd = dir_weight_totals[d]
-        if wd <= 0.0:
-            continue
-        best_adot = -1.0
-        best_pk = 0
-        for pk in range(n_peaks):
-            pi = peak_idx[pk]
-            dot = (fiber_dirs[d, 0] * fiber_dirs[pi, 0]
-                   + fiber_dirs[d, 1] * fiber_dirs[pi, 1]
-                   + fiber_dirs[d, 2] * fiber_dirs[pi, 2])
-            adot = dot if dot >= 0.0 else -dot
-            if adot > best_adot:
-                best_adot = adot
-                best_pk = pk
-        basin_mass[best_pk] += wd
-
-    # ── Greedy selection by basin mass + angular NMS ─────────────────
-    used = np.zeros(n_peaks, dtype=np.bool_)
-    n_sel = 0
-    while n_sel < max_directions:
+    for slot in range(max_directions):
+        best_idx = -1
         best_val = -1.0
-        best_pk = -1
-        for pk in range(n_peaks):
-            if used[pk]:
-                continue
-            if basin_mass[pk] > best_val:
-                best_val = basin_mass[pk]
-                best_pk = pk
-        if best_pk == -1:
+        for d in range(n_dirs):
+            if remaining[d] > best_val:
+                best_val = remaining[d]
+                best_idx = d
+        if best_idx == -1 or best_val < threshold:
             break
-        used[best_pk] = True
-        # peaks are consumed in descending mass order; once below the
-        # mass threshold, every remaining peak is too -> stop.
-        if basin_mass[best_pk] < threshold:
-            break
-        # Relative threshold: a non-dominant population must carry at least
-        # `min_peak_ratio` of the DOMINANT population's basin mass, else it
-        # is a single fiber's smearing skirt (noise-shifted past the NMS
-        # separation), not a distinct fiber. dir_weights[0] holds the
-        # dominant's basin mass once the first peak is accepted.
-        if n_sel >= 1 and basin_mass[best_pk] < min_peak_ratio * dir_weights[0]:
-            continue
-        # NMS: suppress a candidate too close to an already-accepted peak
-        # (smearing skirt of a stronger fiber, not a distinct population).
-        too_close = False
-        qi = peak_idx[best_pk]
-        for s in range(n_sel):
-            si = dir_indices[s]
-            dot = (fiber_dirs[si, 0] * fiber_dirs[qi, 0]
-                   + fiber_dirs[si, 1] * fiber_dirs[qi, 1]
-                   + fiber_dirs[si, 2] * fiber_dirs[qi, 2])
-            adot = dot if dot >= 0.0 else -dot
-            if adot > min_separation_cos:
-                too_close = True
-                break
-        if too_close:
-            continue
-        dir_indices[n_sel] = qi
-        dir_weights[n_sel] = basin_mass[best_pk]
-        n_sel += 1
+        dir_indices[slot] = best_idx
+        dir_weights[slot] = best_val
+        remaining[best_idx] = -1.0
 
     return dir_indices, dir_weights
 

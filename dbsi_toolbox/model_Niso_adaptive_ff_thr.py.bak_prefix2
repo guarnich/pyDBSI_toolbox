@@ -253,25 +253,6 @@ _MRDS_LM_MAX_ITER = 25
 # Explicit `direction_peak_k=` still overrides this scaling entirely.
 _DEFAULT_DIRECTION_PEAK_K = None  # None => n_dirs-scaled (see _default_direction_peak_k)
 
-# Minimum angular separation (deg) between two ACCEPTED fiber populations in
-# `select_dominant_directions`'s greedy basin-mass selection (non-maximum
-# suppression). A candidate peak closer than this to an already-accepted,
-# stronger peak is treated as that fiber's grid/regularization smearing skirt,
-# not a distinct population. 35 deg comfortably separates true crossings
-# (typically resolvable only down to ~30-45 deg at clinical SNR — see the
-# module 'MULTI-FIBER SCOPE' note) while absorbing the ~15-30 deg smearing
-# halo a single fiber leaves on neighbouring dictionary columns.
-_DEFAULT_MIN_SEPARATION_DEG = 35.0
-
-# Minimum ratio of a secondary population's angular-basin mass to the DOMINANT
-# population's basin mass for it to be accepted as a distinct fiber (rather
-# than a single fiber's smearing skirt that noise shifted past the separation
-# angle). Set from an empirical single-fiber-vs-crossing ratio sweep whose
-# distributions overlap: 0.35 keeps false crossings on single fibers to ~7%
-# while recovering the true 2nd fiber in ~40-80% of crossing voxels at SNR
-# 30-20. See `core.solvers.select_dominant_directions`.
-_DEFAULT_MIN_PEAK_RATIO = 0.35
-
 
 def _default_direction_peak_k(n_dirs):
     """
@@ -341,8 +322,7 @@ def analyse_protocol(bvals):
 @njit(parallel=True, cache=True, fastmath=True)
 def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         fiber_dirs, diff_pairs, n_dirs, iso_grid, b0_thr,
-                        fiber_threshold, min_weight_fraction, min_separation_cos,
-                        min_peak_ratio,
+                        fiber_threshold, min_weight_fraction,
                         enable_direction_refinement,
                         cone1_half_angle, n1_cone, cone2_half_angle, n2_cone,
                         neighbor_idx, max_fiber_populations, out):
@@ -445,9 +425,7 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
 
         if f_fib > fiber_threshold:
             dir_indices, dir_weights = select_dominant_directions(
-                w_aniso, n_dirs, n_pairs, neighbor_idx, fiber_dirs,
-                max_fiber_populations, min_weight_fraction, min_separation_cos,
-                min_peak_ratio
+                w_aniso, n_dirs, n_pairs, neighbor_idx, max_fiber_populations, min_weight_fraction
             )
 
             n_pop = 0
@@ -549,8 +527,7 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
 @njit(parallel=True, cache=True, fastmath=True)
 def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         fiber_dirs, diff_pairs, n_dirs, iso_grid, b0_thr,
-                        fiber_threshold, min_weight_fraction, min_separation_cos,
-                        min_peak_ratio,
+                        fiber_threshold, min_weight_fraction,
                         enable_direction_refinement,
                         cone1_half_angle, n1_cone, cone2_half_angle, n2_cone,
                         neighbor_idx, max_fiber_populations, out):
@@ -650,9 +627,7 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
 
         if f_fib > fiber_threshold:
             dir_indices, dir_weights = select_dominant_directions(
-                w_aniso, n_dirs, n_pairs, neighbor_idx, fiber_dirs,
-                max_fiber_populations, min_weight_fraction, min_separation_cos,
-                min_peak_ratio
+                w_aniso, n_dirs, n_pairs, neighbor_idx, max_fiber_populations, min_weight_fraction
             )
 
             n_pop = 0
@@ -860,8 +835,6 @@ class DBSI_Adaptive:
                  min_weight_fraction=0.05, force_n_iso=None,
                  max_fiber_populations=_DEFAULT_MAX_FIBER_POPULATIONS,
                  direction_peak_k=_DEFAULT_DIRECTION_PEAK_K,
-                 min_separation_deg=_DEFAULT_MIN_SEPARATION_DEG,
-                 min_peak_ratio=_DEFAULT_MIN_PEAK_RATIO,
                  enable_direction_refinement=True,
                  target_angular_resolution_deg=1.0):
         if max_fiber_populations not in (1, 2, 3):
@@ -887,8 +860,6 @@ class DBSI_Adaptive:
         self.force_n_iso = force_n_iso
         self.max_fiber_populations = max_fiber_populations
         self.direction_peak_k = direction_peak_k
-        self.min_separation_deg = min_separation_deg
-        self.min_peak_ratio = min_peak_ratio
         self.enable_direction_refinement = enable_direction_refinement
         self.target_angular_resolution_deg = target_angular_resolution_deg
 
@@ -1276,13 +1247,7 @@ class DBSI_Adaptive:
               f"[{model_mode}-ISO model, Stage A + Stage B "
               f"(single-fiber closed-form / MRDS joint up to "
               f"{self.max_fiber_populations} populations)]...")
-        if self.max_fiber_populations >= 2:
-            print(f"   Population detection: basin-mass local-maxima + angular "
-                  f"NMS (min separation {self.min_separation_deg:.0f} deg, "
-                  f"min basin mass {self.min_weight_fraction:.2f} of aniso weight, "
-                  f"2nd pop >= {self.min_peak_ratio:.2f} x dominant)")
 
-        _min_separation_cos = float(np.cos(np.radians(self.min_separation_deg)))
         _kernel = _fit_voxels_3iso_v3 if use_3iso else _fit_voxels_2iso_v3
 
         b0_thr = 100.0
@@ -1296,7 +1261,6 @@ class DBSI_Adaptive:
                     data_corr, coords[start:end], AtA_reg, At,
                     bvals, bvecs, fiber_dirs, diff_pairs, self.n_dirs, iso_grid,
                     b0_thr, self.fiber_threshold, self.min_weight_fraction,
-                    _min_separation_cos, self.min_peak_ratio,
                     self.enable_direction_refinement,
                     _cone1, _n1, _cone2, _n2,
                     neighbor_idx, self.max_fiber_populations, results

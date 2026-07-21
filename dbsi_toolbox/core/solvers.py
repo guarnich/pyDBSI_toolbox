@@ -239,7 +239,8 @@ def select_dominant_directions(w_aniso, n_dirs, n_pairs, neighbor_idx,
                                fiber_dirs, max_directions=2,
                                min_weight_fraction=0.05,
                                min_separation_cos=0.8192,
-                               min_peak_ratio=0.35):
+                               min_peak_ratio=0.35,
+                               min_dominant_concentration=0.35):
     """
     Stage A output interpretation: identify which hemisphere directions
     carry meaningful, GEOMETRICALLY DISTINCT weight, collapsing across
@@ -311,6 +312,21 @@ def select_dominant_directions(w_aniso, n_dirs, n_pairs, neighbor_idx,
         distributions overlap, so 0.35 trades ~7% false crossings on single
         fibers for recovering the true 2nd fiber in ~40-80% of crossing
         voxels (SNR 30-20). Default 0.35.
+    min_dominant_concentration : float
+        Minimum share of the TOTAL anisotropic weight that the dominant
+        basin must hold for ANY fiber population to be reported. A real
+        fiber concentrates its anisotropic weight along one direction
+        (dominant basin ~0.4-0.6 of total); spurious anisotropic weight
+        from isotropic (esp. restricted) leakage on a fiber-FREE voxel is
+        DIFFUSE (dominant basin only ~0.2-0.24, spread across many similar
+        peaks) and would otherwise be mis-read as a crossing (npop>=2,
+        since every diffuse basin passes the relative test). Below this
+        concentration the whole anisotropic block is treated as leakage and
+        NO population is returned (npop=0). Set from an empirical
+        pure-iso-vs-fiber concentration sweep (SNR30: clean gap pure-iso
+        p95~0.40 vs real-fiber p05~0.39; SNR15: overlap). 0.35 balances a
+        ~89% cut in pure-iso false crossings against keeping low-SNR fiber
+        detection. Default 0.35.
 
     Returns
     -------
@@ -393,6 +409,20 @@ def select_dominant_directions(w_aniso, n_dirs, n_pairs, neighbor_idx,
                 best_adot = adot
                 best_pk = pk
         basin_mass[best_pk] += wd
+
+    # ── Concentration gate: reject DIFFUSE anisotropic weight ────────
+    # A real fiber concentrates its weight in one basin; isotropic (esp.
+    # restricted) leakage on a fiber-free voxel spreads it across many
+    # near-equal basins. If no basin holds at least
+    # `min_dominant_concentration` of the total anisotropic weight, the
+    # whole block is leakage -> report NO population (npop=0), preventing
+    # the diffuse-leakage-as-crossing false positive.
+    max_basin = 0.0
+    for pk in range(n_peaks):
+        if basin_mass[pk] > max_basin:
+            max_basin = basin_mass[pk]
+    if max_basin < min_dominant_concentration * total_weight:
+        return dir_indices, dir_weights
 
     # ── Greedy selection by basin mass + angular NMS ─────────────────
     used = np.zeros(n_peaks, dtype=np.bool_)

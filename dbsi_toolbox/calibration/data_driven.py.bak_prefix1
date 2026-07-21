@@ -219,70 +219,6 @@ def select_lambda_iso_gcv(bvals, iso_grid, y_voxels, lambda_grid=None):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Noise-referenced ceiling for lambda_iso (discrepancy principle)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def lambda_iso_discrepancy_cap(bvals, iso_grid, y_iso_resid, sigma, lambda_grid):
-    """Largest lambda_iso whose isotropic-block residual still sits AT the
-    noise floor (discrepancy principle), used as an upper CEILING on the GCV
-    pick for lambda_iso.
-
-    WHY (low-SNR FF-leakage, discovered 2026-07-21 on the tumor-like complex
-    voxel) -----------------------------------------------------------------
-    `select_lambda_iso_gcv` minimises GCV over `lambda_grid` (default
-    logspace(-5, 1), i.e. max 10). On a noise-dominated fiber-subtracted iso
-    residual (low SNR), the GCV curve becomes monotone-decreasing in lambda
-    and its argmin RAILS at the grid maximum. That over-regularizes the iso
-    block so hard that every isotropic fraction is shrunk to ~0 and the fiber
-    fraction leaks to ~1.0 — the exact failure the grid-fix cured, returning
-    through the calibration. Empirically lambda_iso ran 0.29 (SNR30) -> 10.0
-    (SNR10), tracking the grid ceiling rather than any real optimum.
-
-    THE CEILING --------------------------------------------------------------
-    The discrepancy principle says the iso block should fit the iso residual
-    down to (not below) the noise level: mean ||y_iso_resid - A_iso w(lambda)||^2
-    == N*sigma^2. The residual is monotone increasing in lambda, so there is a
-    unique largest lambda meeting `residual^2 <= N*sigma^2`; beyond it the iso
-    block is UNDER-fitting real isotropic signal (throwing it away). That
-    lambda is a principled, noise-scaled ceiling: capping the GCV pick to it
-    prevents the rail-to-grid-max collapse while never forcing MORE
-    regularization than GCV already wanted at good SNR (there the GCV optimum
-    is well below this ceiling, so the cap is inert).
-
-    Returns
-    -------
-    float
-        The ceiling lambda. == lambda_grid.max() if even the largest lambda
-        keeps the residual within the noise floor (no iso signal above noise ->
-        no cap needed); == lambda_grid.min() if even minimal regularization
-        already exceeds the noise floor (poor fiber subtraction / sigma
-        mismatch -> stay permissive, i.e. do not over-regularize).
-    """
-    A_iso = build_isotropic_dictionary(bvals, iso_grid)
-    N, _ = A_iso.shape
-    U, s, _ = np.linalg.svd(A_iso, full_matrices=False)
-    s2 = s ** 2
-
-    y = np.atleast_2d(np.asarray(y_iso_resid, dtype=np.float64))
-    Uty = U.T @ y.T                       # (K, n_voxels)
-    y_norm2 = np.sum(y ** 2, axis=1)      # (n_voxels,)
-    target = N * sigma ** 2
-
-    lambda_grid = np.sort(np.asarray(lambda_grid, dtype=np.float64))
-    cap = float(lambda_grid[0])           # most-permissive fallback
-    for lam in lambda_grid:
-        filt = s2 / (s2 + lam)
-        fitted = filt[:, None] * Uty
-        resid2 = y_norm2 - 2 * np.sum(fitted * Uty, axis=0) + np.sum(fitted ** 2, axis=0)
-        resid2 = np.maximum(resid2, 0.0)
-        if np.mean(resid2) <= target:
-            cap = float(lam)              # still within noise floor -> allowed
-        else:
-            break                         # monotone: all larger lambda under-fit
-    return cap
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # DISCREPANCY PRINCIPLE — lambda_aniso
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -783,22 +719,9 @@ def select_lambdas_data_driven(bvals, bvecs, fiber_dirs, diff_pairs, iso_grid,
         w, _ = nnls_coordinate_descent(AtA_reg_prelim, At @ y2d[v], 0.0)
         y_iso_resid[v] = y2d[v] - A_aniso @ w[:n_aniso_cols]
 
-    lambda_iso_gcv, gcv_diag = select_lambda_iso_gcv(
+    lambda_iso, gcv_diag = select_lambda_iso_gcv(
         bvals, iso_grid, y_iso_resid, lambda_grid=lambda_iso_grid
     )
-
-    # ── NOISE-REFERENCED CEILING on lambda_iso (fix low-SNR FF-leakage) ─────
-    # At low SNR the GCV curve on the noise-dominated iso residual is monotone
-    # and its argmin rails at the grid maximum, over-regularizing the iso block
-    # until every isotropic fraction collapses to ~0 and FF leaks to ~1.0. The
-    # discrepancy principle gives a principled ceiling: the largest lambda_iso
-    # whose iso-block residual still matches the noise floor (N*sigma^2). Cap
-    # the GCV pick to it. At good SNR the GCV optimum is well below the ceiling,
-    # so this is inert; it only bites when GCV would otherwise diverge.
-    lambda_iso_cap = lambda_iso_discrepancy_cap(
-        bvals, iso_grid, y_iso_resid, sigma, gcv_diag['lambda_']
-    )
-    lambda_iso = min(lambda_iso_gcv, lambda_iso_cap)
 
     # ── lambda_aniso via discrepancy principle, using the refined lambda_iso.
     # (Uses the FULL signal — lambda_aniso governs the anisotropic fit.)
@@ -811,8 +734,6 @@ def select_lambdas_data_driven(bvals, bvecs, fiber_dirs, diff_pairs, iso_grid,
     diagnostics = dict(
         gcv=gcv_diag, discrepancy=disc_diag,
         lambda_iso_pass1=lambda_iso_pass1, lambda_aniso_pass1=lambda_aniso_pass1,
-        lambda_iso_gcv=lambda_iso_gcv, lambda_iso_cap=lambda_iso_cap,
-        lambda_iso_capped=(lambda_iso_cap < lambda_iso_gcv),
     )
 
     return lambda_aniso, lambda_iso, diagnostics

@@ -1098,6 +1098,12 @@ class DBSI_Adaptive:
                 )
                 print(f"   Data-driven result: lambda_aniso={self.lambda_aniso:.4f}, "
                       f"lambda_iso={self.lambda_iso:.4f}")
+                if _dd_diag.get('lambda_iso_capped'):
+                    print(f"   [lambda_iso ceiling] GCV wanted lambda_iso="
+                          f"{_dd_diag['lambda_iso_gcv']:.4f}; capped to the "
+                          f"noise-referenced discrepancy ceiling "
+                          f"{_dd_diag['lambda_iso_cap']:.4f} — prevents the low-SNR "
+                          f"isotropic collapse / FF leakage (GCV was railing).")
                 if _dd_diag.get('discrepancy', {}).get('floor_applied'):
                     _floor_comp = _dd_diag.get('discrepancy', {}).get('floor_component', 'unknown')
                     print(f"   [WARNING] Safety floor was applied to lambda_aniso "

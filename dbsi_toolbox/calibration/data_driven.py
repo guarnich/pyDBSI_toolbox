@@ -283,6 +283,148 @@ def lambda_iso_discrepancy_cap(bvals, iso_grid, y_iso_resid, sigma, lambda_grid)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Monte-Carlo NULL calibration — fiber-detection concentration gate
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _dominant_basin_concentration(w_aniso, n_dirs, n_pairs, fiber_dirs,
+                                  neighbor_idx):
+    """Fraction of the total anisotropic weight held by the LARGEST angular
+    Voronoi basin (basins seeded at the local-maxima of the per-direction
+    weight, assigned by nearest peak). This mirrors exactly the concentration
+    quantity gated in `core.solvers.select_dominant_directions`. Pure-python
+    (runs once at calibration, not per voxel).
+
+    Column ordering must match `build_design_matrix_exhaustive` (pair-major,
+    direction-minor): w_aniso[p*n_dirs + d].
+    """
+    dwt = np.asarray(w_aniso, dtype=np.float64).reshape(n_pairs, n_dirs).sum(axis=0)
+    total = float(dwt.sum())
+    if total < 1e-12:
+        return 0.0
+    k = neighbor_idx.shape[1]
+    peaks = []
+    for d in range(n_dirs):
+        wd = dwt[d]
+        if wd <= 0.0:
+            continue
+        is_pk = True
+        for j in range(k):
+            nb = neighbor_idx[d, j]
+            if dwt[nb] > wd or (dwt[nb] == wd and nb < d):
+                is_pk = False
+                break
+        if is_pk:
+            peaks.append(d)
+    if not peaks:
+        return 0.0
+    P = fiber_dirs[peaks]                          # (n_peaks, 3)
+    basins = np.zeros(len(peaks))
+    for d in range(n_dirs):
+        wd = dwt[d]
+        if wd <= 0.0:
+            continue
+        adots = np.abs(P @ fiber_dirs[d])
+        basins[int(np.argmax(adots))] += wd
+    return float(basins.max() / total)
+
+
+def calibrate_concentration_gate_mc(bvals, At, AtA_reg, n_aniso_cols, n_dirs,
+                                    n_pairs, fiber_dirs, neighbor_idx, sigma,
+                                    iso_d_range, fiber_threshold,
+                                    default_gate, percentile=99.0, n_mc=400,
+                                    b0_thr=100.0, seed=0):
+    """Monte-Carlo NULL calibration of the fiber-detection CONCENTRATION GATE
+    used by `core.solvers.select_dominant_directions`.
+
+    WHY (data-driven, protocol-general) ------------------------------------
+    The gate must separate a real fiber (anisotropic weight CONCENTRATED in
+    one angular basin) from isotropic (esp. restricted) leakage on a
+    fiber-FREE voxel (weight DIFFUSE across many basins). The concentration a
+    fiber-free voxel can produce is not a universal constant — it depends on
+    the protocol (b-values, direction count), the Stage-A dictionary, the
+    calibrated (lambda_aniso, lambda_iso) and the noise level. A fixed default
+    (0.35) was tuned on one synthetic protocol/SNR and will not generalise.
+
+    This routine builds the NULL distribution empirically FOR THE DATA AT
+    HAND: it draws `n_mc` purely-isotropic signals (random 1-3 component
+    log-uniform mixtures over `iso_d_range`), corrupts them with Rician noise
+    at the estimated `sigma`, applies the same noise-floor bias correction as
+    the pipeline, projects each onto the Stage-A anisotropic block with the
+    SAME regularized NNLS the fit uses, and measures the dominant-basin
+    concentration. The gate is the `percentile` (e.g. 99th) of that null: a
+    fiber-free voxel essentially never exceeds it, so anything above is a
+    genuinely concentrated fiber. Auto-adapts to protocol + dictionary +
+    lambdas + SNR.
+
+    Returns
+    -------
+    gate : float
+        Concentration threshold in [0, 1].
+    diag : dict
+        Null-distribution summary (percentile, n_mc, sigma, conc p50/p95/max).
+    """
+    bvals = np.asarray(bvals, dtype=np.float64)
+    rng = np.random.default_rng(seed)
+    N = len(bvals)
+    is_b0 = bvals < b0_thr
+    lo, hi = np.log(iso_d_range[0]), np.log(iso_d_range[1])
+
+    # Collect the concentration ONLY for fiber-free samples whose isotropic
+    # leakage into the anisotropic block exceeds fiber_threshold — i.e. the
+    # samples that would actually REACH the gate in the kernel (which only
+    # calls select_dominant_directions when f_fib > fiber_threshold). Samples
+    # well-explained by the iso block (f_fib below threshold) never trigger
+    # detection, so including them (and their degenerate near-zero-weight
+    # concentrations) would corrupt the null. Draw up to a bounded pool.
+    concs = []
+    max_attempts = n_mc * 8
+    for _ in range(max_attempts):
+        if len(concs) >= n_mc:
+            break
+        n_comp = int(rng.integers(1, 4))
+        Ds = np.exp(rng.uniform(lo, hi, n_comp))
+        fr = rng.dirichlet(np.ones(n_comp))
+        s = np.zeros(N)
+        for D, f in zip(Ds, fr):
+            s += f * np.exp(-bvals * D)
+        n1 = rng.normal(0.0, sigma, N)
+        n2 = rng.normal(0.0, sigma, N)
+        meas = np.sqrt((s + n1) ** 2 + n2 ** 2)
+        meas = np.sqrt(np.maximum(meas ** 2 - 2.0 * sigma ** 2, 0.0))  # bias corr
+        s0 = meas[is_b0].mean() if is_b0.any() else meas.mean()
+        if s0 < 1e-6:
+            continue
+        w, _ = nnls_coordinate_descent(AtA_reg, At @ (meas / s0), 0.0)
+        w_fib = float(w[:n_aniso_cols].sum())
+        w_tot = float(w.sum())
+        if w_tot < 1e-10 or (w_fib / w_tot) <= fiber_threshold:
+            continue                       # would not reach the gate in the kernel
+        concs.append(_dominant_basin_concentration(
+            w[:n_aniso_cols], n_dirs, n_pairs, fiber_dirs, neighbor_idx))
+
+    n_valid = len(concs)
+    if n_valid < 30:
+        # Too few fiber-free voxels leak past fiber_threshold for this
+        # protocol/SNR -> false crossings are already unlikely; the null is
+        # too sparse to trust. Fall back to the fixed default gate.
+        diag = dict(percentile=float(percentile), n_mc=int(n_mc),
+                    n_valid=n_valid, sigma=float(sigma), fell_back=True,
+                    conc_p50=float(np.median(concs)) if concs else float('nan'),
+                    conc_p95=float(np.percentile(concs, 95)) if concs else float('nan'),
+                    conc_max=float(np.max(concs)) if concs else float('nan'))
+        return float(default_gate), diag
+
+    concs = np.asarray(concs)
+    gate = float(np.percentile(concs, percentile))
+    diag = dict(percentile=float(percentile), n_mc=int(n_mc), n_valid=n_valid,
+                sigma=float(sigma), fell_back=False,
+                conc_p50=float(np.median(concs)),
+                conc_p95=float(np.percentile(concs, 95)),
+                conc_max=float(concs.max()))
+    return gate, diag
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # DISCREPANCY PRINCIPLE — lambda_aniso
 # ─────────────────────────────────────────────────────────────────────────────
 

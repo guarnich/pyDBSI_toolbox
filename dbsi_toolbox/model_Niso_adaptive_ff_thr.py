@@ -170,7 +170,9 @@ from .core.solvers import (
     estimate_AD_RD_mrds,          # NEW — MRDS multi-fiber Stage B
 )
 from .calibration.optimizer import optimize_hyperparameters, evaluate_lambda_pair
-from .calibration.data_driven import select_lambdas_data_driven, sample_calibration_voxels
+from .calibration.data_driven import (select_lambdas_data_driven,
+                                       sample_calibration_voxels,
+                                       calibrate_concentration_gate_mc)
 from .calibration.adaptive_n_iso import select_n_iso_svd, select_n_iso_bootstrap
 from .calibration.mc_sure import crosscheck_lambda_iso_sure, crosscheck_n_iso_sure
 
@@ -286,6 +288,20 @@ _DEFAULT_MIN_PEAK_RATIO = 0.35
 # (npop~1.0 vs 0.78 at 0.38). Raise toward 0.38 for max specificity at the cost
 # of low-SNR sensitivity. Below the gate -> npop=0.
 _DEFAULT_MIN_DOMINANT_CONCENTRATION = 0.35
+
+# Monte-Carlo null calibration of the concentration gate (see
+# calibration.data_driven.calibrate_concentration_gate_mc). When calibration
+# runs, the gate is set to this percentile of the dominant-basin concentration
+# a fiber-FREE (pure-isotropic) voxel produces under THIS
+# protocol/dictionary/lambdas/SNR — data-driven and protocol-general, replacing
+# the fixed default above. NOTE: the pure-iso and real-fiber concentration
+# distributions OVERLAP, so a too-high percentile enters the signal body and
+# suppresses REAL fibers: an empirical percentile sweep (SNR30) found the 99th
+# gives gate~0.54 and collapses true detection (T1 npop 1.7->0.22), while
+# 85-95th keep full detection AND suppress pure-iso (npop~0.07). 90th (gate
+# ~0.39) reproduces the hand-validated 0.35 behaviour, now data-driven.
+_CONCENTRATION_GATE_PERCENTILE = 90.0
+_CONCENTRATION_GATE_N_MC = 400
 
 
 def _default_direction_peak_k(n_dirs):
@@ -925,7 +941,9 @@ class DBSI_Adaptive:
            n_iso_method='bootstrap', n_bootstrap=50,
            run_mc_crosscheck=False, mc_crosscheck_n_mc=200,
            run_sure_crosscheck=False, sure_crosscheck_n_probes=15,
-           run_n_iso_sweep_diagnostic=False):
+           run_n_iso_sweep_diagnostic=False,
+           calibrate_concentration_gate=True,
+           concentration_gate_percentile=_CONCENTRATION_GATE_PERCENTILE):
         """
         Fit the v3 hybrid two-stage adaptive DBSI model (+ MRDS
         multi-fiber extension) to 4D diffusion MRI data.
@@ -956,15 +974,32 @@ class DBSI_Adaptive:
         self.b_max_ = b_max
         self.n_shells_ = n_shells
 
-        if self.force_n_iso is not None:
-            if self.force_n_iso == 3:
-                use_3iso = True
-                print(f"\n  [MODEL OVERRIDE] force_n_iso=3 requested by user.")
-            elif self.force_n_iso == 2:
-                use_3iso = False
-                print(f"\n  [MODEL OVERRIDE] force_n_iso=2 requested by user.")
+        if self.force_n_iso not in (None, 2, 3):
+            raise ValueError("force_n_iso must be 2, 3, or None.")
+
+        # DEFAULT is 2-ISO (RF + NRF). The hindered/water split (3-ISO) is an
+        # OPT-IN (force_n_iso=3) reserved for future high-b protocols that can
+        # actually separate HF from WF: at typical clinical b-max the WF is
+        # unreliable (near the noise floor) and is not used downstream — the
+        # meaningful non-restricted "tissue destructuring" signal is NRF
+        # (HF+WF merged). `analyse_protocol` still runs, but only to advise
+        # whether a requested 3-ISO is supported.
+        protocol_supports_3iso = use_3iso
+        if self.force_n_iso == 3:
+            use_3iso = True
+            print(f"\n  [MODEL] force_n_iso=3 — 3-ISO opt-in (RF + HF + WF).")
+            if not protocol_supports_3iso:
+                print(f"  [WARNING] analyse_protocol judged this acquisition "
+                      f"insufficient for a reliable HF/WF split: {reason} "
+                      f"The 3-ISO water fraction may be unstable.")
+        else:  # None (DEFAULT) or 2 -> 2-ISO
+            use_3iso = False
+            if self.force_n_iso == 2:
+                reason = "2-ISO model: force_n_iso=2 requested by user."
             else:
-                raise ValueError("force_n_iso must be 2, 3, or None.")
+                reason = ("2-ISO model (DEFAULT: RF + NRF, HF+WF merged). "
+                          "3-ISO (HF/WF split) is opt-in via force_n_iso=3. "
+                          f"[protocol_supports_3iso={protocol_supports_3iso}]")
 
         model_mode = 3 if use_3iso else 2
         self.model_mode_ = model_mode
@@ -1270,6 +1305,33 @@ class DBSI_Adaptive:
               f"Condition number (regularized): {cond:.2e}")
         print(f"   Regularization: lambda_aniso={self.lambda_aniso:.4f}  "
               f"lambda_iso={self.lambda_iso:.4f}")
+
+        # ── Data-driven fiber-detection concentration gate (MC null) ────────
+        # Set the concentration gate from a protocol/dictionary/lambda/SNR-
+        # specific pure-isotropic NULL rather than the fixed default. Always on
+        # during calibration for max_fiber_populations>=2; falls back to the
+        # constructor default otherwise.
+        if (run_calibration and calibrate_concentration_gate
+                and self.max_fiber_populations >= 2):
+            _iso_d_lo = max(self.iso_range[0], 0.1e-3)
+            _gate_mc, _gate_diag = calibrate_concentration_gate_mc(
+                bvals, At, AtA_reg, n_aniso_cols, self.n_dirs, n_pairs,
+                fiber_dirs, neighbor_idx, sigma,
+                iso_d_range=(_iso_d_lo, iso_d_max),
+                fiber_threshold=self.fiber_threshold,
+                default_gate=self.min_dominant_concentration,
+                percentile=concentration_gate_percentile,
+                n_mc=_CONCENTRATION_GATE_N_MC, b0_thr=100.0, seed=0,
+            )
+            _fb = " (FELL BACK to default: sparse null)" if _gate_diag.get('fell_back') else ""
+            print(f"   Concentration gate (MC null, {concentration_gate_percentile:.0f}th pct): "
+                  f"{_gate_mc:.3f}  [default {self.min_dominant_concentration:.3f}; "
+                  f"n_valid={_gate_diag.get('n_valid')}; null p50={_gate_diag['conc_p50']:.3f} "
+                  f"p95={_gate_diag['conc_p95']:.3f} max={_gate_diag['conc_max']:.3f}, "
+                  f"sigma={_gate_diag['sigma']:.4f}]{_fb}")
+            self.min_dominant_concentration_default_ = self.min_dominant_concentration
+            self.min_dominant_concentration = _gate_mc
+            self.concentration_gate_diag_ = _gate_diag
 
         # ── Allocate output (EXTENDED: 29 channels) ─────────────────────────
         results = np.zeros(data.shape[:3] + (self.N_CHANNELS,), dtype=np.float32)

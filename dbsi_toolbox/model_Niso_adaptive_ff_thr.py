@@ -172,7 +172,9 @@ from .core.solvers import (
 from .calibration.optimizer import optimize_hyperparameters, evaluate_lambda_pair
 from .calibration.data_driven import (select_lambdas_data_driven,
                                        sample_calibration_voxels,
-                                       calibrate_concentration_gate_mc)
+                                       calibrate_concentration_gate_mc,
+                                       build_rf_response_table,
+                                       apply_rf_correction)
 from .calibration.adaptive_n_iso import select_n_iso_svd, select_n_iso_bootstrap
 from .calibration.mc_sure import crosscheck_lambda_iso_sure, crosscheck_n_iso_sure
 
@@ -302,6 +304,17 @@ _DEFAULT_MIN_DOMINANT_CONCENTRATION = 0.35
 # ~0.39) reproduces the hand-validated 0.35 behaviour, now data-driven.
 _CONCENTRATION_GATE_PERCENTILE = 90.0
 _CONCENTRATION_GATE_N_MC = 400
+
+# Data-driven restricted-fraction bias correction (MC response function, see
+# calibration.data_driven.build_rf_response_table). Grid of true (FF, RF) over
+# which the per-dataset RF_est response is measured (nuisance marginalised) and
+# then inverted per voxel to correct the systematic restricted<->hindered leak.
+_RF_CORRECTION_FF_LEVELS = (0.0, 0.2, 0.4, 0.6)
+_RF_CORRECTION_RF_LEVELS = (0.0, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50)
+_RF_CORRECTION_REPS = 40
+# Below this recovered-RF knee the response is in its dead-zone (restricted
+# signal unrecoverable); used only to warn how many voxels are unresolved.
+_RF_DEADZONE_EST = 0.02
 
 
 def _default_direction_peak_k(n_dirs):
@@ -943,7 +956,8 @@ class DBSI_Adaptive:
            run_sure_crosscheck=False, sure_crosscheck_n_probes=15,
            run_n_iso_sweep_diagnostic=False,
            calibrate_concentration_gate=True,
-           concentration_gate_percentile=_CONCENTRATION_GATE_PERCENTILE):
+           concentration_gate_percentile=_CONCENTRATION_GATE_PERCENTILE,
+           correct_restricted_fraction=True):
         """
         Fit the v3 hybrid two-stage adaptive DBSI model (+ MRDS
         multi-fiber extension) to 4D diffusion MRI data.
@@ -1333,6 +1347,23 @@ class DBSI_Adaptive:
             self.min_dominant_concentration = _gate_mc
             self.concentration_gate_diag_ = _gate_diag
 
+        # ── Data-driven restricted-fraction response function (MC) ──────────
+        # Build the per-dataset RF_est(FF_true, RF_true) transfer table now (same
+        # lambdas/dictionary/sigma as the fit) so the systematic restricted<->
+        # hindered leak can be inverted per voxel after fitting. Applied later.
+        self.rf_response_table_ = None
+        if run_calibration and correct_restricted_fraction:
+            _ff_rows, _rf_lv, _rf_grid = build_rf_response_table(
+                bvals, bvecs, At, AtA_reg, n_aniso_cols, iso_grid, THRESH_RES,
+                sigma, ff_levels=_RF_CORRECTION_FF_LEVELS,
+                rf_levels=_RF_CORRECTION_RF_LEVELS, reps=_RF_CORRECTION_REPS,
+                b0_thr=100.0, seed=0,
+            )
+            self.rf_response_table_ = (_ff_rows, _rf_lv, _rf_grid)
+            print(f"   RF response function (data-driven bias correction): "
+                  f"FF rows {np.round(_ff_rows, 2).tolist()}, RF_true grid "
+                  f"{list(_RF_CORRECTION_RF_LEVELS)} -> table built.")
+
         # ── Allocate output (EXTENDED: 29 channels) ─────────────────────────
         results = np.zeros(data.shape[:3] + (self.N_CHANNELS,), dtype=np.float32)
         results[..., 5] = np.nan
@@ -1396,6 +1427,37 @@ class DBSI_Adaptive:
               f"({pct:.1f}%)")
         print(f"   Multi-population (N_POP>=2) voxels: {n_multi:,} "
               f"({pct_multi:.1f}% of fitted voxels)")
+
+        # ── Data-driven restricted-fraction bias correction (IN-PLACE) ──────
+        # Invert the per-dataset RF response function to undo the systematic
+        # restricted<->hindered under-recovery. The corrected value replaces the
+        # raw restricted_fraction (channel 1) as the best available estimate;
+        # the same delta is restored from the non-restricted band (HF in 3-ISO,
+        # NRF in 2-ISO) so FF + RF + NRF stays consistent.
+        if self.rf_response_table_ is not None:
+            _ff_rows, _rf_lv, _rf_grid = self.rf_response_table_
+            _m = mask & ~np.isnan(results[..., 1]) & ~np.isnan(results[..., 0])
+            if np.any(_m):
+                rf_raw = results[..., 1][_m].astype(np.float64)
+                ff_raw = results[..., 0][_m].astype(np.float64)
+                rf_corr = apply_rf_correction(rf_raw, ff_raw, _ff_rows, _rf_lv, _rf_grid)
+                delta = rf_corr - rf_raw
+                _rf_slice = results[..., 1]; _rf_slice[_m] = rf_corr.astype(np.float32)
+                _nrf_ch = 2 if use_3iso else 4
+                _nrf_slice = results[..., _nrf_ch]
+                _nrf_slice[_m] = np.clip(_nrf_slice[_m].astype(np.float64) - delta,
+                                         0.0, 1.0).astype(np.float32)
+                n_corr = int(_m.sum())
+                n_dead = int(np.sum(rf_raw < _RF_DEADZONE_EST))
+                print(f"   RF bias correction (data-driven) applied to {n_corr:,} voxels: "
+                      f"mean restricted_fraction {float(rf_raw.mean()):.3f} -> "
+                      f"{float(rf_corr.mean()):.3f}.")
+                if n_dead > 0:
+                    print(f"   [WARNING] {n_dead:,} voxels "
+                          f"({100.0 * n_dead / max(n_corr, 1):.0f}%) have raw RF < "
+                          f"{_RF_DEADZONE_EST:.2f} (response dead-zone): their restricted "
+                          f"signal is below the b-max detection limit, so the corrected "
+                          f"value is a lower bound, not a reliable point estimate.")
         print(f"\n{'='*70}\n")
 
         return results, model_mode

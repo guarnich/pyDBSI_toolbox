@@ -425,6 +425,151 @@ def calibrate_concentration_gate_mc(bvals, At, AtA_reg, n_aniso_cols, n_dirs,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Monte-Carlo RESPONSE FUNCTION — data-driven restricted-fraction correction
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _mc_signal(bvals, bvecs, iso_comps, fibers, sigma, rng, b0_thr=100.0):
+    """One Rician-noised, bias-corrected, S0-normalised synthetic voxel.
+    iso_comps: list of (fraction, D). fibers: list of (fraction, dir, AD, RD)."""
+    N = len(bvals)
+    s = np.zeros(N)
+    for f, D in iso_comps:
+        s += f * np.exp(-bvals * D)
+    for f, fdir, ad, rd in fibers:
+        cos2 = (bvecs @ fdir) ** 2
+        dapp = rd + (ad - rd) * cos2
+        contrib = f * np.exp(-bvals * dapp)
+        contrib[bvals < b0_thr] = f            # b~0: no attenuation
+        s += contrib
+    n1 = rng.normal(0.0, sigma, N)
+    n2 = rng.normal(0.0, sigma, N)
+    meas = np.sqrt((s + n1) ** 2 + n2 ** 2)
+    meas = np.sqrt(np.maximum(meas ** 2 - 2.0 * sigma ** 2, 0.0))
+    s0 = meas[bvals < b0_thr].mean() if (bvals < b0_thr).any() else meas.mean()
+    return meas / s0 if s0 > 1e-6 else meas
+
+
+def build_rf_response_table(bvals, bvecs, At, AtA_reg, n_aniso_cols, iso_grid,
+                            thresh_res, sigma, ff_levels, rf_levels, reps=40,
+                            b0_thr=100.0, seed=0,
+                            restricted_d_range=(0.1e-3, 0.28e-3),
+                            hindered_d_range=(0.4e-3, 2.5e-3),
+                            water_d_range=(3.0e-3, 5.0e-3),
+                            fiber_ad_range=(1.2e-3, 2.0e-3),
+                            fiber_rd_range=(0.1e-3, 0.8e-3)):
+    """Build the per-dataset RESPONSE FUNCTION for the restricted fraction.
+
+    WHY (data-driven bias correction) --------------------------------------
+    At clinical b-max the estimated restricted fraction (RF) is systematically
+    UNDER-recovered: the D~0.15e-3 signal is partly absorbed by the hindered
+    band (and, in fiber voxels, the fiber block). An RF_true -> RF_est transfer
+    was measured to be MONOTONE, smooth and low-variance -> the systematic
+    part is INVERTIBLE. This routine measures that transfer FOR THE DATA AT
+    HAND (same protocol, dictionary, calibrated lambdas via AtA_reg, and
+    estimated noise sigma), so the correction re-tunes to every protocol/SNR.
+
+    For a grid of (true fiber fraction FF, true restricted fraction RF) it
+    draws `reps` synthetic voxels with the restricted D and ALL nuisance
+    (hindered/water split + Ds, fiber count/directions/diffusivities)
+    randomised — i.e. the nuisance is MARGINALISED — corrupts them with Rician
+    noise at `sigma`, projects onto the Stage-A block with the SAME regularized
+    NNLS the fit uses, and records the mean recovered RF_est (and mean FF_est).
+    The result is a table RF_est[FF_true row, RF_true col] that
+    `apply_rf_correction` inverts per voxel.
+
+    Returns
+    -------
+    ff_est_rows : ndarray (n_ff,)   mean recovered FF for each FF_true row
+    rf_levels   : ndarray (n_rf,)   the true-RF grid (columns)
+    rf_est_grid : ndarray (n_ff, n_rf)  mean recovered RF (NaN where FF+RF>~1)
+    """
+    bvals = np.asarray(bvals, dtype=np.float64)
+    bvecs = np.asarray(bvecs, dtype=np.float64)
+    rng = np.random.default_rng(seed)
+    iso_D = np.asarray(iso_grid, dtype=np.float64)
+    res_mask = iso_D <= thresh_res
+    ff_levels = np.asarray(ff_levels, dtype=np.float64)
+    rf_levels = np.asarray(rf_levels, dtype=np.float64)
+
+    rf_est_grid = np.full((len(ff_levels), len(rf_levels)), np.nan)
+    ff_est_acc = np.zeros(len(ff_levels))
+    ff_est_cnt = np.zeros(len(ff_levels))
+
+    def _rand_dir():
+        v = rng.normal(size=3)
+        return v / np.linalg.norm(v)
+
+    for j, ff in enumerate(ff_levels):
+        for i, rf in enumerate(rf_levels):
+            if ff + rf > 0.95:
+                continue
+            rf_acc = 0.0
+            for _ in range(reps):
+                iso_comps = []
+                if rf > 0:
+                    iso_comps.append((rf, rng.uniform(*restricted_d_range)))
+                rem = max(1.0 - rf - ff, 0.0)
+                hf = rem * rng.uniform(0.4, 0.95)
+                wf = rem - hf
+                if hf > 0:
+                    iso_comps.append((hf, rng.uniform(*hindered_d_range)))
+                if wf > 0:
+                    iso_comps.append((wf, rng.uniform(*water_d_range)))
+                fibers = []
+                if ff > 1e-6:
+                    nf = int(rng.integers(1, 3))
+                    fr = rng.dirichlet(np.ones(nf)) * ff
+                    for kf in range(nf):
+                        ad = rng.uniform(*fiber_ad_range)
+                        rd = rng.uniform(fiber_rd_range[0], min(fiber_rd_range[1], ad / 1.2))
+                        fibers.append((float(fr[kf]), _rand_dir(), ad, rd))
+                y = _mc_signal(bvals, bvecs, iso_comps, fibers, sigma, rng, b0_thr)
+                w, _ = nnls_coordinate_descent(AtA_reg, At @ y, 0.0)
+                tot = float(w.sum())
+                if tot < 1e-10:
+                    continue
+                rf_acc += float(w[n_aniso_cols:][res_mask].sum()) / tot
+                ff_est_acc[j] += float(w[:n_aniso_cols].sum()) / tot
+                ff_est_cnt[j] += 1
+            rf_est_grid[j, i] = rf_acc / reps
+    ff_est_rows = ff_est_acc / np.maximum(ff_est_cnt, 1)
+    return ff_est_rows, rf_levels, rf_est_grid
+
+
+def apply_rf_correction(rf_obs, ff_obs, ff_est_rows, rf_levels, rf_est_grid):
+    """Invert the RF response table (`build_rf_response_table`) per voxel:
+    map the OBSERVED (RF_est, FF_est) back to the RF_true that produced it.
+    Vectorised over voxels. Values below the response's dead-zone map toward 0
+    (the restricted signal was unrecoverable there — flag separately).
+
+    Returns the corrected RF array (same shape as rf_obs)."""
+    rf_obs = np.asarray(rf_obs, dtype=np.float64)
+    ff_obs = np.asarray(ff_obs, dtype=np.float64)
+    rf_levels = np.asarray(rf_levels, dtype=np.float64)
+    n_rows = len(ff_est_rows)
+
+    # Per-row inversion: RF_true = interp(RF_obs; xp=monotone RF_est_row, fp=RF_true)
+    per_row = np.empty((n_rows, rf_obs.size))
+    for j in range(n_rows):
+        row = rf_est_grid[j]
+        valid = ~np.isnan(row)
+        xp = np.maximum.accumulate(row[valid])          # enforce non-decreasing
+        fp = rf_levels[valid]
+        per_row[j] = np.interp(rf_obs, xp, fp)
+
+    # Interpolate across FF rows (vectorised linear).
+    order = np.argsort(ff_est_rows)
+    ffr = np.asarray(ff_est_rows)[order]
+    per_row = per_row[order]
+    idx = np.clip(np.searchsorted(ffr, ff_obs) - 1, 0, n_rows - 2)
+    f0 = ffr[idx]; f1 = ffr[idx + 1]
+    wgt = np.clip((ff_obs - f0) / np.maximum(f1 - f0, 1e-9), 0.0, 1.0)
+    cols = np.arange(rf_obs.size)
+    corrected = per_row[idx, cols] * (1.0 - wgt) + per_row[idx + 1, cols] * wgt
+    return np.clip(corrected, 0.0, 1.0)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # DISCREPANCY PRINCIPLE — lambda_aniso
 # ─────────────────────────────────────────────────────────────────────────────
 

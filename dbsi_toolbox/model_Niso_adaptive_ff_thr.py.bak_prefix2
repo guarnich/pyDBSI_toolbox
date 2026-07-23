@@ -170,11 +170,7 @@ from .core.solvers import (
     estimate_AD_RD_mrds,          # NEW — MRDS multi-fiber Stage B
 )
 from .calibration.optimizer import optimize_hyperparameters, evaluate_lambda_pair
-from .calibration.data_driven import (select_lambdas_data_driven,
-                                       sample_calibration_voxels,
-                                       calibrate_concentration_gate_mc,
-                                       build_rf_response_table,
-                                       apply_rf_correction)
+from .calibration.data_driven import select_lambdas_data_driven, sample_calibration_voxels
 from .calibration.adaptive_n_iso import select_n_iso_svd, select_n_iso_bootstrap
 from .calibration.mc_sure import crosscheck_lambda_iso_sure, crosscheck_n_iso_sure
 
@@ -257,65 +253,6 @@ _MRDS_LM_MAX_ITER = 25
 # Explicit `direction_peak_k=` still overrides this scaling entirely.
 _DEFAULT_DIRECTION_PEAK_K = None  # None => n_dirs-scaled (see _default_direction_peak_k)
 
-# Minimum angular separation (deg) between two ACCEPTED fiber populations in
-# `select_dominant_directions`'s greedy basin-mass selection (non-maximum
-# suppression). A candidate peak closer than this to an already-accepted,
-# stronger peak is treated as that fiber's grid/regularization smearing skirt,
-# not a distinct population. 35 deg comfortably separates true crossings
-# (typically resolvable only down to ~30-45 deg at clinical SNR — see the
-# module 'MULTI-FIBER SCOPE' note) while absorbing the ~15-30 deg smearing
-# halo a single fiber leaves on neighbouring dictionary columns.
-_DEFAULT_MIN_SEPARATION_DEG = 35.0
-
-# Minimum ratio of a secondary population's angular-basin mass to the DOMINANT
-# population's basin mass for it to be accepted as a distinct fiber (rather
-# than a single fiber's smearing skirt that noise shifted past the separation
-# angle). Set from an empirical single-fiber-vs-crossing ratio sweep whose
-# distributions overlap: 0.35 keeps false crossings on single fibers to ~7%
-# while recovering the true 2nd fiber in ~40-80% of crossing voxels at SNR
-# 30-20. See `core.solvers.select_dominant_directions`.
-_DEFAULT_MIN_PEAK_RATIO = 0.35
-
-# Minimum share of TOTAL anisotropic weight the dominant angular basin must
-# hold for ANY fiber population to be reported (concentration gate in
-# `select_dominant_directions`). A real fiber concentrates its weight in one
-# basin (~0.4-0.6 of total at SNR>=30); diffuse anisotropic weight from
-# isotropic (esp. restricted) leakage on a fiber-FREE voxel spreads across many
-# near-equal basins (dominant ~0.2-0.24) and would otherwise be mis-read as a
-# crossing (npop>=2). Empirical pure-iso-vs-fiber concentration sweep: at SNR30
-# a clean gap (pure-iso p95~0.40, real-fiber p05~0.39); at SNR15 the two
-# OVERLAP (noise diffuses real fibers down to ~0.25-0.36), so no gate perfectly
-# separates there. 0.35 is the chosen balance: cuts the pure-iso false crossing
-# by ~89% (npop 2.0->0.22) while KEEPING low-SNR (SNR15) fiber detection
-# (npop~1.0 vs 0.78 at 0.38). Raise toward 0.38 for max specificity at the cost
-# of low-SNR sensitivity. Below the gate -> npop=0.
-_DEFAULT_MIN_DOMINANT_CONCENTRATION = 0.35
-
-# Monte-Carlo null calibration of the concentration gate (see
-# calibration.data_driven.calibrate_concentration_gate_mc). When calibration
-# runs, the gate is set to this percentile of the dominant-basin concentration
-# a fiber-FREE (pure-isotropic) voxel produces under THIS
-# protocol/dictionary/lambdas/SNR — data-driven and protocol-general, replacing
-# the fixed default above. NOTE: the pure-iso and real-fiber concentration
-# distributions OVERLAP, so a too-high percentile enters the signal body and
-# suppresses REAL fibers: an empirical percentile sweep (SNR30) found the 99th
-# gives gate~0.54 and collapses true detection (T1 npop 1.7->0.22), while
-# 85-95th keep full detection AND suppress pure-iso (npop~0.07). 90th (gate
-# ~0.39) reproduces the hand-validated 0.35 behaviour, now data-driven.
-_CONCENTRATION_GATE_PERCENTILE = 90.0
-_CONCENTRATION_GATE_N_MC = 400
-
-# Data-driven restricted-fraction bias correction (MC response function, see
-# calibration.data_driven.build_rf_response_table). Grid of true (FF, RF) over
-# which the per-dataset RF_est response is measured (nuisance marginalised) and
-# then inverted per voxel to correct the systematic restricted<->hindered leak.
-_RF_CORRECTION_FF_LEVELS = (0.0, 0.2, 0.4, 0.6)
-_RF_CORRECTION_RF_LEVELS = (0.0, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50)
-_RF_CORRECTION_REPS = 40
-# Below this recovered-RF knee the response is in its dead-zone (restricted
-# signal unrecoverable); used only to warn how many voxels are unresolved.
-_RF_DEADZONE_EST = 0.02
-
 
 def _default_direction_peak_k(n_dirs):
     """
@@ -385,8 +322,7 @@ def analyse_protocol(bvals):
 @njit(parallel=True, cache=True, fastmath=True)
 def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         fiber_dirs, diff_pairs, n_dirs, iso_grid, b0_thr,
-                        fiber_threshold, min_weight_fraction, min_separation_cos,
-                        min_peak_ratio, min_dominant_concentration,
+                        fiber_threshold, min_weight_fraction,
                         enable_direction_refinement,
                         cone1_half_angle, n1_cone, cone2_half_angle, n2_cone,
                         neighbor_idx, max_fiber_populations, out):
@@ -489,9 +425,7 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
 
         if f_fib > fiber_threshold:
             dir_indices, dir_weights = select_dominant_directions(
-                w_aniso, n_dirs, n_pairs, neighbor_idx, fiber_dirs,
-                max_fiber_populations, min_weight_fraction, min_separation_cos,
-                min_peak_ratio, min_dominant_concentration
+                w_aniso, n_dirs, n_pairs, neighbor_idx, max_fiber_populations, min_weight_fraction
             )
 
             n_pop = 0
@@ -593,8 +527,7 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
 @njit(parallel=True, cache=True, fastmath=True)
 def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         fiber_dirs, diff_pairs, n_dirs, iso_grid, b0_thr,
-                        fiber_threshold, min_weight_fraction, min_separation_cos,
-                        min_peak_ratio, min_dominant_concentration,
+                        fiber_threshold, min_weight_fraction,
                         enable_direction_refinement,
                         cone1_half_angle, n1_cone, cone2_half_angle, n2_cone,
                         neighbor_idx, max_fiber_populations, out):
@@ -694,9 +627,7 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
 
         if f_fib > fiber_threshold:
             dir_indices, dir_weights = select_dominant_directions(
-                w_aniso, n_dirs, n_pairs, neighbor_idx, fiber_dirs,
-                max_fiber_populations, min_weight_fraction, min_separation_cos,
-                min_peak_ratio, min_dominant_concentration
+                w_aniso, n_dirs, n_pairs, neighbor_idx, max_fiber_populations, min_weight_fraction
             )
 
             n_pop = 0
@@ -904,9 +835,6 @@ class DBSI_Adaptive:
                  min_weight_fraction=0.05, force_n_iso=None,
                  max_fiber_populations=_DEFAULT_MAX_FIBER_POPULATIONS,
                  direction_peak_k=_DEFAULT_DIRECTION_PEAK_K,
-                 min_separation_deg=_DEFAULT_MIN_SEPARATION_DEG,
-                 min_peak_ratio=_DEFAULT_MIN_PEAK_RATIO,
-                 min_dominant_concentration=_DEFAULT_MIN_DOMINANT_CONCENTRATION,
                  enable_direction_refinement=True,
                  target_angular_resolution_deg=1.0):
         if max_fiber_populations not in (1, 2, 3):
@@ -932,9 +860,6 @@ class DBSI_Adaptive:
         self.force_n_iso = force_n_iso
         self.max_fiber_populations = max_fiber_populations
         self.direction_peak_k = direction_peak_k
-        self.min_separation_deg = min_separation_deg
-        self.min_peak_ratio = min_peak_ratio
-        self.min_dominant_concentration = min_dominant_concentration
         self.enable_direction_refinement = enable_direction_refinement
         self.target_angular_resolution_deg = target_angular_resolution_deg
 
@@ -954,10 +879,7 @@ class DBSI_Adaptive:
            n_iso_method='bootstrap', n_bootstrap=50,
            run_mc_crosscheck=False, mc_crosscheck_n_mc=200,
            run_sure_crosscheck=False, sure_crosscheck_n_probes=15,
-           run_n_iso_sweep_diagnostic=False,
-           calibrate_concentration_gate=True,
-           concentration_gate_percentile=_CONCENTRATION_GATE_PERCENTILE,
-           correct_restricted_fraction=True):
+           run_n_iso_sweep_diagnostic=False):
         """
         Fit the v3 hybrid two-stage adaptive DBSI model (+ MRDS
         multi-fiber extension) to 4D diffusion MRI data.
@@ -988,32 +910,15 @@ class DBSI_Adaptive:
         self.b_max_ = b_max
         self.n_shells_ = n_shells
 
-        if self.force_n_iso not in (None, 2, 3):
-            raise ValueError("force_n_iso must be 2, 3, or None.")
-
-        # DEFAULT is 2-ISO (RF + NRF). The hindered/water split (3-ISO) is an
-        # OPT-IN (force_n_iso=3) reserved for future high-b protocols that can
-        # actually separate HF from WF: at typical clinical b-max the WF is
-        # unreliable (near the noise floor) and is not used downstream — the
-        # meaningful non-restricted "tissue destructuring" signal is NRF
-        # (HF+WF merged). `analyse_protocol` still runs, but only to advise
-        # whether a requested 3-ISO is supported.
-        protocol_supports_3iso = use_3iso
-        if self.force_n_iso == 3:
-            use_3iso = True
-            print(f"\n  [MODEL] force_n_iso=3 — 3-ISO opt-in (RF + HF + WF).")
-            if not protocol_supports_3iso:
-                print(f"  [WARNING] analyse_protocol judged this acquisition "
-                      f"insufficient for a reliable HF/WF split: {reason} "
-                      f"The 3-ISO water fraction may be unstable.")
-        else:  # None (DEFAULT) or 2 -> 2-ISO
-            use_3iso = False
-            if self.force_n_iso == 2:
-                reason = "2-ISO model: force_n_iso=2 requested by user."
+        if self.force_n_iso is not None:
+            if self.force_n_iso == 3:
+                use_3iso = True
+                print(f"\n  [MODEL OVERRIDE] force_n_iso=3 requested by user.")
+            elif self.force_n_iso == 2:
+                use_3iso = False
+                print(f"\n  [MODEL OVERRIDE] force_n_iso=2 requested by user.")
             else:
-                reason = ("2-ISO model (DEFAULT: RF + NRF, HF+WF merged). "
-                          "3-ISO (HF/WF split) is opt-in via force_n_iso=3. "
-                          f"[protocol_supports_3iso={protocol_supports_3iso}]")
+                raise ValueError("force_n_iso must be 2, 3, or None.")
 
         model_mode = 3 if use_3iso else 2
         self.model_mode_ = model_mode
@@ -1320,50 +1225,6 @@ class DBSI_Adaptive:
         print(f"   Regularization: lambda_aniso={self.lambda_aniso:.4f}  "
               f"lambda_iso={self.lambda_iso:.4f}")
 
-        # ── Data-driven fiber-detection concentration gate (MC null) ────────
-        # Set the concentration gate from a protocol/dictionary/lambda/SNR-
-        # specific pure-isotropic NULL rather than the fixed default. Always on
-        # during calibration for max_fiber_populations>=2; falls back to the
-        # constructor default otherwise.
-        if (run_calibration and calibrate_concentration_gate
-                and self.max_fiber_populations >= 2):
-            _iso_d_lo = max(self.iso_range[0], 0.1e-3)
-            _gate_mc, _gate_diag = calibrate_concentration_gate_mc(
-                bvals, At, AtA_reg, n_aniso_cols, self.n_dirs, n_pairs,
-                fiber_dirs, neighbor_idx, sigma,
-                iso_d_range=(_iso_d_lo, iso_d_max),
-                fiber_threshold=self.fiber_threshold,
-                default_gate=self.min_dominant_concentration,
-                percentile=concentration_gate_percentile,
-                n_mc=_CONCENTRATION_GATE_N_MC, b0_thr=100.0, seed=0,
-            )
-            _fb = " (FELL BACK to default: sparse null)" if _gate_diag.get('fell_back') else ""
-            print(f"   Concentration gate (MC null, {concentration_gate_percentile:.0f}th pct): "
-                  f"{_gate_mc:.3f}  [default {self.min_dominant_concentration:.3f}; "
-                  f"n_valid={_gate_diag.get('n_valid')}; null p50={_gate_diag['conc_p50']:.3f} "
-                  f"p95={_gate_diag['conc_p95']:.3f} max={_gate_diag['conc_max']:.3f}, "
-                  f"sigma={_gate_diag['sigma']:.4f}]{_fb}")
-            self.min_dominant_concentration_default_ = self.min_dominant_concentration
-            self.min_dominant_concentration = _gate_mc
-            self.concentration_gate_diag_ = _gate_diag
-
-        # ── Data-driven restricted-fraction response function (MC) ──────────
-        # Build the per-dataset RF_est(FF_true, RF_true) transfer table now (same
-        # lambdas/dictionary/sigma as the fit) so the systematic restricted<->
-        # hindered leak can be inverted per voxel after fitting. Applied later.
-        self.rf_response_table_ = None
-        if run_calibration and correct_restricted_fraction:
-            _ff_rows, _rf_lv, _rf_grid = build_rf_response_table(
-                bvals, bvecs, At, AtA_reg, n_aniso_cols, iso_grid, THRESH_RES,
-                sigma, ff_levels=_RF_CORRECTION_FF_LEVELS,
-                rf_levels=_RF_CORRECTION_RF_LEVELS, reps=_RF_CORRECTION_REPS,
-                b0_thr=100.0, seed=0,
-            )
-            self.rf_response_table_ = (_ff_rows, _rf_lv, _rf_grid)
-            print(f"   RF response function (data-driven bias correction): "
-                  f"FF rows {np.round(_ff_rows, 2).tolist()}, RF_true grid "
-                  f"{list(_RF_CORRECTION_RF_LEVELS)} -> table built.")
-
         # ── Allocate output (EXTENDED: 29 channels) ─────────────────────────
         results = np.zeros(data.shape[:3] + (self.N_CHANNELS,), dtype=np.float32)
         results[..., 5] = np.nan
@@ -1386,14 +1247,7 @@ class DBSI_Adaptive:
               f"[{model_mode}-ISO model, Stage A + Stage B "
               f"(single-fiber closed-form / MRDS joint up to "
               f"{self.max_fiber_populations} populations)]...")
-        if self.max_fiber_populations >= 2:
-            print(f"   Population detection: basin-mass local-maxima + angular "
-                  f"NMS (min separation {self.min_separation_deg:.0f} deg, "
-                  f"min basin mass {self.min_weight_fraction:.2f} of aniso weight, "
-                  f"2nd pop >= {self.min_peak_ratio:.2f} x dominant, "
-                  f"concentration gate {self.min_dominant_concentration:.2f})")
 
-        _min_separation_cos = float(np.cos(np.radians(self.min_separation_deg)))
         _kernel = _fit_voxels_3iso_v3 if use_3iso else _fit_voxels_2iso_v3
 
         b0_thr = 100.0
@@ -1407,8 +1261,6 @@ class DBSI_Adaptive:
                     data_corr, coords[start:end], AtA_reg, At,
                     bvals, bvecs, fiber_dirs, diff_pairs, self.n_dirs, iso_grid,
                     b0_thr, self.fiber_threshold, self.min_weight_fraction,
-                    _min_separation_cos, self.min_peak_ratio,
-                    self.min_dominant_concentration,
                     self.enable_direction_refinement,
                     _cone1, _n1, _cone2, _n2,
                     neighbor_idx, self.max_fiber_populations, results
@@ -1427,37 +1279,6 @@ class DBSI_Adaptive:
               f"({pct:.1f}%)")
         print(f"   Multi-population (N_POP>=2) voxels: {n_multi:,} "
               f"({pct_multi:.1f}% of fitted voxels)")
-
-        # ── Data-driven restricted-fraction bias correction (IN-PLACE) ──────
-        # Invert the per-dataset RF response function to undo the systematic
-        # restricted<->hindered under-recovery. The corrected value replaces the
-        # raw restricted_fraction (channel 1) as the best available estimate;
-        # the same delta is restored from the non-restricted band (HF in 3-ISO,
-        # NRF in 2-ISO) so FF + RF + NRF stays consistent.
-        if self.rf_response_table_ is not None:
-            _ff_rows, _rf_lv, _rf_grid = self.rf_response_table_
-            _m = mask & ~np.isnan(results[..., 1]) & ~np.isnan(results[..., 0])
-            if np.any(_m):
-                rf_raw = results[..., 1][_m].astype(np.float64)
-                ff_raw = results[..., 0][_m].astype(np.float64)
-                rf_corr = apply_rf_correction(rf_raw, ff_raw, _ff_rows, _rf_lv, _rf_grid)
-                delta = rf_corr - rf_raw
-                _rf_slice = results[..., 1]; _rf_slice[_m] = rf_corr.astype(np.float32)
-                _nrf_ch = 2 if use_3iso else 4
-                _nrf_slice = results[..., _nrf_ch]
-                _nrf_slice[_m] = np.clip(_nrf_slice[_m].astype(np.float64) - delta,
-                                         0.0, 1.0).astype(np.float32)
-                n_corr = int(_m.sum())
-                n_dead = int(np.sum(rf_raw < _RF_DEADZONE_EST))
-                print(f"   RF bias correction (data-driven) applied to {n_corr:,} voxels: "
-                      f"mean restricted_fraction {float(rf_raw.mean()):.3f} -> "
-                      f"{float(rf_corr.mean()):.3f}.")
-                if n_dead > 0:
-                    print(f"   [WARNING] {n_dead:,} voxels "
-                          f"({100.0 * n_dead / max(n_corr, 1):.0f}%) have raw RF < "
-                          f"{_RF_DEADZONE_EST:.2f} (response dead-zone): their restricted "
-                          f"signal is below the b-max detection limit, so the corrected "
-                          f"value is a lower bound, not a reliable point estimate.")
         print(f"\n{'='*70}\n")
 
         return results, model_mode

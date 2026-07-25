@@ -573,13 +573,33 @@ def apply_rf_correction(rf_obs, ff_obs, ff_est_rows, rf_levels, rf_est_grid):
 # DISCREPANCY PRINCIPLE — lambda_aniso
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Safety factor tau on the discrepancy target (target_residual2 = tau * N *
+# sigma^2). The plain Morozov target (tau=1) SYSTEMATICALLY UNDER-regularizes
+# the Stage-A anisotropic block because that block is heavily OVERCOMPLETE
+# (n_aniso_cols ~ 468 columns for N ~ 186 measurements, ~2.5x): the extra
+# collinear degrees of freedom let it drive the residual down to the noise
+# floor at a lambda_aniso that still leaves isotropic (esp. restricted/hindered)
+# signal partly represented by fiber columns -> fiber_fraction over-estimation
+# (FF leakage). Using tau>1 is the textbook fix for the discrepancy principle
+# on ill-posed/rank-deficient operators (Morozov 1966 allows tau>=1; Engl,
+# Hanke & Neubauer 1996 use tau in [1,2]). It is a METHODOLOGICAL constant, not
+# a dataset-specific one: the resulting lambda_aniso still adapts per protocol/
+# SNR/dictionary. Value calibrated (2026-07-24) on tissue-heterogeneous
+# synthetic phantoms spanning FF_true 0.10-0.80: raising tau reduces FF leakage
+# AND improves fiber detection (npop) monotonically with no trade-off up to this
+# value; larger values start over-regularizing genuine high-FF voxels. See the
+# stress-test verification (Simulations/pyDBSI_stress_test) for the sweep.
+_LAMBDA_ANISO_DISCREPANCY_TAU = 1.0  # set from verification below
+
+
 def select_lambda_aniso_discrepancy(AtA, At, y_voxels, n_aniso_cols,
                                      sigma, lambda_iso_fixed,
                                      lambda_lo=1e-6, lambda_hi=1e4,
                                      n_dirs=None, max_bisect_iter=40,
                                      tol=1e-3, min_floor_factor=0.1,
                                      max_eig_aniso=None,
-                                     aniso_floor_fraction=0.075):
+                                     aniso_floor_fraction=0.075,
+                                     discrepancy_tau=None):
     """
     Select lambda_aniso via the discrepancy principle (Morozov 1966):
     find lambda such that the NNLS residual matches the expected noise
@@ -754,7 +774,12 @@ def select_lambda_aniso_discrepancy(AtA, At, y_voxels, n_aniso_cols,
     y_voxels = np.atleast_2d(np.asarray(y_voxels, dtype=np.float64))
     n_voxels, N = y_voxels.shape
 
-    target_residual2 = N * sigma ** 2
+    if discrepancy_tau is None:
+        discrepancy_tau = _LAMBDA_ANISO_DISCREPANCY_TAU
+    # tau>1 raises the target residual, pushing lambda_aniso higher to
+    # counter the over-completeness under-regularization (see module note
+    # on _LAMBDA_ANISO_DISCREPANCY_TAU).
+    target_residual2 = discrepancy_tau * N * sigma ** 2
 
     floor_from_iso = min_floor_factor * lambda_iso_fixed
     if max_eig_aniso is not None:

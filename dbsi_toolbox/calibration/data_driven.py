@@ -604,8 +604,20 @@ _LAMBDA_ANISO_DISCREPANCY_TAU = 1.0  # kept as a knob; verification (2026-07-24)
 # discrepancy. The plain discrepancy (governing the noise-matching) still adds
 # MORE regularization on top via max() when the noise genuinely warrants it.
 # Recalibrated (2026-07-24) from the unvalidated 0.075 default that did not bind
-# at clinical SNR (leaving FF leakage); see stress-test verification.
-_ANISO_FLOOR_FRACTION = 0.075  # set from verification below
+# at clinical SNR (leaving FF leakage). VALIDATED value = 1.0: on a tissue-
+# heterogeneous synthetic phantom (FF_true 0.10-0.80 + 90-deg crossing + fiber-
+# free), floor=1.0 gives lambda_aniso ~37 IDENTICALLY at SNR 30 and 15 (floor
+# binds -> SNR-robust, unlike the noise-referenced discrepancy/tau). It cuts FF
+# leakage sharply (fiber-free Tumor 0.61->0.11, GM 0.59->0.16, WM low-FF
+# 0.60->0.24 at SNR30) while keeping WM sano ~0.50 exactly, WM high-FF ~0.74
+# (mild -0.06), and clean detection (no spurious crossings). Higher floors (2-4)
+# cut a bit more low-SNR leakage but crush genuine high FF (0.80->0.66/0.57) and
+# induce false multi-population detection at low SNR -> rejected. NOTE: this is a
+# DIRECT fix for the anisotropic block absorbing isotropic signal, validated
+# across SNR/FF -- distinct from (and not masking) the separate isotropic-side
+# coverage issue discussed in the SAFETY FLOOR caveat below, which the grid
+# coverage floor addresses.
+_ANISO_FLOOR_FRACTION = 1.0  # validated 2026-07-24 (was 0.075, unvalidated)
 
 
 def select_lambda_aniso_discrepancy(AtA, At, y_voxels, n_aniso_cols,
@@ -767,13 +779,15 @@ def select_lambda_aniso_discrepancy(AtA, At, y_voxels, n_aniso_cols,
         `select_lambdas_data_driven`), not per voxel. If None, this
         floor component is disabled and behaviour falls back to the
         original min_floor_factor-only floor (pre-fix behaviour).
-    aniso_floor_fraction : float
+    aniso_floor_fraction : float or None
         Fraction of `max_eig_aniso` used as the (new) primary floor
         component: lambda_aniso >= aniso_floor_fraction * max_eig_aniso
-        / n_aniso_cols. Default 0.075 -- ***UNVALIDATED on the real
-        (anchored-isotropic-grid) pipeline as of 2026-07-16; see the
-        CAVEAT in the SAFETY FLOOR section above before relying on this
-        default.*** Only used if max_eig_aniso is not None.
+        / n_aniso_cols. If None (default), reads the module constant
+        `_ANISO_FLOOR_FRACTION` (validated value 1.0 as of 2026-07-24;
+        see that constant's note for the FF-leakage / SNR-robustness
+        basis, which supersedes the 2026-07-16 "unvalidated 0.075"
+        caveat in the SAFETY FLOOR section above). Only used if
+        max_eig_aniso is not None.
 
     Returns
     -------

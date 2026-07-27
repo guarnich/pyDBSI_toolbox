@@ -55,8 +55,10 @@ def main():
                         help="Number of AD grid steps for Stage A's detection dictionary. Default: 3 (deliberately coarse).")
     parser.add_argument("--n-rd", type=int, default=3,
                         help="Number of RD grid steps for Stage A's detection dictionary. Default: 3 (deliberately coarse).")
-    parser.add_argument("--anisotropy-ratio", type=float, dest="anisotropy_ratio", default=1.15,
-                        help="Minimum AD/RD ratio for admissible Stage A pairs. Default: 1.15.")
+    parser.add_argument("--anisotropy-ratio", type=float, dest="anisotropy_ratio", default=2.0,
+                        help="Minimum AD/RD ratio for admissible Stage A pairs. Default: 2.0 "
+                             "(raised from 1.15: drops the near-isotropic ratio-1.83 grid column "
+                             "that leaks isotropic signal into fiber_fraction; safe band [2.0, 2.16]).")
     parser.add_argument("--min-weight-fraction", type=float, dest="min_weight_fraction", default=0.05,
                         help="Stage A direction-selection threshold. Default: 0.05.")
     parser.add_argument("--calibration-method", choices=["data_driven", "monte_carlo"],

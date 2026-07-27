@@ -472,6 +472,127 @@ def select_dominant_directions(w_aniso, n_dirs, n_pairs, neighbor_idx,
     return dir_indices, dir_weights
 
 
+@njit(cache=True, fastmath=True)
+def dominant_basin_concentration(w_aniso, n_dirs, n_pairs, neighbor_idx,
+                                 fiber_dirs):
+    """
+    Per-voxel ANGULAR CONCENTRATION of the anisotropic weight: the share of
+    the total Stage-A anisotropic weight held by the single largest angular
+    basin (Voronoi mass around the dominant local-maximum peak).
+
+    This is EXACTLY the quantity the concentration gate in
+    `select_dominant_directions` thresholds (max_basin / total_weight), but
+    returned as a continuous scalar in [0, 1] for use as a per-voxel
+    diagnostic channel and as the modulation variable for a per-voxel
+    lambda_aniso adaptation. It is factored out here (rather than returned
+    from `select_dominant_directions`) so it can be computed even for voxels
+    that never enter the direction-selection path (e.g. below fiber_threshold)
+    and without perturbing that function's tuned return signature.
+
+    Interpretation (the discriminator Plan A rests on):
+      - A REAL fiber -- even a demyelinated / low-FA one -- concentrates its
+        anisotropic weight along one direction: high concentration (~0.4-0.6).
+      - DIFFUSE anisotropic weight absorbed from isotropic (esp. restricted)
+        signal on a fiber-free voxel spreads across many near-equal basins:
+        low concentration (~0.2-0.25).
+    Unlike n_pop (a binary/quantised detection count), concentration separates
+    a weak-but-real fiber from leakage continuously, which is why it is the
+    right lever for a continuous per-voxel regularization (npop-gating was
+    falsified: it crushed the demyelinated fiber, confusing it with GM).
+
+    The peak-finding, basin-assignment and column-ordering conventions are
+    IDENTICAL to `select_dominant_directions` (pair-major, direction-minor;
+    local-maxima over the k-NN graph; Voronoi basin mass). Returns 0.0 when
+    the anisotropic block carries negligible weight or has no local maximum.
+
+    Parameters
+    ----------
+    w_aniso : array (n_aniso_cols,)
+        NNLS weights restricted to the anisotropic (Stage A) block.
+    n_dirs, n_pairs : int
+        Dictionary dimensions (n_aniso_cols == n_dirs * n_pairs).
+    neighbor_idx : array (n_dirs, k), int64
+        k-nearest-neighbour direction graph (from
+        `build_direction_neighbor_graph`).
+    fiber_dirs : array (n_dirs, 3), float64
+        Hemisphere direction unit vectors.
+
+    Returns
+    -------
+    concentration : float
+        max_basin_mass / total_anisotropic_weight, in [0, 1]. 0.0 if the
+        block is empty / has no peak.
+    """
+    dir_weight_totals = np.zeros(n_dirs, dtype=np.float64)
+    idx_col = 0
+    for p in range(n_pairs):
+        for d in range(n_dirs):
+            dir_weight_totals[d] += w_aniso[idx_col]
+            idx_col += 1
+
+    total_weight = 0.0
+    for d in range(n_dirs):
+        total_weight += dir_weight_totals[d]
+    if total_weight < 1e-10:
+        return 0.0
+
+    k = neighbor_idx.shape[1]
+
+    # Local-maxima peak-finding (same criterion as select_dominant_directions).
+    is_peak = np.zeros(n_dirs, dtype=np.bool_)
+    n_peaks = 0
+    for d in range(n_dirs):
+        wd = dir_weight_totals[d]
+        if wd <= 0.0:
+            continue
+        peak = True
+        for j in range(k):
+            nb = neighbor_idx[d, j]
+            wn = dir_weight_totals[nb]
+            if wn > wd or (wn == wd and nb < d):
+                peak = False
+                break
+        if peak:
+            is_peak[d] = True
+            n_peaks += 1
+
+    if n_peaks == 0:
+        return 0.0
+
+    peak_idx = np.empty(n_peaks, dtype=np.int64)
+    t = 0
+    for d in range(n_dirs):
+        if is_peak[d]:
+            peak_idx[t] = d
+            t += 1
+
+    # Angular-basin mass (Voronoi assignment to nearest peak).
+    basin_mass = np.zeros(n_peaks, dtype=np.float64)
+    for d in range(n_dirs):
+        wd = dir_weight_totals[d]
+        if wd <= 0.0:
+            continue
+        best_adot = -1.0
+        best_pk = 0
+        for pk in range(n_peaks):
+            pi = peak_idx[pk]
+            dot = (fiber_dirs[d, 0] * fiber_dirs[pi, 0]
+                   + fiber_dirs[d, 1] * fiber_dirs[pi, 1]
+                   + fiber_dirs[d, 2] * fiber_dirs[pi, 2])
+            adot = dot if dot >= 0.0 else -dot
+            if adot > best_adot:
+                best_adot = adot
+                best_pk = pk
+        basin_mass[best_pk] += wd
+
+    max_basin = 0.0
+    for pk in range(n_peaks):
+        if basin_mass[pk] > max_basin:
+            max_basin = basin_mass[pk]
+
+    return max_basin / total_weight
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # STAGE B — Closed-form (AD, RD) estimation conditioned on direction
 # ─────────────────────────────────────────────────────────────────────────────

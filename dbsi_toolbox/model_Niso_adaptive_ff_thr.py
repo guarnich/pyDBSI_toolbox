@@ -161,6 +161,7 @@ from .core.solvers import (
     nnls_coordinate_descent,
     compute_regularization_matrix,
     select_dominant_directions,
+    dominant_basin_concentration,     # NEW — per-voxel angular concentration
     build_direction_neighbor_graph,   # NEW — local-maxima peak-finding graph
     estimate_AD_RD_conditioned,
     compute_fiber_fa,
@@ -201,7 +202,27 @@ _STAGE_A_RD_MIN = 0.05e-3
 _STAGE_A_RD_MAX = 1.2e-3
 _STAGE_A_DEFAULT_N_AD = 3
 _STAGE_A_DEFAULT_N_RD = 3
-_STAGE_A_DEFAULT_ANISOTROPY_RATIO = 1.15
+# Anisotropy floor for the (AD, RD) detection grid: a pair enters the
+# anisotropic block only if AD >= RD * ratio. Raised 1.15 -> 2.0 (2026-07-27)
+# as the structural, root-cause complement to the FF-leakage work. On the
+# coarse default grid (AD=[0.5,1.35,2.2], RD=[0.05,0.625,1.2] e-3 mm^2/s) the
+# admissible AD/RD ratios are {44, 27, 10, 3.52, 2.16, 1.83}. The interval
+# [1.15, 1.5) contains NO pair, so raising the ratio through it is a no-op
+# (verified end-to-end: identical maps). Raising to 2.0 removes exactly ONE
+# column -- the near-isotropic (AD=2.2, RD=1.2) pair (ratio 1.83), which is a
+# direct source of isotropic->fiber leakage. On the 8-class heterogeneous
+# synthetic brain this lifted tissue discrimination 81.2% -> 85.6%, cut GM FF
+# leakage 0.51 -> 0.39 and Edema 0.43 -> 0.34, and did NOT harm the
+# demyelinated fiber (its AD/RD ratio 1.5/0.7 = 2.14 is above the floor):
+# WM_demyel FF 0.60 -> 0.52 (closer to GT 0.45), detection npop 0.45 -> 0.80.
+# SAFE BAND [2.0, 2.16]: the next column (AD=1.35, RD=0.625, ratio 2.16)
+# survives up to 2.16 and is needed for demyelinated / low-FA fibers; at 2.2
+# it is lost. This is COMPLEMENTARY, not a cure: Tumor's restricted-signal
+# leakage (a different mechanism) is untouched (FF ~0.50 either way) and is
+# the target of the per-voxel concentration modulation (Plan A). Kept
+# constructor-overridable. See Simulations/pyDBSI_pervoxel_prototype for the
+# sweep harness.
+_STAGE_A_DEFAULT_ANISOTROPY_RATIO = 2.0
 _STAGE_A_DEFAULT_LAMBDA_BASE = 0.005
 
 # Default isotropic spectrum range.
@@ -290,6 +311,53 @@ _DEFAULT_MIN_PEAK_RATIO = 0.35
 # (npop~1.0 vs 0.78 at 0.38). Raise toward 0.38 for max specificity at the cost
 # of low-SNR sensitivity. Below the gate -> npop=0.
 _DEFAULT_MIN_DOMINANT_CONCENTRATION = 0.35
+
+# Plan A (Point 2) — per-voxel concentration-modulated lambda_aniso defaults.
+# OFF by default (opt-in via lambda_aniso_conc_mod=True): when a voxel's
+# dominant-basin angular concentration is low (diffuse anisotropic weight, i.e.
+# isotropic->fiber leakage) the anisotropic regularization is boosted and the
+# voxel re-solved, suppressing the spurious fiber_fraction; concentrated
+# (genuine-fiber) voxels are left untouched. Ramp: c>=c_hi -> no boost;
+# c<=c_lo -> full boost (xgain on lambda_aniso); linear between. Endpoints
+# bracket the observed FIRST-PASS concentration bands on the validation brain
+# (leakage Tumor ~0.23 / GM ~0.27; demyelinated fiber ~0.35; healthy ~0.47-0.51)
+# so leakage is boosted hard while a demyelinated fiber gets only a mild,
+# still-detectable boost. See `_apply_conc_modulation` and
+# Simulations/pyDBSI_pervoxel_prototype.
+#
+# End-to-end ramp sweep (8-class heterogeneous brain, ratio=2.0, SNR30; FF of
+# Tumor[GT0]/GM[GT0.10]/demyel[GT0.45], tissue discrimination, leakage metric):
+#   config              discr  Tumor  GM   demyel  leak
+#   mod OFF (baseline)  0.856  0.50   0.39 0.52    0.267
+#   A c_hi0.40 g12      0.906  0.08   0.14 0.30    0.057   <- max leak-suppression
+#   B c_hi0.34 g12      0.863  0.10   0.16 0.42    0.068
+#   D c_hi0.36 g8       0.887  0.13   0.18 0.40    0.080   <- DEFAULT (balanced)
+# The DEFAULT (config D) is the balanced operating point: it keeps ~3x of the
+# leakage fix (Tumor 0.50->0.13, leak 0.267->0.080) and +3.1pp discrimination
+# while PRESERVING the demyelinated fiber (FF 0.40, vs GT 0.45 -- baseline
+# actually OVER-estimated it at 0.52). The gentler gain (8, not 12) is also the
+# conservative choice against low-SNR over-correction (where genuine fibers
+# diffuse toward the leakage concentration band). Config A (c_hi=0.40, gain=12)
+# is the aggressive alternative -- best discrimination and leak suppression, but
+# it over-corrects the demyelinated fiber (FF 0.30) -- pass those values
+# explicitly if fiber-fraction fidelity on low-FA fibers is not the priority.
+# VALIDATED (2026-07-27): SPARES crossings (Sc1 FF0.80 untouched 0.82->0.82 at
+# SNR30, 0.73->0.72 at SNR15 -- the exact case a scalar high lambda_aniso
+# collapsed to 0.42; a crossing stays concentrated ~0.42 and escapes the boost)
+# and suppresses pure-iso/pure-restr leakage at SNR30 AND SNR15. At SNR15 it
+# CORRECTS the low-SNR over-estimation instead of collapsing fibers (demyel
+# 0.75->0.47~=GT). Weak-fiber edge (FF 0.12-0.20, incl. demyelinated) at SNR15
+# and SNR10: NO false negatives -- detection rate stays 1.0, weak fibers are
+# pulled toward GT, never zeroed. KNOWN LIMIT (fundamental, not a bug): at low
+# SNR a weak/demyelinated fiber's concentration overlaps the leakage band
+# (SNR15: weak-demyel ~0.29 vs fiber-free ~0.29), so the modulation cannot
+# preferentially preserve a weak fiber's FF -- it suppresses it like leakage.
+# mod-OFF cannot separate them either; the lever simply adds no discriminating
+# power where the low-SNR signal has none. Default stays OFF pending real-data
+# confirmation.
+_DEFAULT_CONC_MOD_C_LO = 0.24
+_DEFAULT_CONC_MOD_C_HI = 0.36
+_DEFAULT_CONC_MOD_GAIN = 8.0
 
 # Monte-Carlo null calibration of the concentration gate (see
 # calibration.data_driven.calibrate_concentration_gate_mc). When calibration
@@ -382,6 +450,88 @@ def analyse_protocol(bvals):
 # PARALLEL FITTING KERNELS — v3 + MRDS multi-fiber extension
 # ─────────────────────────────────────────────────────────────────────────────
 
+@njit(cache=True, fastmath=True)
+def _apply_conc_modulation(w, AtA_reg, Aty, n_aniso_cols, n_dirs, n_pairs,
+                           neighbor_idx, fiber_dirs, lambda_aniso,
+                           c_lo, c_hi, gain):
+    """
+    Plan A (Point 2) — per-voxel angular-concentration modulation of
+    lambda_aniso.
+
+    Given a FIRST-PASS Stage-A solution `w` (solved with the shared,
+    protocol-level lambda_aniso baked into `AtA_reg`), measure its dominant-
+    basin angular concentration `c` (see `core.solvers.
+    dominant_basin_concentration`) and, when `c` is low, RE-SOLVE the same
+    voxel with a boosted anisotropic regularization. This suppresses the
+    diffuse anisotropic weight that fiber-free / leakage voxels absorb from
+    the isotropic signal (which inflates fiber_fraction), while leaving genuine
+    fibers — which concentrate their weight — essentially untouched.
+
+    Rationale for a CONTINUOUS ramp rather than a binary gate: the concentration
+    of a demyelinated / low-FA fiber (~0.36 on the validation brain) sits BELOW
+    that of a healthy fiber (~0.48) and only modestly ABOVE diffuse leakage
+    (~0.25) — the distributions overlap at the tails. A hard threshold at any
+    single value therefore either misses leakage or crushes the demyelinated
+    fiber (the npop binary gate was falsified for exactly this reason). A
+    continuous ramp instead applies FULL boost only to clearly-diffuse voxels
+    (c <= c_lo), NONE to clearly-concentrated ones (c >= c_hi), and a
+    proportional, gentle boost to the ambiguous middle — so a demyelinated
+    fiber loses only a little anisotropic weight (stays detectable) while
+    leakage is strongly suppressed. Voxels with almost no anisotropic weight
+    (e.g. CSF: high concentration but negligible FF) sit above c_hi and are
+    never modulated, so this cannot manufacture leakage where there was none.
+
+    The boost is applied by adding `(g - 1) * lambda_aniso` to the anisotropic
+    block's diagonal of a LOCAL copy of `AtA_reg` (the isotropic block and the
+    shared matrix are left untouched), then re-running the same NNLS.
+
+    Parameters
+    ----------
+    w : array (n_total_cols,)
+        First-pass NNLS solution (anisotropic block first).
+    AtA_reg : array (n_total_cols, n_total_cols)
+        Shared regularized Gram matrix (read-only; copied locally if boosting).
+    Aty : array (n_total_cols,)
+        A^T y for this voxel (unchanged by the boost).
+    n_aniso_cols, n_dirs, n_pairs : int
+        Dictionary dimensions (n_aniso_cols == n_dirs * n_pairs).
+    neighbor_idx, fiber_dirs : arrays
+        Passed through to `dominant_basin_concentration`.
+    lambda_aniso : float
+        The protocol-level scalar lambda_aniso already baked into AtA_reg's
+        anisotropic diagonal; the boost is expressed relative to it.
+    c_lo, c_hi : float
+        Ramp endpoints. c >= c_hi -> no boost (g=1); c <= c_lo -> full boost
+        (g=gain); linear in between.
+    gain : float
+        Maximum multiplicative boost on lambda_aniso at c <= c_lo.
+
+    Returns
+    -------
+    w : array (n_total_cols,)
+        The re-solved solution if a boost was applied, else the input `w`.
+    """
+    w_aniso = w[:n_aniso_cols]
+    c = dominant_basin_concentration(w_aniso, n_dirs, n_pairs,
+                                     neighbor_idx, fiber_dirs)
+    if c >= c_hi:
+        return w
+    frac = (c_hi - c) / (c_hi - c_lo)
+    if frac < 0.0:
+        frac = 0.0
+    elif frac > 1.0:
+        frac = 1.0
+    g = 1.0 + (gain - 1.0) * frac
+    if g <= 1.0:
+        return w
+    delta = (g - 1.0) * lambda_aniso
+    AtA_mod = AtA_reg.copy()
+    for i in range(n_aniso_cols):
+        AtA_mod[i, i] += delta
+    w2, _ = nnls_coordinate_descent(AtA_mod, Aty, 0.0)
+    return w2
+
+
 @njit(parallel=True, cache=True, fastmath=True)
 def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         fiber_dirs, diff_pairs, n_dirs, iso_grid, b0_thr,
@@ -389,7 +539,9 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         min_peak_ratio, min_dominant_concentration,
                         enable_direction_refinement,
                         cone1_half_angle, n1_cone, cone2_half_angle, n2_cone,
-                        neighbor_idx, max_fiber_populations, out):
+                        neighbor_idx, max_fiber_populations, out,
+                        lambda_aniso_scalar, conc_mod_enabled,
+                        conc_mod_c_lo, conc_mod_c_hi, conc_mod_gain):
     """
     v3 parallel fitting kernel — two-compartment isotropic model (2-ISO).
 
@@ -437,6 +589,15 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
             Aty[r] = val
 
         w, _ = nnls_coordinate_descent(AtA_reg, Aty, 0.0)
+
+        # Plan A: per-voxel concentration-modulated lambda_aniso (default off).
+        if conc_mod_enabled:
+            w = _apply_conc_modulation(
+                w, AtA_reg, Aty, n_aniso_cols, n_dirs, n_pairs,
+                neighbor_idx, fiber_dirs, lambda_aniso_scalar,
+                conc_mod_c_lo, conc_mod_c_hi, conc_mod_gain
+            )
+
         w_aniso = w[:n_aniso_cols]
         w_iso = w[n_aniso_cols:]
 
@@ -486,6 +647,14 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
         out[x, y, z, 1] = f_res
         out[x, y, z, 4] = f_nonrf
         out[x, y, z, 8] = mean_iso_adc
+
+        # Per-voxel angular concentration of the anisotropic weight
+        # (diagnostic channel; also the modulation lever for Plan A). Computed
+        # for EVERY fitted voxel, independent of fiber_threshold, so leakage
+        # voxels (diffuse -> low concentration) are characterised too.
+        out[x, y, z, 29] = dominant_basin_concentration(
+            w_aniso, n_dirs, n_pairs, neighbor_idx, fiber_dirs
+        )
 
         if f_fib > fiber_threshold:
             dir_indices, dir_weights = select_dominant_directions(
@@ -597,7 +766,9 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         min_peak_ratio, min_dominant_concentration,
                         enable_direction_refinement,
                         cone1_half_angle, n1_cone, cone2_half_angle, n2_cone,
-                        neighbor_idx, max_fiber_populations, out):
+                        neighbor_idx, max_fiber_populations, out,
+                        lambda_aniso_scalar, conc_mod_enabled,
+                        conc_mod_c_lo, conc_mod_c_hi, conc_mod_gain):
     """v3 parallel fitting kernel — three-compartment isotropic model
     (3-ISO). Same Stage A / Stage B (+ MRDS multi-fiber) structure as
     `_fit_voxels_2iso_v3`; see that kernel's docstring for the full
@@ -634,6 +805,15 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
             Aty[r] = val
 
         w, _ = nnls_coordinate_descent(AtA_reg, Aty, 0.0)
+
+        # Plan A: per-voxel concentration-modulated lambda_aniso (default off).
+        if conc_mod_enabled:
+            w = _apply_conc_modulation(
+                w, AtA_reg, Aty, n_aniso_cols, n_dirs, n_pairs,
+                neighbor_idx, fiber_dirs, lambda_aniso_scalar,
+                conc_mod_c_lo, conc_mod_c_hi, conc_mod_gain
+            )
+
         w_aniso = w[:n_aniso_cols]
         w_iso = w[n_aniso_cols:]
 
@@ -691,6 +871,12 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
         out[x, y, z, 3] = f_wat
         out[x, y, z, 4] = f_hin + f_wat
         out[x, y, z, 8] = mean_iso_adc
+
+        # Per-voxel angular concentration (diagnostic + Plan A modulation lever);
+        # see the 2-ISO kernel note. Computed for every fitted voxel.
+        out[x, y, z, 29] = dominant_basin_concentration(
+            w_aniso, n_dirs, n_pairs, neighbor_idx, fiber_dirs
+        )
 
         if f_fib > fiber_threshold:
             dir_indices, dir_weights = select_dominant_directions(
@@ -890,8 +1076,9 @@ class DBSI_Adaptive:
         'DIR2_X': 19, 'DIR2_Y': 20, 'DIR2_Z': 21,
         'FF_POP3': 22, 'AD_POP3': 23, 'RD_POP3': 24, 'FA_POP3': 25,
         'DIR3_X': 26, 'DIR3_Y': 27, 'DIR3_Z': 28,
+        'CONC': 29,  # NEW — per-voxel dominant-basin angular concentration
     }
-    N_CHANNELS = 29
+    N_CHANNELS = 30
     N_CHANNELS_LEGACY = 11  # for reference / external code checking shape
 
     def __init__(self, n_iso=None, lambda_aniso=None, lambda_iso=None,
@@ -908,7 +1095,11 @@ class DBSI_Adaptive:
                  min_peak_ratio=_DEFAULT_MIN_PEAK_RATIO,
                  min_dominant_concentration=_DEFAULT_MIN_DOMINANT_CONCENTRATION,
                  enable_direction_refinement=True,
-                 target_angular_resolution_deg=1.0):
+                 target_angular_resolution_deg=1.0,
+                 lambda_aniso_conc_mod=False,
+                 conc_mod_c_lo=_DEFAULT_CONC_MOD_C_LO,
+                 conc_mod_c_hi=_DEFAULT_CONC_MOD_C_HI,
+                 conc_mod_gain=_DEFAULT_CONC_MOD_GAIN):
         if max_fiber_populations not in (1, 2, 3):
             raise ValueError(
                 f"max_fiber_populations must be 1, 2, or 3, got "
@@ -937,6 +1128,10 @@ class DBSI_Adaptive:
         self.min_dominant_concentration = min_dominant_concentration
         self.enable_direction_refinement = enable_direction_refinement
         self.target_angular_resolution_deg = target_angular_resolution_deg
+        self.lambda_aniso_conc_mod = lambda_aniso_conc_mod
+        self.conc_mod_c_lo = conc_mod_c_lo
+        self.conc_mod_c_hi = conc_mod_c_hi
+        self.conc_mod_gain = conc_mod_gain
 
         self.model_mode_ = None
         self.b_max_ = None
@@ -1373,6 +1568,7 @@ class DBSI_Adaptive:
         results[..., 10] = np.nan
         results[..., 11] = np.nan  # N_POP: NaN outside fiber_threshold, not 0
         results[..., 12:29] = np.nan  # DIR1 + pop2/pop3 block, all NaN by default
+        results[..., 29] = np.nan  # CONC: dominant-basin concentration (diagnostic)
         if not use_3iso:
             results[..., 2] = np.nan
             results[..., 3] = np.nan
@@ -1393,6 +1589,12 @@ class DBSI_Adaptive:
                   f"2nd pop >= {self.min_peak_ratio:.2f} x dominant, "
                   f"concentration gate {self.min_dominant_concentration:.2f})")
 
+        if self.lambda_aniso_conc_mod:
+            print(f"   Plan A concentration modulation: ENABLED "
+                  f"(lambda_aniso boosted up to x{self.conc_mod_gain:.0f} where "
+                  f"dominant-basin concentration <= {self.conc_mod_c_lo:.2f}; "
+                  f"no boost >= {self.conc_mod_c_hi:.2f}; per-voxel re-solve)")
+
         _min_separation_cos = float(np.cos(np.radians(self.min_separation_deg)))
         _kernel = _fit_voxels_3iso_v3 if use_3iso else _fit_voxels_2iso_v3
 
@@ -1411,7 +1613,10 @@ class DBSI_Adaptive:
                     self.min_dominant_concentration,
                     self.enable_direction_refinement,
                     _cone1, _n1, _cone2, _n2,
-                    neighbor_idx, self.max_fiber_populations, results
+                    neighbor_idx, self.max_fiber_populations, results,
+                    float(self.lambda_aniso), bool(self.lambda_aniso_conc_mod),
+                    float(self.conc_mod_c_lo), float(self.conc_mod_c_hi),
+                    float(self.conc_mod_gain)
                 )
                 pbar.update(end - start)
 
@@ -1514,6 +1719,7 @@ class DBSI_Adaptive:
             'radial_diffusivity_pop3',
             'fiber_fa_pop3',
             'dir3_x', 'dir3_y', 'dir3_z',
+            'dominant_basin_concentration',
         ]
         base = base_3iso if model_mode == 3 else base_2iso
         return base + mrds_block

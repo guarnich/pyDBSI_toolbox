@@ -603,21 +603,21 @@ _LAMBDA_ANISO_DISCREPANCY_TAU = 1.0  # kept as a knob; verification (2026-07-24)
 # preventing lambda_aniso across noise levels, unlike the noise-referenced
 # discrepancy. The plain discrepancy (governing the noise-matching) still adds
 # MORE regularization on top via max() when the noise genuinely warrants it.
-# Recalibrated (2026-07-24) from the unvalidated 0.075 default that did not bind
-# at clinical SNR (leaving FF leakage). VALIDATED value = 1.0: on a tissue-
-# heterogeneous synthetic phantom (FF_true 0.10-0.80 + 90-deg crossing + fiber-
-# free), floor=1.0 gives lambda_aniso ~37 IDENTICALLY at SNR 30 and 15 (floor
-# binds -> SNR-robust, unlike the noise-referenced discrepancy/tau). It cuts FF
-# leakage sharply (fiber-free Tumor 0.61->0.11, GM 0.59->0.16, WM low-FF
-# 0.60->0.24 at SNR30) while keeping WM sano ~0.50 exactly, WM high-FF ~0.74
-# (mild -0.06), and clean detection (no spurious crossings). Higher floors (2-4)
-# cut a bit more low-SNR leakage but crush genuine high FF (0.80->0.66/0.57) and
-# induce false multi-population detection at low SNR -> rejected. NOTE: this is a
-# DIRECT fix for the anisotropic block absorbing isotropic signal, validated
-# across SNR/FF -- distinct from (and not masking) the separate isotropic-side
-# coverage issue discussed in the SAFETY FLOOR caveat below, which the grid
-# coverage floor addresses.
-_ANISO_FLOOR_FRACTION = 1.0  # validated 2026-07-24 (was 0.075, unvalidated)
+# VALUE STILL OPEN (2026-07-24) -- reverted to the original 0.075 pending a
+# leakage-vs-crossing compromise. History: raising this floor DOES fix the FF
+# leakage (anisotropic block absorbing isotropic signal) on single-fiber /
+# fiber-free / low-FF voxels, and is SNR-robust and protocol-agnostic by
+# construction (floor = fraction * max_eig_aniso / n_aniso_cols, operator-scaled
+# and validated to transfer HCP<->Verona). BUT a non-regression check on the
+# real validation scenarios showed that a large floor (=1.0) CRUSHES genuine
+# CROSSING fiber fractions: Sc1 (two 0.40 fibers, FF 0.80) collapsed 0.84->0.42
+# with the fiber signal leaking into NRF, and T1 (heterogeneous crossing) lost
+# detection (npop 1.7->1.1). Root tension: a scalar lambda_aniso cannot both
+# suppress isotropic->fiber leakage AND preserve the (already split, weaker)
+# anisotropic signal of crossings -- they move oppositely in lambda. floor=1.0
+# over-weighted leakage. A milder floor (~0.25-0.5) is the likely compromise;
+# being re-verified on the real crossing scenarios before committing a value.
+_ANISO_FLOOR_FRACTION = 0.075  # reverted to original; final value under verification
 
 
 def select_lambda_aniso_discrepancy(AtA, At, y_voxels, n_aniso_cols,

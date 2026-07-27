@@ -313,7 +313,7 @@ _DEFAULT_MIN_PEAK_RATIO = 0.35
 _DEFAULT_MIN_DOMINANT_CONCENTRATION = 0.35
 
 # Plan A (Point 2) — per-voxel concentration-modulated lambda_aniso defaults.
-# OFF by default (opt-in via lambda_aniso_conc_mod=True): when a voxel's
+# ON by default (disable via lambda_aniso_conc_mod=False): when a voxel's
 # dominant-basin angular concentration is low (diffuse anisotropic weight, i.e.
 # isotropic->fiber leakage) the anisotropic regularization is boosted and the
 # voxel re-solved, suppressing the spurious fiber_fraction; concentrated
@@ -353,8 +353,13 @@ _DEFAULT_MIN_DOMINANT_CONCENTRATION = 0.35
 # (SNR15: weak-demyel ~0.29 vs fiber-free ~0.29), so the modulation cannot
 # preferentially preserve a weak fiber's FF -- it suppresses it like leakage.
 # mod-OFF cannot separate them either; the lever simply adds no discriminating
-# power where the low-SNR signal has none. Default stays OFF pending real-data
-# confirmation.
+# power where the low-SNR signal has none.
+# Default flipped ON (2026-07-27) on the strength of this validation (crossings
+# spared, leakage suppressed at SNR30/15, low-SNR over-estimation corrected, no
+# weak-fiber false negatives). REAL-DATA confirmation is still pending; disable
+# per-call with lambda_aniso_conc_mod=False (or --disable-conc-modulation on the
+# CLI) if a dataset shows unexpected fiber_fraction suppression.
+_DEFAULT_LAMBDA_ANISO_CONC_MOD = True
 _DEFAULT_CONC_MOD_C_LO = 0.24
 _DEFAULT_CONC_MOD_C_HI = 0.36
 _DEFAULT_CONC_MOD_GAIN = 8.0
@@ -590,7 +595,8 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
 
         w, _ = nnls_coordinate_descent(AtA_reg, Aty, 0.0)
 
-        # Plan A: per-voxel concentration-modulated lambda_aniso (default off).
+        # Plan A: per-voxel concentration-modulated lambda_aniso (on by default;
+        # skipped when conc_mod_enabled is False).
         if conc_mod_enabled:
             w = _apply_conc_modulation(
                 w, AtA_reg, Aty, n_aniso_cols, n_dirs, n_pairs,
@@ -806,7 +812,8 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
 
         w, _ = nnls_coordinate_descent(AtA_reg, Aty, 0.0)
 
-        # Plan A: per-voxel concentration-modulated lambda_aniso (default off).
+        # Plan A: per-voxel concentration-modulated lambda_aniso (on by default;
+        # skipped when conc_mod_enabled is False).
         if conc_mod_enabled:
             w = _apply_conc_modulation(
                 w, AtA_reg, Aty, n_aniso_cols, n_dirs, n_pairs,
@@ -1096,7 +1103,7 @@ class DBSI_Adaptive:
                  min_dominant_concentration=_DEFAULT_MIN_DOMINANT_CONCENTRATION,
                  enable_direction_refinement=True,
                  target_angular_resolution_deg=1.0,
-                 lambda_aniso_conc_mod=False,
+                 lambda_aniso_conc_mod=_DEFAULT_LAMBDA_ANISO_CONC_MOD,
                  conc_mod_c_lo=_DEFAULT_CONC_MOD_C_LO,
                  conc_mod_c_hi=_DEFAULT_CONC_MOD_C_HI,
                  conc_mod_gain=_DEFAULT_CONC_MOD_GAIN):

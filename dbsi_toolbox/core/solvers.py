@@ -713,6 +713,174 @@ def estimate_AD_RD_conditioned(bvals, bvecs, sig_norm, fiber_dir,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# STAGE C — constrained joint (VARPRO) mono-fiber fraction + tensor re-solve
+# ─────────────────────────────────────────────────────────────────────────────
+
+@njit(cache=True, fastmath=True)
+def _stagec_scan(sig_norm, bvals, c2, iso_forward, iso_gram, iso_aty, yty,
+                 ad_array, rd_array, aniso_ratio,
+                 best_res, best_ad, best_rd, w_out):
+    """Scan an (AD, RD) grid: for each admissible pair build the reduced Gram
+    of [fiber_col | iso_forward], NNLS-solve, keep the minimum-residual weights.
+    Updates w_out (length 1+n_iso) with the best weights found. Helper for
+    `stagec_varpro_single_fiber`."""
+    N = len(bvals)
+    n_iso = iso_forward.shape[1]
+    ntot = 1 + n_iso
+    AtA = np.zeros((ntot, ntot))
+    Aty = np.empty(ntot)
+    fibcol = np.empty(N)
+    # iso block of the Gram / Aty is constant across (AD, RD) -- fill once.
+    for k in range(n_iso):
+        for j in range(n_iso):
+            AtA[k + 1, j + 1] = iso_gram[k, j]
+        Aty[k + 1] = iso_aty[k]
+    for ia in range(ad_array.shape[0]):
+        ad = ad_array[ia]
+        for ir in range(rd_array.shape[0]):
+            rd = rd_array[ir]
+            if ad < rd * aniso_ratio:
+                continue
+            fib_fib = 0.0
+            fib_y = 0.0
+            for i in range(N):
+                v = np.exp(-bvals[i] * (rd + (ad - rd) * c2[i]))
+                fibcol[i] = v
+                fib_fib += v * v
+                fib_y += v * sig_norm[i]
+            AtA[0, 0] = fib_fib
+            for k in range(n_iso):
+                s = 0.0
+                for i in range(N):
+                    s += fibcol[i] * iso_forward[i, k]
+                AtA[0, k + 1] = s
+                AtA[k + 1, 0] = s
+            Aty[0] = fib_y
+            w, _ = nnls_coordinate_descent(AtA, Aty, 0.0)
+            # residual ||Aw - y||^2 = w^T AtA w - 2 w^T Aty + y^T y
+            res = yty
+            for a in range(ntot):
+                res += -2.0 * w[a] * Aty[a]
+                for b in range(ntot):
+                    res += w[a] * AtA[a, b] * w[b]
+            if res < best_res:
+                best_res = res
+                best_ad = ad
+                best_rd = rd
+                for a in range(ntot):
+                    w_out[a] = w[a]
+    return best_res, best_ad, best_rd
+
+
+@njit(cache=True, fastmath=True)
+def stagec_varpro_single_fiber(sig_norm, bvals, bvecs, fiber_dir,
+                               iso_forward, iso_gram, ad_grid, rd_grid,
+                               aniso_ratio, w_out):
+    """
+    STAGE C — constrained joint (separable / VARPRO) re-solve of a SINGLE
+    fiber's tensor AND all compartment fractions, given the Stage-A fiber
+    direction.
+
+    WHY THIS EXISTS
+    ---------------
+    The raw v3 pipeline estimates the compartment fractions (Stage A NNLS over
+    the OVER-COMPLETE anisotropic dictionary: fiber_fraction = sum of all ~468
+    anisotropic weights) and the fiber tensor (Stage B closed-form given those
+    fractions) in two DECOUPLED steps. On a concentrated single fiber that
+    coexists with a restricted isotropic compartment the two are MUTUALLY
+    biased: the many near-fiber anisotropic columns absorb restricted/hindered
+    iso signal -> fiber_fraction inflated and restricted_fraction driven to ~0;
+    the closed-form Stage B, fed those biased fractions, then UNDER-estimates AD
+    (~1.1 vs a true 1.7), which makes the fiber column blunter/more isotropic
+    and locks the inflation in. Synthetic single-fiber validation (FF_true 0.55,
+    RF_true 0.10, AD 1.7, RD swept, SNR 30/50): the raw pipeline gave FF up to
+    0.94, RF 0.00, AD ~1.1; this joint re-solve recovers FF 0.55-0.57, RF
+    0.07-0.10, AD 1.64-1.85, RD within noise -- across all RD.
+
+    The fix is to fit the fiber tensor and fractions JOINTLY by directly
+    minimising the reconstruction residual. Because the fractions enter the
+    forward model LINEARLY and only (AD, RD) enter non-linearly (the direction
+    is fixed to Stage A's detection), this is a 2-D separable least squares
+    (VARPRO): scan (AD, RD) on a coarse grid, and for each candidate solve the
+    NON-NEGATIVE linear problem for [fiber_weight | iso_weights] on the REDUCED
+    dictionary [fiber_col(AD,RD,dir) | iso_grid] -- ONE physically-anchored
+    fiber column competing fairly with the isotropic columns, instead of the
+    over-complete anisotropic block. A short local refine (half-spacing, 5x5)
+    around the best grid node sharpens (AD, RD). An earlier ALTERNATING scheme
+    (fractions <-> closed-form Stage B tensor) was tried and FALSIFIED: it
+    inherits the closed-form's downward AD bias and converges to the same wrong
+    fixed point (AD stuck ~1.0, RF ~0.01). Only the residual-minimising search
+    recovers the truth, hence VARPRO.
+
+    Parameters
+    ----------
+    sig_norm : array (N,)
+        Normalised signal S/S0.
+    bvals : array (N,)
+    bvecs : array (N, 3)
+    fiber_dir : array (3,)
+        Stage-A detected fiber direction (unit vector).
+    iso_forward : array (N, n_iso)
+        Precomputed isotropic forward columns exp(-b * d_k) (constant across
+        voxels; built once per protocol by the caller).
+    iso_gram : array (n_iso, n_iso)
+        iso_forward.T @ iso_forward (constant; built once).
+    ad_grid, rd_grid : array
+        Coarse (AD, RD) search grids.
+    aniso_ratio : float
+        Minimum AD/RD for an admissible fiber candidate.
+    w_out : array (1 + n_iso,)
+        OUTPUT: best-fit non-negative weights [fiber, iso_0..iso_{n_iso-1}].
+
+    Returns
+    -------
+    best_ad, best_rd : float
+        Residual-minimising fiber tensor. (Fractions are read from w_out by the
+        caller: fiber_fraction = w_out[0] / sum(w_out), the iso compartments by
+        binning w_out[1:] on iso-grid diffusivity thresholds.)
+    """
+    N = len(bvals)
+    n_iso = iso_forward.shape[1]
+    c2 = np.empty(N)
+    for i in range(N):
+        d = (bvecs[i, 0] * fiber_dir[0] + bvecs[i, 1] * fiber_dir[1]
+             + bvecs[i, 2] * fiber_dir[2])
+        c2[i] = d * d
+    iso_aty = np.empty(n_iso)
+    for k in range(n_iso):
+        s = 0.0
+        for i in range(N):
+            s += iso_forward[i, k] * sig_norm[i]
+        iso_aty[k] = s
+    yty = 0.0
+    for i in range(N):
+        yty += sig_norm[i] * sig_norm[i]
+
+    best_res = 1e30
+    best_ad = ad_grid[0]
+    best_rd = rd_grid[0]
+    best_res, best_ad, best_rd = _stagec_scan(
+        sig_norm, bvals, c2, iso_forward, iso_gram, iso_aty, yty,
+        ad_grid, rd_grid, aniso_ratio, best_res, best_ad, best_rd, w_out)
+
+    # Local refine: 5x5 at half the coarse spacing around the best node.
+    da = (ad_grid[1] - ad_grid[0]) if ad_grid.shape[0] > 1 else 0.1e-3
+    dr = (rd_grid[1] - rd_grid[0]) if rd_grid.shape[0] > 1 else 0.1e-3
+    ad_loc = np.empty(5)
+    rd_loc = np.empty(5)
+    for j in range(5):
+        av = best_ad + (j - 2) * 0.5 * da
+        rv = best_rd + (j - 2) * 0.5 * dr
+        ad_loc[j] = av if av > 0.2e-3 else 0.2e-3
+        rd_loc[j] = rv if rv > 0.02e-3 else 0.02e-3
+    best_res, best_ad, best_rd = _stagec_scan(
+        sig_norm, bvals, c2, iso_forward, iso_gram, iso_aty, yty,
+        ad_loc, rd_loc, aniso_ratio, best_res, best_ad, best_rd, w_out)
+
+    return best_ad, best_rd
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # MRDS-LITE: MULTI-RESOLUTION CONE REFINEMENT OF THE STAGE A DIRECTION
 # ─────────────────────────────────────────────────────────────────────────────
 #

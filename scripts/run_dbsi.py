@@ -61,6 +61,13 @@ def main():
                              "that leaks isotropic signal into fiber_fraction; safe band [2.0, 2.16]).")
     parser.add_argument("--min-weight-fraction", type=float, dest="min_weight_fraction", default=0.05,
                         help="Stage A direction-selection threshold. Default: 0.05.")
+    parser.add_argument("--disable-stagec", dest="disable_stagec", action="store_true",
+                        help="Disable the Stage C joint mono-fiber re-solve (Plan A / bias #1 "
+                             "fix). It is ON by default: for single-fiber voxels it re-fits the "
+                             "fiber tensor (AD,RD) and all compartment fractions jointly on a "
+                             "reduced [fiber|iso] dictionary, correcting the fiber_fraction "
+                             "inflation / restricted collapse / AD under-estimation of the raw "
+                             "two-stage output. Pass this to keep the raw Stage A/B estimates.")
     parser.add_argument("--disable-conc-modulation", dest="disable_conc_modulation",
                         action="store_true",
                         help="Disable the per-voxel angular-concentration modulation of "
@@ -135,6 +142,7 @@ def main():
         enable_direction_refinement=not args.disable_direction_refinement,
         target_angular_resolution_deg=args.target_angular_resolution_deg,
         lambda_aniso_conc_mod=not args.disable_conc_modulation,
+        stagec_refine=not args.disable_stagec,
     )
 
     results, model_mode = model.fit(

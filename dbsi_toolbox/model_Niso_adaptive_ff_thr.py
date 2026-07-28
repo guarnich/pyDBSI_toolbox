@@ -162,6 +162,7 @@ from .core.solvers import (
     compute_regularization_matrix,
     select_dominant_directions,
     dominant_basin_concentration,     # NEW — per-voxel angular concentration
+    stagec_varpro_single_fiber,       # NEW — Stage C joint tensor+fraction re-solve
     build_direction_neighbor_graph,   # NEW — local-maxima peak-finding graph
     estimate_AD_RD_conditioned,
     compute_fiber_fa,
@@ -364,6 +365,23 @@ _DEFAULT_CONC_MOD_C_LO = 0.24
 _DEFAULT_CONC_MOD_C_HI = 0.36
 _DEFAULT_CONC_MOD_GAIN = 8.0
 
+# Stage C — constrained joint (VARPRO) mono-fiber re-solve of tensor+fractions.
+# ON by default (disable via stagec_refine=False). For n_pop==1 voxels, after
+# Stage A detection, the fiber tensor (AD, RD) and all compartment fractions are
+# re-fitted JOINTLY by minimising the reconstruction residual over a reduced
+# dictionary [fiber_col(AD,RD,dir) | iso_grid] -- fixing the decoupled-stage
+# mutual bias (fiber_fraction inflation + restricted collapse + AD under-
+# estimation). See `core.solvers.stagec_varpro_single_fiber`. (AD, RD) search
+# grid + admissibility ratio: coarse grid then a local refine in the helper.
+_DEFAULT_STAGEC_REFINE = True
+_STAGEC_AD_MIN = 0.6e-3
+_STAGEC_AD_MAX = 2.6e-3
+_STAGEC_N_AD = 24
+_STAGEC_RD_MIN = 0.05e-3
+_STAGEC_RD_MAX = 1.1e-3
+_STAGEC_N_RD = 22
+_STAGEC_ANISO_RATIO = 1.1
+
 # Monte-Carlo null calibration of the concentration gate (see
 # calibration.data_driven.calibrate_concentration_gate_mc). When calibration
 # runs, the gate is set to this percentile of the dominant-basin concentration
@@ -546,7 +564,9 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         cone1_half_angle, n1_cone, cone2_half_angle, n2_cone,
                         neighbor_idx, max_fiber_populations, out,
                         lambda_aniso_scalar, conc_mod_enabled,
-                        conc_mod_c_lo, conc_mod_c_hi, conc_mod_gain):
+                        conc_mod_c_lo, conc_mod_c_hi, conc_mod_gain,
+                        stagec_enabled, iso_forward, iso_gram,
+                        stagec_ad_grid, stagec_rd_grid, stagec_aniso_ratio):
     """
     v3 parallel fitting kernel — two-compartment isotropic model (2-ISO).
 
@@ -678,7 +698,43 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
             if n_pop == 1:
                 dominant_dir = fiber_dirs[dir_indices[0]]
 
-                if enable_direction_refinement:
+                if stagec_enabled:
+                    # ── STAGE C: joint (VARPRO) tensor+fraction re-solve ──
+                    # Replaces the raw over-complete-block fractions AND the
+                    # decoupled Stage B tensor with a residual-minimising joint
+                    # fit on [fiber_col(AD,RD,dir) | iso_grid]. Fixes the
+                    # fiber_fraction inflation + restricted collapse + AD
+                    # under-estimation (see stagec_varpro_single_fiber).
+                    w_sc = np.zeros(1 + n_iso)
+                    AD_est, RD_est = stagec_varpro_single_fiber(
+                        sig_norm, bvals, bvecs, dominant_dir,
+                        iso_forward, iso_gram, stagec_ad_grid, stagec_rd_grid,
+                        stagec_aniso_ratio, w_sc
+                    )
+                    tot_sc = 0.0
+                    for i in range(1 + n_iso):
+                        tot_sc += w_sc[i]
+                    if tot_sc > 1e-10:
+                        res_sc = 0.0
+                        nonrf_sc = 0.0
+                        wd_sc = 0.0
+                        for i in range(n_iso):
+                            wi = w_sc[1 + i]
+                            adc = iso_grid[i]
+                            if adc <= THRESH_RES:
+                                res_sc += wi
+                            else:
+                                nonrf_sc += wi
+                            wd_sc += wi * adc
+                        f_fib = w_sc[0] / tot_sc
+                        f_res = res_sc / tot_sc
+                        f_nonrf = nonrf_sc / tot_sc
+                        sum_iso_sc = res_sc + nonrf_sc
+                        out[x, y, z, 0] = f_fib
+                        out[x, y, z, 1] = f_res
+                        out[x, y, z, 4] = f_nonrf
+                        out[x, y, z, 8] = wd_sc / sum_iso_sc if sum_iso_sc > 1e-10 else 0.0
+                elif enable_direction_refinement:
                     _, AD_est, RD_est = refine_fiber_direction_cone(
                         bvals, bvecs, sig_norm, dominant_dir,
                         f_fib, f_res, f_nonrf, 0.0,
@@ -774,7 +830,9 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         cone1_half_angle, n1_cone, cone2_half_angle, n2_cone,
                         neighbor_idx, max_fiber_populations, out,
                         lambda_aniso_scalar, conc_mod_enabled,
-                        conc_mod_c_lo, conc_mod_c_hi, conc_mod_gain):
+                        conc_mod_c_lo, conc_mod_c_hi, conc_mod_gain,
+                        stagec_enabled, iso_forward, iso_gram,
+                        stagec_ad_grid, stagec_rd_grid, stagec_aniso_ratio):
     """v3 parallel fitting kernel — three-compartment isotropic model
     (3-ISO). Same Stage A / Stage B (+ MRDS multi-fiber) structure as
     `_fit_voxels_2iso_v3`; see that kernel's docstring for the full
@@ -901,7 +959,45 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
             if n_pop == 1:
                 dominant_dir = fiber_dirs[dir_indices[0]]
 
-                if enable_direction_refinement:
+                if stagec_enabled:
+                    # ── STAGE C: joint (VARPRO) tensor+fraction re-solve (3-ISO
+                    # binning RES/HIN/WAT). See stagec_varpro_single_fiber. ──
+                    w_sc = np.zeros(1 + n_iso)
+                    AD_est, RD_est = stagec_varpro_single_fiber(
+                        sig_norm, bvals, bvecs, dominant_dir,
+                        iso_forward, iso_gram, stagec_ad_grid, stagec_rd_grid,
+                        stagec_aniso_ratio, w_sc
+                    )
+                    tot_sc = 0.0
+                    for i in range(1 + n_iso):
+                        tot_sc += w_sc[i]
+                    if tot_sc > 1e-10:
+                        res_sc = 0.0
+                        hin_sc = 0.0
+                        wat_sc = 0.0
+                        wd_sc = 0.0
+                        for i in range(n_iso):
+                            wi = w_sc[1 + i]
+                            adc = iso_grid[i]
+                            if adc <= THRESH_RES:
+                                res_sc += wi
+                            elif adc <= THRESH_WAT:
+                                hin_sc += wi
+                            else:
+                                wat_sc += wi
+                            wd_sc += wi * adc
+                        f_fib = w_sc[0] / tot_sc
+                        f_res = res_sc / tot_sc
+                        f_hin = hin_sc / tot_sc
+                        f_wat = wat_sc / tot_sc
+                        sum_iso_sc = res_sc + hin_sc + wat_sc
+                        out[x, y, z, 0] = f_fib
+                        out[x, y, z, 1] = f_res
+                        out[x, y, z, 2] = f_hin
+                        out[x, y, z, 3] = f_wat
+                        out[x, y, z, 4] = f_hin + f_wat
+                        out[x, y, z, 8] = wd_sc / sum_iso_sc if sum_iso_sc > 1e-10 else 0.0
+                elif enable_direction_refinement:
                     _, AD_est, RD_est = refine_fiber_direction_cone(
                         bvals, bvecs, sig_norm, dominant_dir,
                         f_fib, f_res, f_hin, f_wat,
@@ -1106,7 +1202,8 @@ class DBSI_Adaptive:
                  lambda_aniso_conc_mod=_DEFAULT_LAMBDA_ANISO_CONC_MOD,
                  conc_mod_c_lo=_DEFAULT_CONC_MOD_C_LO,
                  conc_mod_c_hi=_DEFAULT_CONC_MOD_C_HI,
-                 conc_mod_gain=_DEFAULT_CONC_MOD_GAIN):
+                 conc_mod_gain=_DEFAULT_CONC_MOD_GAIN,
+                 stagec_refine=_DEFAULT_STAGEC_REFINE):
         if max_fiber_populations not in (1, 2, 3):
             raise ValueError(
                 f"max_fiber_populations must be 1, 2, or 3, got "
@@ -1139,6 +1236,7 @@ class DBSI_Adaptive:
         self.conc_mod_c_lo = conc_mod_c_lo
         self.conc_mod_c_hi = conc_mod_c_hi
         self.conc_mod_gain = conc_mod_gain
+        self.stagec_refine = stagec_refine
 
         self.model_mode_ = None
         self.b_max_ = None
@@ -1602,6 +1700,18 @@ class DBSI_Adaptive:
                   f"dominant-basin concentration <= {self.conc_mod_c_lo:.2f}; "
                   f"no boost >= {self.conc_mod_c_hi:.2f}; per-voxel re-solve)")
 
+        # ── Stage C precompute (constant across voxels) ─────────────────────
+        # Isotropic forward columns and their Gram, plus the (AD, RD) search
+        # grids for the joint mono-fiber re-solve. Built once per protocol.
+        iso_forward = np.exp(-np.outer(bvals, iso_grid)).astype(np.float64)
+        iso_gram = iso_forward.T @ iso_forward
+        stagec_ad_grid = np.linspace(_STAGEC_AD_MIN, _STAGEC_AD_MAX, _STAGEC_N_AD)
+        stagec_rd_grid = np.linspace(_STAGEC_RD_MIN, _STAGEC_RD_MAX, _STAGEC_N_RD)
+        if self.stagec_refine:
+            print(f"   Stage C (joint mono-fiber tensor+fraction re-solve): ENABLED "
+                  f"(VARPRO over AD[{_STAGEC_N_AD}]xRD[{_STAGEC_N_RD}] grid + local "
+                  f"refine; n_pop==1 voxels)")
+
         _min_separation_cos = float(np.cos(np.radians(self.min_separation_deg)))
         _kernel = _fit_voxels_3iso_v3 if use_3iso else _fit_voxels_2iso_v3
 
@@ -1623,7 +1733,9 @@ class DBSI_Adaptive:
                     neighbor_idx, self.max_fiber_populations, results,
                     float(self.lambda_aniso), bool(self.lambda_aniso_conc_mod),
                     float(self.conc_mod_c_lo), float(self.conc_mod_c_hi),
-                    float(self.conc_mod_gain)
+                    float(self.conc_mod_gain),
+                    bool(self.stagec_refine), iso_forward, iso_gram,
+                    stagec_ad_grid, stagec_rd_grid, float(_STAGEC_ANISO_RATIO)
                 )
                 pbar.update(end - start)
 

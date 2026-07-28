@@ -880,6 +880,91 @@ def stagec_varpro_single_fiber(sig_norm, bvals, bvecs, fiber_dir,
     return best_ad, best_rd
 
 
+@njit(cache=True, fastmath=True)
+def iso_fraction_resolve(sig_norm, bvals, bvecs, fdirs, fad, frd, n_fib,
+                         iso_d, w_out):
+    """
+    STAGE D — final constrained compartment-fraction re-solve.
+
+    NNLS over the REDUCED, physically-anchored dictionary
+    [fiber_col_1 .. fiber_col_{n_fib} | iso_col(d_1) .. iso_col(d_{n_iso})],
+    where the fiber tensors (AD, RD) and directions are FIXED (from Stage A
+    detection + Stage C / MRDS tensor estimation) and the isotropic
+    diffusivities `iso_d` are a small FIXED set at physiological centroids
+    (e.g. 0.15 / 1.0 / 3.0e-3 for RF / HF / WF). Returns the non-negative
+    weights in `w_out` (length n_fib + n_iso); the caller reads fiber_fraction
+    = sum(fiber weights)/sum and bins the iso weights on the THRESH_RES /
+    THRESH_WAT diffusivity boundaries.
+
+    WHY (see project design note): the raw v3 fractions come from the OVER-
+    COMPLETE Stage A dictionary (fiber block ~468 collinear columns, iso block a
+    fine anchored grid). That free spectrum SMEARS weight across near-collinear
+    columns and the subsequent binning mis-attributes it -- restricted collapses,
+    hindered inflates (validated: anchored HF 0.64 vs GT 0.50, RF 0.16 vs 0.20;
+    fixed-3 recovers RF/HF/WF to ~GT with far lower variance, and recovers the
+    high-RF of tumor-like / restricted-heavy voxels exactly). A few well-placed
+    columns is a well-conditioned, low-variance estimator; the identifiability
+    analysis showed 3 iso components are supported down to b_max ~ 2000.
+
+    SIGNAL: this re-solve MUST be run on the RICIAN-CORRECTED signal
+    (data_corr), NOT the raw magnitude: the restricted fraction is read from the
+    high-b plateau, and the raw Rician noise floor E[|noise|]->sigma*sqrt(pi/2)
+    is ALSO a high-b plateau -> on raw it is mistaken for restricted (false RF in
+    CSF/water). The correction subtracts 2*sigma^2 and de-confounds them. (This
+    is the OPPOSITE of the fiber TENSOR estimate `stagec_varpro_single_fiber`,
+    which needs the RAW signal because the correction's clamp destroys the
+    high-b decay SHAPE. Different estimands, different bias -> different optimal
+    preprocessing; see design note on the block-wise Rician-MLE approximation.)
+
+    Parameters
+    ----------
+    sig_norm : array (N,)
+        Normalised CORRECTED signal S/S0.
+    bvals, bvecs : arrays
+    fdirs : array (n_fib_max, 3)
+        Fiber unit directions (only the first n_fib rows are used).
+    fad, frd : array (n_fib_max,)
+        Fiber axial / radial diffusivities (first n_fib used).
+    n_fib : int
+        Number of fiber populations (0, 1, or 2).
+    iso_d : array (n_iso,)
+        Fixed isotropic diffusivities.
+    w_out : array (>= n_fib + n_iso,)
+        OUTPUT: non-negative weights [fiber_1..fiber_{n_fib}, iso_1..iso_{n_iso}].
+    """
+    N = len(bvals)
+    n_iso = iso_d.shape[0]
+    ntot = n_fib + n_iso
+    A = np.empty((N, ntot))
+    for k in range(n_fib):
+        ad = fad[k]
+        rd = frd[k]
+        for i in range(N):
+            d = (bvecs[i, 0] * fdirs[k, 0] + bvecs[i, 1] * fdirs[k, 1]
+                 + bvecs[i, 2] * fdirs[k, 2])
+            A[i, k] = np.exp(-bvals[i] * (rd + (ad - rd) * d * d))
+    for j in range(n_iso):
+        dj = iso_d[j]
+        for i in range(N):
+            A[i, n_fib + j] = np.exp(-bvals[i] * dj)
+    AtA = np.zeros((ntot, ntot))
+    Aty = np.zeros(ntot)
+    for a in range(ntot):
+        s = 0.0
+        for i in range(N):
+            s += A[i, a] * sig_norm[i]
+        Aty[a] = s
+        for b in range(a, ntot):
+            v = 0.0
+            for i in range(N):
+                v += A[i, a] * A[i, b]
+            AtA[a, b] = v
+            AtA[b, a] = v
+    w, _ = nnls_coordinate_descent(AtA, Aty, 0.0)
+    for a in range(ntot):
+        w_out[a] = w[a]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # MRDS-LITE: MULTI-RESOLUTION CONE REFINEMENT OF THE STAGE A DIRECTION
 # ─────────────────────────────────────────────────────────────────────────────

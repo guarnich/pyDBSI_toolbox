@@ -163,6 +163,7 @@ from .core.solvers import (
     select_dominant_directions,
     dominant_basin_concentration,     # NEW — per-voxel angular concentration
     stagec_varpro_single_fiber,       # NEW — Stage C joint tensor+fraction re-solve
+    iso_fraction_resolve,             # NEW — Stage D final constrained fraction re-solve
     build_direction_neighbor_graph,   # NEW — local-maxima peak-finding graph
     estimate_AD_RD_conditioned,
     compute_fiber_fa,
@@ -193,8 +194,17 @@ FIBER_THRESHOLD = 0.15      # dimensionless — minimum FF for AD/RD estimation
 THRESH_RES = 0.3e-3          # mm^2/s — restricted / hindered boundary
 THRESH_WAT = 3.0e-3          # mm^2/s — hindered  / free-water boundary
 
-B_THRESH_3ISO = 3000.0       # s/mm^2 — minimum b_max to activate 3-ISO model
-MIN_SHELLS_3ISO = 3          # minimum distinct non-zero b-value shells for 3-ISO
+# 3-ISO is now the DEFAULT for any multi-shell protocol (>=2 shells, b_max
+# >= 2000). Lowered from (b_max>=3000 AND >=3 shells) on the strength of the
+# iso-block identifiability analysis + the Stage D fixed-3 estimator: an SVD/
+# CRLB/Monte-Carlo study showed the 3 iso components (RF/HF/WF) are supported
+# with low variance down to b_max ~ 2000, and the constrained fixed-centroid
+# estimator recovers them near-GT (unlike the old free anchored spectrum). The
+# 2-ISO merge (RF + NRF) is now only a single-shell fallback -- and it was shown
+# to be LESS accurate on RF than 3-ISO even where it applies. See project
+# identifiability analysis.
+B_THRESH_3ISO = 2000.0       # s/mm^2 — minimum b_max to activate 3-ISO model
+MIN_SHELLS_3ISO = 2          # minimum distinct non-zero b-value shells for 3-ISO
 
 # Stage A dictionary defaults. Deliberately coarse on the AD/RD axis.
 _STAGE_A_AD_MIN = 0.5e-3
@@ -406,6 +416,22 @@ _STAGEC_ANISO_RATIO = 1.1
 # tensor low (validated: raw -> AD 1.72/FF 0.56/RF 0.09 vs corrected ->
 # AD 1.32/FF 0.73 on a GT-1.70 fiber; both NNLS solvers agree, so it is the
 # input signal, not the solver). Stage A detection still uses data_corr.
+
+# Stage D — final constrained compartment-fraction re-solve (ON by default;
+# disable via iso_resolve=False). For EVERY fitted voxel, the reported
+# fractions are re-estimated by NNLS over [detected fibers | a few FIXED iso
+# centroids] on the RICIAN-CORRECTED signal, replacing the over-complete Stage A
+# spectrum (whose free anchored grid smears weight and mis-bins RF/HF/WF). The
+# identifiability analysis showed 3 iso components are supported down to
+# b_max~2000, and the fixed-3 estimator recovers RF/HF/WF near-GT with low
+# variance (incl. the high-RF of tumor-like voxels, exactly) where the anchored
+# spectrum failed. CORRECTED signal here (opposite to Stage C's RAW): the
+# restricted fraction is read from the high-b plateau, which the raw Rician
+# noise floor mimics -> corrected de-confounds it. Iso centroids: RF/HF/WF for
+# 3-ISO, RF/NRF for the (single-shell) 2-ISO fallback.
+_DEFAULT_ISO_RESOLVE = True
+_ISO_RESOLVE_D_3ISO = (0.15e-3, 1.0e-3, 3.0e-3)   # RF, HF, WF centroids
+_ISO_RESOLVE_D_2ISO = (0.15e-3, 1.5e-3)            # RF, NRF centroids (single-shell)
 
 # Monte-Carlo null calibration of the concentration gate (see
 # calibration.data_driven.calibrate_concentration_gate_mc). When calibration
@@ -1132,6 +1158,110 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                     out[x, y, z, 28] = directions[2, 2]
 
 
+@njit(parallel=True, cache=True, fastmath=True)
+def _iso_resolve_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso, out):
+    """
+    STAGE D pass — final constrained compartment-fraction re-solve for EVERY
+    fitted voxel, on the RICIAN-CORRECTED signal. Reads the detected structure
+    (n_pop + per-population directions/tensors) back from the output array,
+    re-solves [fibers | fixed iso centroids] via `iso_fraction_resolve`, and
+    OVERWRITES the fraction channels (0,1,2,3,4 and the pop-2 fraction 15).
+    The fiber TENSORS/directions are kept as estimated (Stage C on raw / MRDS);
+    only the fractions are re-estimated here (on corrected). See
+    `core.solvers.iso_fraction_resolve` for the why (raw-tensor / corrected-
+    fraction split, fixed-3 vs the over-complete spectrum).
+    """
+    n_voxels = coords.shape[0]
+    n_iso = iso_d.shape[0]
+    for idx in prange(n_voxels):
+        x, y, z = coords[idx]
+        sig = data_corr[x, y, z]
+        s0 = 0.0
+        cnt = 0
+        for i in range(len(bvals)):
+            if bvals[i] < b0_thr:
+                s0 += sig[i]
+                cnt += 1
+        if cnt > 0:
+            s0 /= cnt
+        if s0 < 1e-6:
+            continue
+        sig_norm = sig / s0
+
+        # Reconstruct the fiber set from the output (NaN n_pop => no fiber).
+        fdirs = np.zeros((2, 3))
+        fad = np.zeros(2)
+        frd = np.zeros(2)
+        n_fib = 0
+        npop = out[x, y, z, 11]
+        if not np.isnan(npop):
+            npi = int(npop)
+            if npi >= 1 and not np.isnan(out[x, y, z, 5]):
+                fdirs[0, 0] = out[x, y, z, 12]
+                fdirs[0, 1] = out[x, y, z, 13]
+                fdirs[0, 2] = out[x, y, z, 14]
+                fad[0] = out[x, y, z, 5]
+                frd[0] = out[x, y, z, 6]
+                n_fib = 1
+                if npi >= 2 and not np.isnan(out[x, y, z, 16]):
+                    fdirs[1, 0] = out[x, y, z, 19]
+                    fdirs[1, 1] = out[x, y, z, 20]
+                    fdirs[1, 2] = out[x, y, z, 21]
+                    fad[1] = out[x, y, z, 16]
+                    frd[1] = out[x, y, z, 17]
+                    n_fib = 2
+
+        w_out = np.zeros(n_fib + n_iso)
+        iso_fraction_resolve(sig_norm, bvals, bvecs, fdirs, fad, frd, n_fib, iso_d, w_out)
+        tot = 0.0
+        for a in range(n_fib + n_iso):
+            tot += w_out[a]
+        if tot < 1e-10:
+            continue
+
+        f_fib = 0.0
+        for k in range(n_fib):
+            f_fib += w_out[k]
+        f_fib /= tot
+        res = 0.0
+        hin = 0.0
+        wat = 0.0
+        for j in range(n_iso):
+            wj = w_out[n_fib + j] / tot
+            dj = iso_d[j]
+            if dj <= THRESH_RES:
+                res += wj
+            elif dj < THRESH_WAT:   # strict: the WF centroid sits AT THRESH_WAT
+                hin += wj
+            else:
+                wat += wj
+
+        if n_fib >= 2:
+            # CROSSINGS: keep the MRDS fiber_fraction (the over-complete Stage A
+            # captures the total anisotropic mass well; a reduced 2-column
+            # re-solve, sensitive to the imperfect crossing tensors, sheds fiber
+            # mass to iso and under-estimates FF_total -- validated). Use Stage D
+            # only for the ISO SPLIT (RF/HF/WF proportions), rescaled to the
+            # existing (1 - FF). FF (ch 0) and pop-2 fraction (ch 15) untouched.
+            ff_keep = out[x, y, z, 0]
+            if np.isnan(ff_keep):
+                ff_keep = f_fib
+            iso_sum = res + hin + wat
+            if iso_sum > 1e-10:
+                sc = (1.0 - ff_keep) / iso_sum
+                res = res * sc
+                hin = hin * sc
+                wat = wat * sc
+        else:
+            out[x, y, z, 0] = f_fib
+
+        out[x, y, z, 1] = res
+        out[x, y, z, 4] = hin + wat
+        if use_3iso:
+            out[x, y, z, 2] = hin
+            out[x, y, z, 3] = wat
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN MODEL CLASS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1259,7 +1389,8 @@ class DBSI_Adaptive:
                  conc_mod_c_lo=_DEFAULT_CONC_MOD_C_LO,
                  conc_mod_c_hi=_DEFAULT_CONC_MOD_C_HI,
                  conc_mod_gain=_DEFAULT_CONC_MOD_GAIN,
-                 stagec_refine=_DEFAULT_STAGEC_REFINE):
+                 stagec_refine=_DEFAULT_STAGEC_REFINE,
+                 iso_resolve=_DEFAULT_ISO_RESOLVE):
         if max_fiber_populations not in (1, 2, 3):
             raise ValueError(
                 f"max_fiber_populations must be 1, 2, or 3, got "
@@ -1293,6 +1424,7 @@ class DBSI_Adaptive:
         self.conc_mod_c_hi = conc_mod_c_hi
         self.conc_mod_gain = conc_mod_gain
         self.stagec_refine = stagec_refine
+        self.iso_resolve = iso_resolve
 
         self.model_mode_ = None
         self.b_max_ = None
@@ -1347,29 +1479,32 @@ class DBSI_Adaptive:
         if self.force_n_iso not in (None, 2, 3):
             raise ValueError("force_n_iso must be 2, 3, or None.")
 
-        # DEFAULT is 2-ISO (RF + NRF). The hindered/water split (3-ISO) is an
-        # OPT-IN (force_n_iso=3) reserved for future high-b protocols that can
-        # actually separate HF from WF: at typical clinical b-max the WF is
-        # unreliable (near the noise floor) and is not used downstream — the
-        # meaningful non-restricted "tissue destructuring" signal is NRF
-        # (HF+WF merged). `analyse_protocol` still runs, but only to advise
-        # whether a requested 3-ISO is supported.
+        # DEFAULT is now 3-ISO (RF + HF + WF) whenever the protocol supports it
+        # (>=2 shells, b_max>=2000 per `analyse_protocol`); 2-ISO (RF + NRF,
+        # HF+WF merged) is the fallback for single-shell / low-b_max protocols.
+        # This flip (from 2-ISO-default + opt-in 3-ISO) rests on the iso-block
+        # identifiability analysis + the Stage D fixed-3 estimator: 3 iso
+        # components are supported down to b_max~2000 and the constrained
+        # estimator recovers RF/HF/WF near-GT with low variance (and 3-ISO is
+        # MORE accurate on the restricted fraction than the 2-ISO merge even
+        # where the merge applies). `force_n_iso` overrides: 2 forces 2-ISO,
+        # 3 forces 3-ISO (with a warning if the protocol can't support it).
         protocol_supports_3iso = use_3iso
-        if self.force_n_iso == 3:
+        if self.force_n_iso == 2:
+            use_3iso = False
+            reason = "2-ISO model: force_n_iso=2 requested by user (RF + NRF)."
+        elif self.force_n_iso == 3:
             use_3iso = True
-            print(f"\n  [MODEL] force_n_iso=3 — 3-ISO opt-in (RF + HF + WF).")
+            print(f"\n  [MODEL] force_n_iso=3 — 3-ISO (RF + HF + WF).")
             if not protocol_supports_3iso:
                 print(f"  [WARNING] analyse_protocol judged this acquisition "
                       f"insufficient for a reliable HF/WF split: {reason} "
                       f"The 3-ISO water fraction may be unstable.")
-        else:  # None (DEFAULT) or 2 -> 2-ISO
-            use_3iso = False
-            if self.force_n_iso == 2:
-                reason = "2-ISO model: force_n_iso=2 requested by user."
-            else:
-                reason = ("2-ISO model (DEFAULT: RF + NRF, HF+WF merged). "
-                          "3-ISO (HF/WF split) is opt-in via force_n_iso=3. "
-                          f"[protocol_supports_3iso={protocol_supports_3iso}]")
+        else:  # None (DEFAULT) -> follow analyse_protocol
+            use_3iso = protocol_supports_3iso
+            if not use_3iso:
+                reason = ("2-ISO fallback (single-shell / low b_max protocol): "
+                          + reason)
 
         model_mode = 3 if use_3iso else 2
         self.model_mode_ = model_mode
@@ -1812,6 +1947,18 @@ class DBSI_Adaptive:
               f"({pct:.1f}%)")
         print(f"   Multi-population (N_POP>=2) voxels: {n_multi:,} "
               f"({pct_multi:.1f}% of fitted voxels)")
+
+        # ── Stage D: final constrained fraction re-solve (fixed iso, corrected) ──
+        if self.iso_resolve:
+            _iso_d = np.array(_ISO_RESOLVE_D_3ISO if use_3iso else _ISO_RESOLVE_D_2ISO,
+                              dtype=np.float64)
+            print(f"\n   Stage D (constrained fraction re-solve on CORRECTED signal): "
+                  f"ENABLED  [fixed iso centroids {np.round(_iso_d*1e3, 2).tolist()} e-3, "
+                  f"{'3-ISO' if use_3iso else '2-ISO'}]")
+            _t0d = time.time()
+            _iso_resolve_pass(data_corr, coords, bvals, bvecs, b0_thr, _iso_d,
+                              use_3iso, results)
+            print(f"   Stage D completed: {time.time() - _t0d:.1f}s")
 
         # ── Data-driven restricted-fraction bias correction (IN-PLACE) ──────
         # Invert the per-dataset RF response function to undo the systematic

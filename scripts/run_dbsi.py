@@ -61,6 +61,13 @@ def main():
                              "that leaks isotropic signal into fiber_fraction; safe band [2.0, 2.16]).")
     parser.add_argument("--min-weight-fraction", type=float, dest="min_weight_fraction", default=0.05,
                         help="Stage A direction-selection threshold. Default: 0.05.")
+    parser.add_argument("--disable-iso-resolve", dest="disable_iso_resolve", action="store_true",
+                        help="Disable the Stage D final constrained iso fraction re-solve. It is "
+                             "ON by default: for every voxel it re-estimates the compartment "
+                             "fractions by NNLS over [detected fibers | fixed iso centroids] on "
+                             "the Rician-corrected signal, replacing the over-complete Stage A "
+                             "spectrum (which mis-bins RF/HF/WF). Pass this to keep the raw "
+                             "Stage A fractions.")
     parser.add_argument("--disable-stagec", dest="disable_stagec", action="store_true",
                         help="Disable the Stage C joint mono-fiber re-solve (Plan A / bias #1 "
                              "fix). It is ON by default: for single-fiber voxels it re-fits the "
@@ -143,6 +150,7 @@ def main():
         target_angular_resolution_deg=args.target_angular_resolution_deg,
         lambda_aniso_conc_mod=not args.disable_conc_modulation,
         stagec_refine=not args.disable_stagec,
+        iso_resolve=not args.disable_iso_resolve,
     )
 
     results, model_mode = model.fit(

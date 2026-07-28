@@ -1770,7 +1770,7 @@ class DBSI_Adaptive:
         if self.stagec_refine:
             print(f"   Stage C (joint mono-fiber tensor+fraction re-solve): ENABLED "
                   f"(VARPRO over AD[{_STAGEC_N_AD}]xRD[{_STAGEC_N_RD}] grid + local "
-                  f"refine; dedicated {_STAGEC_N_ISO}-pt iso grid; n_pop==1 voxels)")
+                  f"refine; raw signal; n_pop==1 voxels)")
 
         _min_separation_cos = float(np.cos(np.radians(self.min_separation_deg)))
         _kernel = _fit_voxels_3iso_v3 if use_3iso else _fit_voxels_2iso_v3

@@ -472,6 +472,127 @@ def select_dominant_directions(w_aniso, n_dirs, n_pairs, neighbor_idx,
     return dir_indices, dir_weights
 
 
+@njit(cache=True, fastmath=True)
+def dominant_basin_concentration(w_aniso, n_dirs, n_pairs, neighbor_idx,
+                                 fiber_dirs):
+    """
+    Per-voxel ANGULAR CONCENTRATION of the anisotropic weight: the share of
+    the total Stage-A anisotropic weight held by the single largest angular
+    basin (Voronoi mass around the dominant local-maximum peak).
+
+    This is EXACTLY the quantity the concentration gate in
+    `select_dominant_directions` thresholds (max_basin / total_weight), but
+    returned as a continuous scalar in [0, 1] for use as a per-voxel
+    diagnostic channel and as the modulation variable for a per-voxel
+    lambda_aniso adaptation. It is factored out here (rather than returned
+    from `select_dominant_directions`) so it can be computed even for voxels
+    that never enter the direction-selection path (e.g. below fiber_threshold)
+    and without perturbing that function's tuned return signature.
+
+    Interpretation (the discriminator Plan A rests on):
+      - A REAL fiber -- even a demyelinated / low-FA one -- concentrates its
+        anisotropic weight along one direction: high concentration (~0.4-0.6).
+      - DIFFUSE anisotropic weight absorbed from isotropic (esp. restricted)
+        signal on a fiber-free voxel spreads across many near-equal basins:
+        low concentration (~0.2-0.25).
+    Unlike n_pop (a binary/quantised detection count), concentration separates
+    a weak-but-real fiber from leakage continuously, which is why it is the
+    right lever for a continuous per-voxel regularization (npop-gating was
+    falsified: it crushed the demyelinated fiber, confusing it with GM).
+
+    The peak-finding, basin-assignment and column-ordering conventions are
+    IDENTICAL to `select_dominant_directions` (pair-major, direction-minor;
+    local-maxima over the k-NN graph; Voronoi basin mass). Returns 0.0 when
+    the anisotropic block carries negligible weight or has no local maximum.
+
+    Parameters
+    ----------
+    w_aniso : array (n_aniso_cols,)
+        NNLS weights restricted to the anisotropic (Stage A) block.
+    n_dirs, n_pairs : int
+        Dictionary dimensions (n_aniso_cols == n_dirs * n_pairs).
+    neighbor_idx : array (n_dirs, k), int64
+        k-nearest-neighbour direction graph (from
+        `build_direction_neighbor_graph`).
+    fiber_dirs : array (n_dirs, 3), float64
+        Hemisphere direction unit vectors.
+
+    Returns
+    -------
+    concentration : float
+        max_basin_mass / total_anisotropic_weight, in [0, 1]. 0.0 if the
+        block is empty / has no peak.
+    """
+    dir_weight_totals = np.zeros(n_dirs, dtype=np.float64)
+    idx_col = 0
+    for p in range(n_pairs):
+        for d in range(n_dirs):
+            dir_weight_totals[d] += w_aniso[idx_col]
+            idx_col += 1
+
+    total_weight = 0.0
+    for d in range(n_dirs):
+        total_weight += dir_weight_totals[d]
+    if total_weight < 1e-10:
+        return 0.0
+
+    k = neighbor_idx.shape[1]
+
+    # Local-maxima peak-finding (same criterion as select_dominant_directions).
+    is_peak = np.zeros(n_dirs, dtype=np.bool_)
+    n_peaks = 0
+    for d in range(n_dirs):
+        wd = dir_weight_totals[d]
+        if wd <= 0.0:
+            continue
+        peak = True
+        for j in range(k):
+            nb = neighbor_idx[d, j]
+            wn = dir_weight_totals[nb]
+            if wn > wd or (wn == wd and nb < d):
+                peak = False
+                break
+        if peak:
+            is_peak[d] = True
+            n_peaks += 1
+
+    if n_peaks == 0:
+        return 0.0
+
+    peak_idx = np.empty(n_peaks, dtype=np.int64)
+    t = 0
+    for d in range(n_dirs):
+        if is_peak[d]:
+            peak_idx[t] = d
+            t += 1
+
+    # Angular-basin mass (Voronoi assignment to nearest peak).
+    basin_mass = np.zeros(n_peaks, dtype=np.float64)
+    for d in range(n_dirs):
+        wd = dir_weight_totals[d]
+        if wd <= 0.0:
+            continue
+        best_adot = -1.0
+        best_pk = 0
+        for pk in range(n_peaks):
+            pi = peak_idx[pk]
+            dot = (fiber_dirs[d, 0] * fiber_dirs[pi, 0]
+                   + fiber_dirs[d, 1] * fiber_dirs[pi, 1]
+                   + fiber_dirs[d, 2] * fiber_dirs[pi, 2])
+            adot = dot if dot >= 0.0 else -dot
+            if adot > best_adot:
+                best_adot = adot
+                best_pk = pk
+        basin_mass[best_pk] += wd
+
+    max_basin = 0.0
+    for pk in range(n_peaks):
+        if basin_mass[pk] > max_basin:
+            max_basin = basin_mass[pk]
+
+    return max_basin / total_weight
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # STAGE B — Closed-form (AD, RD) estimation conditioned on direction
 # ─────────────────────────────────────────────────────────────────────────────
@@ -589,6 +710,259 @@ def estimate_AD_RD_conditioned(bvals, bvecs, sig_norm, fiber_dir,
         RD_est = m
 
     return AD_est, RD_est
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE C — constrained joint (VARPRO) mono-fiber fraction + tensor re-solve
+# ─────────────────────────────────────────────────────────────────────────────
+
+@njit(cache=True, fastmath=True)
+def _stagec_scan(sig_norm, bvals, c2, iso_forward, iso_gram, iso_aty, yty,
+                 ad_array, rd_array, aniso_ratio,
+                 best_res, best_ad, best_rd, w_out):
+    """Scan an (AD, RD) grid: for each admissible pair build the reduced Gram
+    of [fiber_col | iso_forward], NNLS-solve, keep the minimum-residual weights.
+    Updates w_out (length 1+n_iso) with the best weights found. Helper for
+    `stagec_varpro_single_fiber`."""
+    N = len(bvals)
+    n_iso = iso_forward.shape[1]
+    ntot = 1 + n_iso
+    AtA = np.zeros((ntot, ntot))
+    Aty = np.empty(ntot)
+    fibcol = np.empty(N)
+    # iso block of the Gram / Aty is constant across (AD, RD) -- fill once.
+    for k in range(n_iso):
+        for j in range(n_iso):
+            AtA[k + 1, j + 1] = iso_gram[k, j]
+        Aty[k + 1] = iso_aty[k]
+    for ia in range(ad_array.shape[0]):
+        ad = ad_array[ia]
+        for ir in range(rd_array.shape[0]):
+            rd = rd_array[ir]
+            if ad < rd * aniso_ratio:
+                continue
+            fib_fib = 0.0
+            fib_y = 0.0
+            for i in range(N):
+                v = np.exp(-bvals[i] * (rd + (ad - rd) * c2[i]))
+                fibcol[i] = v
+                fib_fib += v * v
+                fib_y += v * sig_norm[i]
+            AtA[0, 0] = fib_fib
+            for k in range(n_iso):
+                s = 0.0
+                for i in range(N):
+                    s += fibcol[i] * iso_forward[i, k]
+                AtA[0, k + 1] = s
+                AtA[k + 1, 0] = s
+            Aty[0] = fib_y
+            w, _ = nnls_coordinate_descent(AtA, Aty, 0.0)
+            # residual ||Aw - y||^2 = w^T AtA w - 2 w^T Aty + y^T y
+            res = yty
+            for a in range(ntot):
+                res += -2.0 * w[a] * Aty[a]
+                for b in range(ntot):
+                    res += w[a] * AtA[a, b] * w[b]
+            if res < best_res:
+                best_res = res
+                best_ad = ad
+                best_rd = rd
+                for a in range(ntot):
+                    w_out[a] = w[a]
+    return best_res, best_ad, best_rd
+
+
+@njit(cache=True, fastmath=True)
+def stagec_varpro_single_fiber(sig_norm, bvals, bvecs, fiber_dir,
+                               iso_forward, iso_gram, ad_grid, rd_grid,
+                               aniso_ratio, w_out):
+    """
+    STAGE C — constrained joint (separable / VARPRO) re-solve of a SINGLE
+    fiber's tensor AND all compartment fractions, given the Stage-A fiber
+    direction.
+
+    WHY THIS EXISTS
+    ---------------
+    The raw v3 pipeline estimates the compartment fractions (Stage A NNLS over
+    the OVER-COMPLETE anisotropic dictionary: fiber_fraction = sum of all ~468
+    anisotropic weights) and the fiber tensor (Stage B closed-form given those
+    fractions) in two DECOUPLED steps. On a concentrated single fiber that
+    coexists with a restricted isotropic compartment the two are MUTUALLY
+    biased: the many near-fiber anisotropic columns absorb restricted/hindered
+    iso signal -> fiber_fraction inflated and restricted_fraction driven to ~0;
+    the closed-form Stage B, fed those biased fractions, then UNDER-estimates AD
+    (~1.1 vs a true 1.7), which makes the fiber column blunter/more isotropic
+    and locks the inflation in. Synthetic single-fiber validation (FF_true 0.55,
+    RF_true 0.10, AD 1.7, RD swept, SNR 30/50): the raw pipeline gave FF up to
+    0.94, RF 0.00, AD ~1.1; this joint re-solve recovers FF 0.55-0.57, RF
+    0.07-0.10, AD 1.64-1.85, RD within noise -- across all RD.
+
+    The fix is to fit the fiber tensor and fractions JOINTLY by directly
+    minimising the reconstruction residual. Because the fractions enter the
+    forward model LINEARLY and only (AD, RD) enter non-linearly (the direction
+    is fixed to Stage A's detection), this is a 2-D separable least squares
+    (VARPRO): scan (AD, RD) on a coarse grid, and for each candidate solve the
+    NON-NEGATIVE linear problem for [fiber_weight | iso_weights] on the REDUCED
+    dictionary [fiber_col(AD,RD,dir) | iso_grid] -- ONE physically-anchored
+    fiber column competing fairly with the isotropic columns, instead of the
+    over-complete anisotropic block. A short local refine (half-spacing, 5x5)
+    around the best grid node sharpens (AD, RD). An earlier ALTERNATING scheme
+    (fractions <-> closed-form Stage B tensor) was tried and FALSIFIED: it
+    inherits the closed-form's downward AD bias and converges to the same wrong
+    fixed point (AD stuck ~1.0, RF ~0.01). Only the residual-minimising search
+    recovers the truth, hence VARPRO.
+
+    Parameters
+    ----------
+    sig_norm : array (N,)
+        Normalised signal S/S0.
+    bvals : array (N,)
+    bvecs : array (N, 3)
+    fiber_dir : array (3,)
+        Stage-A detected fiber direction (unit vector).
+    iso_forward : array (N, n_iso)
+        Precomputed isotropic forward columns exp(-b * d_k) (constant across
+        voxels; built once per protocol by the caller).
+    iso_gram : array (n_iso, n_iso)
+        iso_forward.T @ iso_forward (constant; built once).
+    ad_grid, rd_grid : array
+        Coarse (AD, RD) search grids.
+    aniso_ratio : float
+        Minimum AD/RD for an admissible fiber candidate.
+    w_out : array (1 + n_iso,)
+        OUTPUT: best-fit non-negative weights [fiber, iso_0..iso_{n_iso-1}].
+
+    Returns
+    -------
+    best_ad, best_rd : float
+        Residual-minimising fiber tensor. (Fractions are read from w_out by the
+        caller: fiber_fraction = w_out[0] / sum(w_out), the iso compartments by
+        binning w_out[1:] on iso-grid diffusivity thresholds.)
+    """
+    N = len(bvals)
+    n_iso = iso_forward.shape[1]
+    c2 = np.empty(N)
+    for i in range(N):
+        d = (bvecs[i, 0] * fiber_dir[0] + bvecs[i, 1] * fiber_dir[1]
+             + bvecs[i, 2] * fiber_dir[2])
+        c2[i] = d * d
+    iso_aty = np.empty(n_iso)
+    for k in range(n_iso):
+        s = 0.0
+        for i in range(N):
+            s += iso_forward[i, k] * sig_norm[i]
+        iso_aty[k] = s
+    yty = 0.0
+    for i in range(N):
+        yty += sig_norm[i] * sig_norm[i]
+
+    best_res = 1e30
+    best_ad = ad_grid[0]
+    best_rd = rd_grid[0]
+    best_res, best_ad, best_rd = _stagec_scan(
+        sig_norm, bvals, c2, iso_forward, iso_gram, iso_aty, yty,
+        ad_grid, rd_grid, aniso_ratio, best_res, best_ad, best_rd, w_out)
+
+    # Local refine: 5x5 at half the coarse spacing around the best node.
+    da = (ad_grid[1] - ad_grid[0]) if ad_grid.shape[0] > 1 else 0.1e-3
+    dr = (rd_grid[1] - rd_grid[0]) if rd_grid.shape[0] > 1 else 0.1e-3
+    ad_loc = np.empty(5)
+    rd_loc = np.empty(5)
+    for j in range(5):
+        av = best_ad + (j - 2) * 0.5 * da
+        rv = best_rd + (j - 2) * 0.5 * dr
+        ad_loc[j] = av if av > 0.2e-3 else 0.2e-3
+        rd_loc[j] = rv if rv > 0.02e-3 else 0.02e-3
+    best_res, best_ad, best_rd = _stagec_scan(
+        sig_norm, bvals, c2, iso_forward, iso_gram, iso_aty, yty,
+        ad_loc, rd_loc, aniso_ratio, best_res, best_ad, best_rd, w_out)
+
+    return best_ad, best_rd
+
+
+@njit(cache=True, fastmath=True)
+def iso_fraction_resolve(sig_norm, bvals, bvecs, fdirs, fad, frd, n_fib,
+                         iso_d, w_out):
+    """
+    STAGE D — final constrained compartment-fraction re-solve.
+
+    NNLS over the REDUCED, physically-anchored dictionary
+    [fiber_col_1 .. fiber_col_{n_fib} | iso_col(d_1) .. iso_col(d_{n_iso})],
+    where the fiber tensors (AD, RD) and directions are FIXED (from Stage A
+    detection + Stage C / MRDS tensor estimation) and the isotropic
+    diffusivities `iso_d` are a small FIXED set at physiological centroids
+    (e.g. 0.15 / 1.0 / 3.0e-3 for RF / HF / WF). Returns the non-negative
+    weights in `w_out` (length n_fib + n_iso); the caller reads fiber_fraction
+    = sum(fiber weights)/sum and bins the iso weights on the THRESH_RES /
+    THRESH_WAT diffusivity boundaries.
+
+    WHY (see project design note): the raw v3 fractions come from the OVER-
+    COMPLETE Stage A dictionary (fiber block ~468 collinear columns, iso block a
+    fine anchored grid). That free spectrum SMEARS weight across near-collinear
+    columns and the subsequent binning mis-attributes it -- restricted collapses,
+    hindered inflates (validated: anchored HF 0.64 vs GT 0.50, RF 0.16 vs 0.20;
+    fixed-3 recovers RF/HF/WF to ~GT with far lower variance, and recovers the
+    high-RF of tumor-like / restricted-heavy voxels exactly). A few well-placed
+    columns is a well-conditioned, low-variance estimator; the identifiability
+    analysis showed 3 iso components are supported down to b_max ~ 2000.
+
+    SIGNAL: this re-solve MUST be run on the RICIAN-CORRECTED signal
+    (data_corr), NOT the raw magnitude: the restricted fraction is read from the
+    high-b plateau, and the raw Rician noise floor E[|noise|]->sigma*sqrt(pi/2)
+    is ALSO a high-b plateau -> on raw it is mistaken for restricted (false RF in
+    CSF/water). The correction subtracts 2*sigma^2 and de-confounds them. (This
+    is the OPPOSITE of the fiber TENSOR estimate `stagec_varpro_single_fiber`,
+    which needs the RAW signal because the correction's clamp destroys the
+    high-b decay SHAPE. Different estimands, different bias -> different optimal
+    preprocessing; see design note on the block-wise Rician-MLE approximation.)
+
+    Parameters
+    ----------
+    sig_norm : array (N,)
+        Normalised CORRECTED signal S/S0.
+    bvals, bvecs : arrays
+    fdirs : array (n_fib_max, 3)
+        Fiber unit directions (only the first n_fib rows are used).
+    fad, frd : array (n_fib_max,)
+        Fiber axial / radial diffusivities (first n_fib used).
+    n_fib : int
+        Number of fiber populations (0, 1, or 2).
+    iso_d : array (n_iso,)
+        Fixed isotropic diffusivities.
+    w_out : array (>= n_fib + n_iso,)
+        OUTPUT: non-negative weights [fiber_1..fiber_{n_fib}, iso_1..iso_{n_iso}].
+    """
+    N = len(bvals)
+    n_iso = iso_d.shape[0]
+    ntot = n_fib + n_iso
+    A = np.empty((N, ntot))
+    for k in range(n_fib):
+        ad = fad[k]
+        rd = frd[k]
+        for i in range(N):
+            d = (bvecs[i, 0] * fdirs[k, 0] + bvecs[i, 1] * fdirs[k, 1]
+                 + bvecs[i, 2] * fdirs[k, 2])
+            A[i, k] = np.exp(-bvals[i] * (rd + (ad - rd) * d * d))
+    for j in range(n_iso):
+        dj = iso_d[j]
+        for i in range(N):
+            A[i, n_fib + j] = np.exp(-bvals[i] * dj)
+    AtA = np.zeros((ntot, ntot))
+    Aty = np.zeros(ntot)
+    for a in range(ntot):
+        s = 0.0
+        for i in range(N):
+            s += A[i, a] * sig_norm[i]
+        Aty[a] = s
+        for b in range(a, ntot):
+            v = 0.0
+            for i in range(N):
+                v += A[i, a] * A[i, b]
+            AtA[a, b] = v
+            AtA[b, a] = v
+    w, _ = nnls_coordinate_descent(AtA, Aty, 0.0)
+    for a in range(ntot):
+        w_out[a] = w[a]
 
 
 # ─────────────────────────────────────────────────────────────────────────────

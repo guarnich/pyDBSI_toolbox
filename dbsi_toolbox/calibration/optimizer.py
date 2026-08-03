@@ -118,7 +118,9 @@ _DEFAULT_RD_MIN = 0.05e-3
 _DEFAULT_RD_MAX = 1.2e-3
 _DEFAULT_N_AD = 3
 _DEFAULT_N_RD = 3
-_DEFAULT_ANISOTROPY_RATIO = 1.15
+_DEFAULT_ANISOTROPY_RATIO = 2.0  # raised 1.15 -> 2.0 (2026-07-27); see
+# model_Niso_adaptive_ff_thr._STAGE_A_DEFAULT_ANISOTROPY_RATIO for the sweep
+# evidence (removes the near-isotropic AD/RD ratio-1.83 column that leaks).
 _DEFAULT_N_DIRS = 30
 _DEFAULT_MIN_WEIGHT_FRACTION = 0.05
 

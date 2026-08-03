@@ -573,13 +573,61 @@ def apply_rf_correction(rf_obs, ff_obs, ff_est_rows, rf_levels, rf_est_grid):
 # DISCREPANCY PRINCIPLE — lambda_aniso
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Safety factor tau on the discrepancy target (target_residual2 = tau * N *
+# sigma^2). The plain Morozov target (tau=1) SYSTEMATICALLY UNDER-regularizes
+# the Stage-A anisotropic block because that block is heavily OVERCOMPLETE
+# (n_aniso_cols ~ 468 columns for N ~ 186 measurements, ~2.5x): the extra
+# collinear degrees of freedom let it drive the residual down to the noise
+# floor at a lambda_aniso that still leaves isotropic (esp. restricted/hindered)
+# signal partly represented by fiber columns -> fiber_fraction over-estimation
+# (FF leakage). Using tau>1 is the textbook fix for the discrepancy principle
+# on ill-posed/rank-deficient operators (Morozov 1966 allows tau>=1; Engl,
+# Hanke & Neubauer 1996 use tau in [1,2]). It is a METHODOLOGICAL constant, not
+# a dataset-specific one: the resulting lambda_aniso still adapts per protocol/
+# SNR/dictionary. Value calibrated (2026-07-24) on tissue-heterogeneous
+# synthetic phantoms spanning FF_true 0.10-0.80: raising tau reduces FF leakage
+# AND improves fiber detection (npop) monotonically with no trade-off up to this
+# value; larger values start over-regularizing genuine high-FF voxels. See the
+# stress-test verification (Simulations/pyDBSI_stress_test) for the sweep.
+_LAMBDA_ANISO_DISCREPANCY_TAU = 1.0  # kept as a knob; verification (2026-07-24)
+# showed tau on the noise-referenced target is NOT SNR-robust (target ~ sigma^2
+# makes the same tau give ~6x higher lambda at SNR 15 vs 30, crushing genuine
+# high-FF voxels at low SNR). The SNR-robust fix is instead the eigenvalue-
+# anchored floor below (operator-referenced, independent of noise). tau stays 1.0.
+
+# Eigenvalue-anchored floor fraction: lambda_aniso >= _ANISO_FLOOR_FRACTION *
+# max_eig_aniso / n_aniso_cols. This anchors the MINIMUM anisotropic
+# regularization to the anisotropic block's own spectral scale (its largest
+# unregularized eigenvalue), which is a property of the protocol+dictionary and
+# is INDEPENDENT of SNR -- so a single value gives a consistent leakage-
+# preventing lambda_aniso across noise levels, unlike the noise-referenced
+# discrepancy. The plain discrepancy (governing the noise-matching) still adds
+# MORE regularization on top via max() when the noise genuinely warrants it.
+# VALUE STILL OPEN (2026-07-24) -- reverted to the original 0.075 pending a
+# leakage-vs-crossing compromise. History: raising this floor DOES fix the FF
+# leakage (anisotropic block absorbing isotropic signal) on single-fiber /
+# fiber-free / low-FF voxels, and is SNR-robust and protocol-agnostic by
+# construction (floor = fraction * max_eig_aniso / n_aniso_cols, operator-scaled
+# and validated to transfer HCP<->Verona). BUT a non-regression check on the
+# real validation scenarios showed that a large floor (=1.0) CRUSHES genuine
+# CROSSING fiber fractions: Sc1 (two 0.40 fibers, FF 0.80) collapsed 0.84->0.42
+# with the fiber signal leaking into NRF, and T1 (heterogeneous crossing) lost
+# detection (npop 1.7->1.1). Root tension: a scalar lambda_aniso cannot both
+# suppress isotropic->fiber leakage AND preserve the (already split, weaker)
+# anisotropic signal of crossings -- they move oppositely in lambda. floor=1.0
+# over-weighted leakage. A milder floor (~0.25-0.5) is the likely compromise;
+# being re-verified on the real crossing scenarios before committing a value.
+_ANISO_FLOOR_FRACTION = 0.075  # reverted to original; final value under verification
+
+
 def select_lambda_aniso_discrepancy(AtA, At, y_voxels, n_aniso_cols,
                                      sigma, lambda_iso_fixed,
                                      lambda_lo=1e-6, lambda_hi=1e4,
                                      n_dirs=None, max_bisect_iter=40,
                                      tol=1e-3, min_floor_factor=0.1,
                                      max_eig_aniso=None,
-                                     aniso_floor_fraction=0.075):
+                                     aniso_floor_fraction=None,
+                                     discrepancy_tau=None):
     """
     Select lambda_aniso via the discrepancy principle (Morozov 1966):
     find lambda such that the NNLS residual matches the expected noise
@@ -731,13 +779,15 @@ def select_lambda_aniso_discrepancy(AtA, At, y_voxels, n_aniso_cols,
         `select_lambdas_data_driven`), not per voxel. If None, this
         floor component is disabled and behaviour falls back to the
         original min_floor_factor-only floor (pre-fix behaviour).
-    aniso_floor_fraction : float
+    aniso_floor_fraction : float or None
         Fraction of `max_eig_aniso` used as the (new) primary floor
         component: lambda_aniso >= aniso_floor_fraction * max_eig_aniso
-        / n_aniso_cols. Default 0.075 -- ***UNVALIDATED on the real
-        (anchored-isotropic-grid) pipeline as of 2026-07-16; see the
-        CAVEAT in the SAFETY FLOOR section above before relying on this
-        default.*** Only used if max_eig_aniso is not None.
+        / n_aniso_cols. If None (default), reads the module constant
+        `_ANISO_FLOOR_FRACTION` (validated value 1.0 as of 2026-07-24;
+        see that constant's note for the FF-leakage / SNR-robustness
+        basis, which supersedes the 2026-07-16 "unvalidated 0.075"
+        caveat in the SAFETY FLOOR section above). Only used if
+        max_eig_aniso is not None.
 
     Returns
     -------
@@ -754,7 +804,15 @@ def select_lambda_aniso_discrepancy(AtA, At, y_voxels, n_aniso_cols,
     y_voxels = np.atleast_2d(np.asarray(y_voxels, dtype=np.float64))
     n_voxels, N = y_voxels.shape
 
-    target_residual2 = N * sigma ** 2
+    if discrepancy_tau is None:
+        discrepancy_tau = _LAMBDA_ANISO_DISCREPANCY_TAU
+    if aniso_floor_fraction is None:
+        aniso_floor_fraction = _ANISO_FLOOR_FRACTION
+    # tau>1 raises the target residual, pushing lambda_aniso higher to
+    # counter the over-completeness under-regularization (see module note
+    # on _LAMBDA_ANISO_DISCREPANCY_TAU). Kept at 1.0 -- the SNR-robust lever
+    # is the eigenvalue-anchored floor (aniso_floor_fraction) below.
+    target_residual2 = discrepancy_tau * N * sigma ** 2
 
     floor_from_iso = min_floor_factor * lambda_iso_fixed
     if max_eig_aniso is not None:

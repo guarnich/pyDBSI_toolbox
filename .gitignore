@@ -15,4 +15,3 @@ build/
 dist/
 .Rhistory
 validation/
-*.bak_prefix*

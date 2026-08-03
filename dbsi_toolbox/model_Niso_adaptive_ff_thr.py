@@ -161,6 +161,9 @@ from .core.solvers import (
     nnls_coordinate_descent,
     compute_regularization_matrix,
     select_dominant_directions,
+    dominant_basin_concentration,     # NEW — per-voxel angular concentration
+    stagec_varpro_single_fiber,       # NEW — Stage C joint tensor+fraction re-solve
+    iso_fraction_resolve,             # NEW — Stage D final constrained fraction re-solve
     build_direction_neighbor_graph,   # NEW — local-maxima peak-finding graph
     estimate_AD_RD_conditioned,
     compute_fiber_fa,
@@ -191,8 +194,17 @@ FIBER_THRESHOLD = 0.15      # dimensionless — minimum FF for AD/RD estimation
 THRESH_RES = 0.3e-3          # mm^2/s — restricted / hindered boundary
 THRESH_WAT = 3.0e-3          # mm^2/s — hindered  / free-water boundary
 
-B_THRESH_3ISO = 3000.0       # s/mm^2 — minimum b_max to activate 3-ISO model
-MIN_SHELLS_3ISO = 3          # minimum distinct non-zero b-value shells for 3-ISO
+# 3-ISO is now the DEFAULT for any multi-shell protocol (>=2 shells, b_max
+# >= 2000). Lowered from (b_max>=3000 AND >=3 shells) on the strength of the
+# iso-block identifiability analysis + the Stage D fixed-3 estimator: an SVD/
+# CRLB/Monte-Carlo study showed the 3 iso components (RF/HF/WF) are supported
+# with low variance down to b_max ~ 2000, and the constrained fixed-centroid
+# estimator recovers them near-GT (unlike the old free anchored spectrum). The
+# 2-ISO merge (RF + NRF) is now only a single-shell fallback -- and it was shown
+# to be LESS accurate on RF than 3-ISO even where it applies. See project
+# identifiability analysis.
+B_THRESH_3ISO = 2000.0       # s/mm^2 — minimum b_max to activate 3-ISO model
+MIN_SHELLS_3ISO = 2          # minimum distinct non-zero b-value shells for 3-ISO
 
 # Stage A dictionary defaults. Deliberately coarse on the AD/RD axis.
 _STAGE_A_AD_MIN = 0.5e-3
@@ -201,7 +213,27 @@ _STAGE_A_RD_MIN = 0.05e-3
 _STAGE_A_RD_MAX = 1.2e-3
 _STAGE_A_DEFAULT_N_AD = 3
 _STAGE_A_DEFAULT_N_RD = 3
-_STAGE_A_DEFAULT_ANISOTROPY_RATIO = 1.15
+# Anisotropy floor for the (AD, RD) detection grid: a pair enters the
+# anisotropic block only if AD >= RD * ratio. Raised 1.15 -> 2.0 (2026-07-27)
+# as the structural, root-cause complement to the FF-leakage work. On the
+# coarse default grid (AD=[0.5,1.35,2.2], RD=[0.05,0.625,1.2] e-3 mm^2/s) the
+# admissible AD/RD ratios are {44, 27, 10, 3.52, 2.16, 1.83}. The interval
+# [1.15, 1.5) contains NO pair, so raising the ratio through it is a no-op
+# (verified end-to-end: identical maps). Raising to 2.0 removes exactly ONE
+# column -- the near-isotropic (AD=2.2, RD=1.2) pair (ratio 1.83), which is a
+# direct source of isotropic->fiber leakage. On the 8-class heterogeneous
+# synthetic brain this lifted tissue discrimination 81.2% -> 85.6%, cut GM FF
+# leakage 0.51 -> 0.39 and Edema 0.43 -> 0.34, and did NOT harm the
+# demyelinated fiber (its AD/RD ratio 1.5/0.7 = 2.14 is above the floor):
+# WM_demyel FF 0.60 -> 0.52 (closer to GT 0.45), detection npop 0.45 -> 0.80.
+# SAFE BAND [2.0, 2.16]: the next column (AD=1.35, RD=0.625, ratio 2.16)
+# survives up to 2.16 and is needed for demyelinated / low-FA fibers; at 2.2
+# it is lost. This is COMPLEMENTARY, not a cure: Tumor's restricted-signal
+# leakage (a different mechanism) is untouched (FF ~0.50 either way) and is
+# the target of the per-voxel concentration modulation (Plan A). Kept
+# constructor-overridable. See Simulations/pyDBSI_pervoxel_prototype for the
+# sweep harness.
+_STAGE_A_DEFAULT_ANISOTROPY_RATIO = 2.0
 _STAGE_A_DEFAULT_LAMBDA_BASE = 0.005
 
 # Default isotropic spectrum range.
@@ -290,6 +322,116 @@ _DEFAULT_MIN_PEAK_RATIO = 0.35
 # (npop~1.0 vs 0.78 at 0.38). Raise toward 0.38 for max specificity at the cost
 # of low-SNR sensitivity. Below the gate -> npop=0.
 _DEFAULT_MIN_DOMINANT_CONCENTRATION = 0.35
+
+# Plan A (Point 2) — per-voxel concentration-modulated lambda_aniso defaults.
+# ON by default (disable via lambda_aniso_conc_mod=False): when a voxel's
+# dominant-basin angular concentration is low (diffuse anisotropic weight, i.e.
+# isotropic->fiber leakage) the anisotropic regularization is boosted and the
+# voxel re-solved, suppressing the spurious fiber_fraction; concentrated
+# (genuine-fiber) voxels are left untouched. Ramp: c>=c_hi -> no boost;
+# c<=c_lo -> full boost (xgain on lambda_aniso); linear between. Endpoints
+# bracket the observed FIRST-PASS concentration bands on the validation brain
+# (leakage Tumor ~0.23 / GM ~0.27; demyelinated fiber ~0.35; healthy ~0.47-0.51)
+# so leakage is boosted hard while a demyelinated fiber gets only a mild,
+# still-detectable boost. See `_apply_conc_modulation` and
+# Simulations/pyDBSI_pervoxel_prototype.
+#
+# End-to-end ramp sweep (8-class heterogeneous brain, ratio=2.0, SNR30; FF of
+# Tumor[GT0]/GM[GT0.10]/demyel[GT0.45], tissue discrimination, leakage metric):
+#   config              discr  Tumor  GM   demyel  leak
+#   mod OFF (baseline)  0.856  0.50   0.39 0.52    0.267
+#   A c_hi0.40 g12      0.906  0.08   0.14 0.30    0.057   <- max leak-suppression
+#   B c_hi0.34 g12      0.863  0.10   0.16 0.42    0.068
+#   D c_hi0.36 g8       0.887  0.13   0.18 0.40    0.080   <- DEFAULT (balanced)
+# The DEFAULT (config D) is the balanced operating point: it keeps ~3x of the
+# leakage fix (Tumor 0.50->0.13, leak 0.267->0.080) and +3.1pp discrimination
+# while PRESERVING the demyelinated fiber (FF 0.40, vs GT 0.45 -- baseline
+# actually OVER-estimated it at 0.52). The gentler gain (8, not 12) is also the
+# conservative choice against low-SNR over-correction (where genuine fibers
+# diffuse toward the leakage concentration band). Config A (c_hi=0.40, gain=12)
+# is the aggressive alternative -- best discrimination and leak suppression, but
+# it over-corrects the demyelinated fiber (FF 0.30) -- pass those values
+# explicitly if fiber-fraction fidelity on low-FA fibers is not the priority.
+# VALIDATED (2026-07-27): SPARES crossings (Sc1 FF0.80 untouched 0.82->0.82 at
+# SNR30, 0.73->0.72 at SNR15 -- the exact case a scalar high lambda_aniso
+# collapsed to 0.42; a crossing stays concentrated ~0.42 and escapes the boost)
+# and suppresses pure-iso/pure-restr leakage at SNR30 AND SNR15. At SNR15 it
+# CORRECTS the low-SNR over-estimation instead of collapsing fibers (demyel
+# 0.75->0.47~=GT). Weak-fiber edge (FF 0.12-0.20, incl. demyelinated) at SNR15
+# and SNR10: NO false negatives -- detection rate stays 1.0, weak fibers are
+# pulled toward GT, never zeroed. KNOWN LIMIT (fundamental, not a bug): at low
+# SNR a weak/demyelinated fiber's concentration overlaps the leakage band
+# (SNR15: weak-demyel ~0.29 vs fiber-free ~0.29), so the modulation cannot
+# preferentially preserve a weak fiber's FF -- it suppresses it like leakage.
+# mod-OFF cannot separate them either; the lever simply adds no discriminating
+# power where the low-SNR signal has none.
+# Default flipped ON (2026-07-27) on the strength of this validation (crossings
+# spared, leakage suppressed at SNR30/15, low-SNR over-estimation corrected, no
+# weak-fiber false negatives). REAL-DATA confirmation is still pending; disable
+# per-call with lambda_aniso_conc_mod=False (or --disable-conc-modulation on the
+# CLI) if a dataset shows unexpected fiber_fraction suppression.
+_DEFAULT_LAMBDA_ANISO_CONC_MOD = True
+_DEFAULT_CONC_MOD_C_LO = 0.24
+_DEFAULT_CONC_MOD_C_HI = 0.36
+_DEFAULT_CONC_MOD_GAIN = 8.0
+
+# Stage C — constrained joint (VARPRO) mono-fiber re-solve of tensor+fractions.
+# ON by default (disable via stagec_refine=False). For n_pop==1 voxels, after
+# Stage A detection, the fiber tensor (AD, RD) and all compartment fractions are
+# re-fitted JOINTLY by minimising the reconstruction residual over a reduced
+# dictionary [fiber_col(AD,RD,dir) | iso_grid] -- fixing the decoupled-stage
+# mutual bias (fiber_fraction inflation + restricted collapse + AD under-
+# estimation). See `core.solvers.stagec_varpro_single_fiber`. (AD, RD) search
+# grid + admissibility ratio: coarse grid then a local refine in the helper.
+#
+# VALIDATED (2026-07-28, 8-class heterogeneous brain, SNR30): decisively fixes
+# the HIGH-FA fiber_fraction inflation that was the bias's worst case --
+# WM_sano FF 0.72->0.57 (GT 0.55), restricted 0.00->0.09 (GT 0.10), AD
+# 1.15->1.65 (GT 1.70). Correct BY CONSTRUCTION on non-inflated fibers (demyel
+# FF left at 0.40, it was never inflated) and on crossings (n_pop>=2 untouched).
+# KNOWN RESIDUALS (accepted, shipped ON): (1) minor AD overshoot on some
+# moderate-FA single fibers; (2) low-FA AD stays under-estimated -- a
+# fundamental identifiability limit, not fixable by tuning; (3) the crude
+# nearest-centroid discrimination proxy dips ~3pp because an ACCURATE WM_sano
+# sits nearer its neighbours in [FF,RF,NRF] space -- the fractions themselves
+# are net MORE accurate. Real-data confirmation still pending; opt out with
+# stagec_refine=False (or --disable-stagec on the CLI).
+_DEFAULT_STAGEC_REFINE = True
+_STAGEC_AD_MIN = 0.6e-3
+_STAGEC_AD_MAX = 2.6e-3
+_STAGEC_N_AD = 14
+_STAGEC_RD_MIN = 0.05e-3
+_STAGEC_RD_MAX = 1.1e-3
+_STAGEC_N_RD = 12
+_STAGEC_ANISO_RATIO = 1.1
+# Stage C reuses the model's iso_grid. A dedicated fine geomspace iso grid was
+# tried (to give denser restricted-band resolution) and REVERTED: it did not
+# improve the low-FA / AD cases and slightly lowered discrimination (0.856 ->
+# 0.831 on the validation brain). The residual low-FA AD under-estimation is a
+# fundamental identifiability limit (a low-FA fiber is nearly isotropic, so
+# (AD,RD) are weakly constrained), not an iso-grid coverage issue.
+# Stage C fits the RAW normalised signal, NOT the Rician-corrected data_corr:
+# the pipeline's noise-floor subtraction sqrt(max(S^2 - 2 sigma^2, 0)) distorts
+# the high-b decay (over-subtraction + the >=0 clamp) and biases the fiber
+# tensor low (validated: raw -> AD 1.72/FF 0.56/RF 0.09 vs corrected ->
+# AD 1.32/FF 0.73 on a GT-1.70 fiber; both NNLS solvers agree, so it is the
+# input signal, not the solver). Stage A detection still uses data_corr.
+
+# Stage D — final constrained compartment-fraction re-solve (ON by default;
+# disable via iso_resolve=False). For EVERY fitted voxel, the reported
+# fractions are re-estimated by NNLS over [detected fibers | a few FIXED iso
+# centroids] on the RICIAN-CORRECTED signal, replacing the over-complete Stage A
+# spectrum (whose free anchored grid smears weight and mis-bins RF/HF/WF). The
+# identifiability analysis showed 3 iso components are supported down to
+# b_max~2000, and the fixed-3 estimator recovers RF/HF/WF near-GT with low
+# variance (incl. the high-RF of tumor-like voxels, exactly) where the anchored
+# spectrum failed. CORRECTED signal here (opposite to Stage C's RAW): the
+# restricted fraction is read from the high-b plateau, which the raw Rician
+# noise floor mimics -> corrected de-confounds it. Iso centroids: RF/HF/WF for
+# 3-ISO, RF/NRF for the (single-shell) 2-ISO fallback.
+_DEFAULT_ISO_RESOLVE = True
+_ISO_RESOLVE_D_3ISO = (0.15e-3, 1.0e-3, 3.0e-3)   # RF, HF, WF centroids
+_ISO_RESOLVE_D_2ISO = (0.15e-3, 1.5e-3)            # RF, NRF centroids (single-shell)
 
 # Monte-Carlo null calibration of the concentration gate (see
 # calibration.data_driven.calibrate_concentration_gate_mc). When calibration
@@ -382,6 +524,88 @@ def analyse_protocol(bvals):
 # PARALLEL FITTING KERNELS — v3 + MRDS multi-fiber extension
 # ─────────────────────────────────────────────────────────────────────────────
 
+@njit(cache=True, fastmath=True)
+def _apply_conc_modulation(w, AtA_reg, Aty, n_aniso_cols, n_dirs, n_pairs,
+                           neighbor_idx, fiber_dirs, lambda_aniso,
+                           c_lo, c_hi, gain):
+    """
+    Plan A (Point 2) — per-voxel angular-concentration modulation of
+    lambda_aniso.
+
+    Given a FIRST-PASS Stage-A solution `w` (solved with the shared,
+    protocol-level lambda_aniso baked into `AtA_reg`), measure its dominant-
+    basin angular concentration `c` (see `core.solvers.
+    dominant_basin_concentration`) and, when `c` is low, RE-SOLVE the same
+    voxel with a boosted anisotropic regularization. This suppresses the
+    diffuse anisotropic weight that fiber-free / leakage voxels absorb from
+    the isotropic signal (which inflates fiber_fraction), while leaving genuine
+    fibers — which concentrate their weight — essentially untouched.
+
+    Rationale for a CONTINUOUS ramp rather than a binary gate: the concentration
+    of a demyelinated / low-FA fiber (~0.36 on the validation brain) sits BELOW
+    that of a healthy fiber (~0.48) and only modestly ABOVE diffuse leakage
+    (~0.25) — the distributions overlap at the tails. A hard threshold at any
+    single value therefore either misses leakage or crushes the demyelinated
+    fiber (the npop binary gate was falsified for exactly this reason). A
+    continuous ramp instead applies FULL boost only to clearly-diffuse voxels
+    (c <= c_lo), NONE to clearly-concentrated ones (c >= c_hi), and a
+    proportional, gentle boost to the ambiguous middle — so a demyelinated
+    fiber loses only a little anisotropic weight (stays detectable) while
+    leakage is strongly suppressed. Voxels with almost no anisotropic weight
+    (e.g. CSF: high concentration but negligible FF) sit above c_hi and are
+    never modulated, so this cannot manufacture leakage where there was none.
+
+    The boost is applied by adding `(g - 1) * lambda_aniso` to the anisotropic
+    block's diagonal of a LOCAL copy of `AtA_reg` (the isotropic block and the
+    shared matrix are left untouched), then re-running the same NNLS.
+
+    Parameters
+    ----------
+    w : array (n_total_cols,)
+        First-pass NNLS solution (anisotropic block first).
+    AtA_reg : array (n_total_cols, n_total_cols)
+        Shared regularized Gram matrix (read-only; copied locally if boosting).
+    Aty : array (n_total_cols,)
+        A^T y for this voxel (unchanged by the boost).
+    n_aniso_cols, n_dirs, n_pairs : int
+        Dictionary dimensions (n_aniso_cols == n_dirs * n_pairs).
+    neighbor_idx, fiber_dirs : arrays
+        Passed through to `dominant_basin_concentration`.
+    lambda_aniso : float
+        The protocol-level scalar lambda_aniso already baked into AtA_reg's
+        anisotropic diagonal; the boost is expressed relative to it.
+    c_lo, c_hi : float
+        Ramp endpoints. c >= c_hi -> no boost (g=1); c <= c_lo -> full boost
+        (g=gain); linear in between.
+    gain : float
+        Maximum multiplicative boost on lambda_aniso at c <= c_lo.
+
+    Returns
+    -------
+    w : array (n_total_cols,)
+        The re-solved solution if a boost was applied, else the input `w`.
+    """
+    w_aniso = w[:n_aniso_cols]
+    c = dominant_basin_concentration(w_aniso, n_dirs, n_pairs,
+                                     neighbor_idx, fiber_dirs)
+    if c >= c_hi:
+        return w
+    frac = (c_hi - c) / (c_hi - c_lo)
+    if frac < 0.0:
+        frac = 0.0
+    elif frac > 1.0:
+        frac = 1.0
+    g = 1.0 + (gain - 1.0) * frac
+    if g <= 1.0:
+        return w
+    delta = (g - 1.0) * lambda_aniso
+    AtA_mod = AtA_reg.copy()
+    for i in range(n_aniso_cols):
+        AtA_mod[i, i] += delta
+    w2, _ = nnls_coordinate_descent(AtA_mod, Aty, 0.0)
+    return w2
+
+
 @njit(parallel=True, cache=True, fastmath=True)
 def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         fiber_dirs, diff_pairs, n_dirs, iso_grid, b0_thr,
@@ -389,7 +613,12 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         min_peak_ratio, min_dominant_concentration,
                         enable_direction_refinement,
                         cone1_half_angle, n1_cone, cone2_half_angle, n2_cone,
-                        neighbor_idx, max_fiber_populations, out):
+                        neighbor_idx, max_fiber_populations, out,
+                        lambda_aniso_scalar, conc_mod_enabled,
+                        conc_mod_c_lo, conc_mod_c_hi, conc_mod_gain,
+                        stagec_enabled, iso_forward, iso_gram,
+                        stagec_ad_grid, stagec_rd_grid, stagec_aniso_ratio,
+                        data_raw, stagec_iso_grid):
     """
     v3 parallel fitting kernel — two-compartment isotropic model (2-ISO).
 
@@ -437,6 +666,16 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
             Aty[r] = val
 
         w, _ = nnls_coordinate_descent(AtA_reg, Aty, 0.0)
+
+        # Plan A: per-voxel concentration-modulated lambda_aniso (on by default;
+        # skipped when conc_mod_enabled is False).
+        if conc_mod_enabled:
+            w = _apply_conc_modulation(
+                w, AtA_reg, Aty, n_aniso_cols, n_dirs, n_pairs,
+                neighbor_idx, fiber_dirs, lambda_aniso_scalar,
+                conc_mod_c_lo, conc_mod_c_hi, conc_mod_gain
+            )
+
         w_aniso = w[:n_aniso_cols]
         w_iso = w[n_aniso_cols:]
 
@@ -487,6 +726,14 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
         out[x, y, z, 4] = f_nonrf
         out[x, y, z, 8] = mean_iso_adc
 
+        # Per-voxel angular concentration of the anisotropic weight
+        # (diagnostic channel; also the modulation lever for Plan A). Computed
+        # for EVERY fitted voxel, independent of fiber_threshold, so leakage
+        # voxels (diffuse -> low concentration) are characterised too.
+        out[x, y, z, 29] = dominant_basin_concentration(
+            w_aniso, n_dirs, n_pairs, neighbor_idx, fiber_dirs
+        )
+
         if f_fib > fiber_threshold:
             dir_indices, dir_weights = select_dominant_directions(
                 w_aniso, n_dirs, n_pairs, neighbor_idx, fiber_dirs,
@@ -503,7 +750,58 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
             if n_pop == 1:
                 dominant_dir = fiber_dirs[dir_indices[0]]
 
-                if enable_direction_refinement:
+                if stagec_enabled:
+                    # ── STAGE C: joint (VARPRO) tensor+fraction re-solve ──
+                    # Replaces the raw over-complete-block fractions AND the
+                    # decoupled Stage B tensor with a residual-minimising joint
+                    # fit on [fiber_col(AD,RD,dir) | iso_grid]. Fixes the
+                    # fiber_fraction inflation + restricted collapse + AD
+                    # under-estimation (see stagec_varpro_single_fiber).
+                    # Uses the RAW normalised signal (data_raw), not data_corr:
+                    # the Rician noise-floor subtraction biases the tensor low.
+                    sig_raw = data_raw[x, y, z]
+                    s0_raw = 0.0
+                    cnt_raw = 0
+                    for ii in range(len(bvals)):
+                        if bvals[ii] < b0_thr:
+                            s0_raw += sig_raw[ii]
+                            cnt_raw += 1
+                    if cnt_raw > 0:
+                        s0_raw /= cnt_raw
+                    if s0_raw < 1e-6:
+                        s0_raw = 1e-6
+                    sig_norm_raw = (sig_raw / s0_raw).astype(np.float64)
+                    n_iso_sc = stagec_iso_grid.shape[0]
+                    w_sc = np.zeros(1 + n_iso_sc)
+                    AD_est, RD_est = stagec_varpro_single_fiber(
+                        sig_norm_raw, bvals, bvecs, dominant_dir,
+                        iso_forward, iso_gram, stagec_ad_grid, stagec_rd_grid,
+                        stagec_aniso_ratio, w_sc
+                    )
+                    tot_sc = 0.0
+                    for i in range(1 + n_iso_sc):
+                        tot_sc += w_sc[i]
+                    if tot_sc > 1e-10:
+                        res_sc = 0.0
+                        nonrf_sc = 0.0
+                        wd_sc = 0.0
+                        for i in range(n_iso_sc):
+                            wi = w_sc[1 + i]
+                            adc = stagec_iso_grid[i]
+                            if adc <= THRESH_RES:
+                                res_sc += wi
+                            else:
+                                nonrf_sc += wi
+                            wd_sc += wi * adc
+                        f_fib = w_sc[0] / tot_sc
+                        f_res = res_sc / tot_sc
+                        f_nonrf = nonrf_sc / tot_sc
+                        sum_iso_sc = res_sc + nonrf_sc
+                        out[x, y, z, 0] = f_fib
+                        out[x, y, z, 1] = f_res
+                        out[x, y, z, 4] = f_nonrf
+                        out[x, y, z, 8] = wd_sc / sum_iso_sc if sum_iso_sc > 1e-10 else 0.0
+                elif enable_direction_refinement:
                     _, AD_est, RD_est = refine_fiber_direction_cone(
                         bvals, bvecs, sig_norm, dominant_dir,
                         f_fib, f_res, f_nonrf, 0.0,
@@ -597,7 +895,12 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         min_peak_ratio, min_dominant_concentration,
                         enable_direction_refinement,
                         cone1_half_angle, n1_cone, cone2_half_angle, n2_cone,
-                        neighbor_idx, max_fiber_populations, out):
+                        neighbor_idx, max_fiber_populations, out,
+                        lambda_aniso_scalar, conc_mod_enabled,
+                        conc_mod_c_lo, conc_mod_c_hi, conc_mod_gain,
+                        stagec_enabled, iso_forward, iso_gram,
+                        stagec_ad_grid, stagec_rd_grid, stagec_aniso_ratio,
+                        data_raw, stagec_iso_grid):
     """v3 parallel fitting kernel — three-compartment isotropic model
     (3-ISO). Same Stage A / Stage B (+ MRDS multi-fiber) structure as
     `_fit_voxels_2iso_v3`; see that kernel's docstring for the full
@@ -634,6 +937,16 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
             Aty[r] = val
 
         w, _ = nnls_coordinate_descent(AtA_reg, Aty, 0.0)
+
+        # Plan A: per-voxel concentration-modulated lambda_aniso (on by default;
+        # skipped when conc_mod_enabled is False).
+        if conc_mod_enabled:
+            w = _apply_conc_modulation(
+                w, AtA_reg, Aty, n_aniso_cols, n_dirs, n_pairs,
+                neighbor_idx, fiber_dirs, lambda_aniso_scalar,
+                conc_mod_c_lo, conc_mod_c_hi, conc_mod_gain
+            )
+
         w_aniso = w[:n_aniso_cols]
         w_iso = w[n_aniso_cols:]
 
@@ -692,6 +1005,12 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
         out[x, y, z, 4] = f_hin + f_wat
         out[x, y, z, 8] = mean_iso_adc
 
+        # Per-voxel angular concentration (diagnostic + Plan A modulation lever);
+        # see the 2-ISO kernel note. Computed for every fitted voxel.
+        out[x, y, z, 29] = dominant_basin_concentration(
+            w_aniso, n_dirs, n_pairs, neighbor_idx, fiber_dirs
+        )
+
         if f_fib > fiber_threshold:
             dir_indices, dir_weights = select_dominant_directions(
                 w_aniso, n_dirs, n_pairs, neighbor_idx, fiber_dirs,
@@ -708,7 +1027,59 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
             if n_pop == 1:
                 dominant_dir = fiber_dirs[dir_indices[0]]
 
-                if enable_direction_refinement:
+                if stagec_enabled:
+                    # ── STAGE C: joint (VARPRO) tensor+fraction re-solve (3-ISO
+                    # binning RES/HIN/WAT). Uses the RAW normalised signal
+                    # (data_raw), not data_corr. See stagec_varpro_single_fiber. ──
+                    sig_raw = data_raw[x, y, z]
+                    s0_raw = 0.0
+                    cnt_raw = 0
+                    for ii in range(len(bvals)):
+                        if bvals[ii] < b0_thr:
+                            s0_raw += sig_raw[ii]
+                            cnt_raw += 1
+                    if cnt_raw > 0:
+                        s0_raw /= cnt_raw
+                    if s0_raw < 1e-6:
+                        s0_raw = 1e-6
+                    sig_norm_raw = (sig_raw / s0_raw).astype(np.float64)
+                    n_iso_sc = stagec_iso_grid.shape[0]
+                    w_sc = np.zeros(1 + n_iso_sc)
+                    AD_est, RD_est = stagec_varpro_single_fiber(
+                        sig_norm_raw, bvals, bvecs, dominant_dir,
+                        iso_forward, iso_gram, stagec_ad_grid, stagec_rd_grid,
+                        stagec_aniso_ratio, w_sc
+                    )
+                    tot_sc = 0.0
+                    for i in range(1 + n_iso_sc):
+                        tot_sc += w_sc[i]
+                    if tot_sc > 1e-10:
+                        res_sc = 0.0
+                        hin_sc = 0.0
+                        wat_sc = 0.0
+                        wd_sc = 0.0
+                        for i in range(n_iso_sc):
+                            wi = w_sc[1 + i]
+                            adc = stagec_iso_grid[i]
+                            if adc <= THRESH_RES:
+                                res_sc += wi
+                            elif adc <= THRESH_WAT:
+                                hin_sc += wi
+                            else:
+                                wat_sc += wi
+                            wd_sc += wi * adc
+                        f_fib = w_sc[0] / tot_sc
+                        f_res = res_sc / tot_sc
+                        f_hin = hin_sc / tot_sc
+                        f_wat = wat_sc / tot_sc
+                        sum_iso_sc = res_sc + hin_sc + wat_sc
+                        out[x, y, z, 0] = f_fib
+                        out[x, y, z, 1] = f_res
+                        out[x, y, z, 2] = f_hin
+                        out[x, y, z, 3] = f_wat
+                        out[x, y, z, 4] = f_hin + f_wat
+                        out[x, y, z, 8] = wd_sc / sum_iso_sc if sum_iso_sc > 1e-10 else 0.0
+                elif enable_direction_refinement:
                     _, AD_est, RD_est = refine_fiber_direction_cone(
                         bvals, bvecs, sig_norm, dominant_dir,
                         f_fib, f_res, f_hin, f_wat,
@@ -785,6 +1156,110 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                     out[x, y, z, 26] = directions[2, 0]
                     out[x, y, z, 27] = directions[2, 1]
                     out[x, y, z, 28] = directions[2, 2]
+
+
+@njit(parallel=True, cache=True, fastmath=True)
+def _iso_resolve_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso, out):
+    """
+    STAGE D pass — final constrained compartment-fraction re-solve for EVERY
+    fitted voxel, on the RICIAN-CORRECTED signal. Reads the detected structure
+    (n_pop + per-population directions/tensors) back from the output array,
+    re-solves [fibers | fixed iso centroids] via `iso_fraction_resolve`, and
+    OVERWRITES the fraction channels (0,1,2,3,4 and the pop-2 fraction 15).
+    The fiber TENSORS/directions are kept as estimated (Stage C on raw / MRDS);
+    only the fractions are re-estimated here (on corrected). See
+    `core.solvers.iso_fraction_resolve` for the why (raw-tensor / corrected-
+    fraction split, fixed-3 vs the over-complete spectrum).
+    """
+    n_voxels = coords.shape[0]
+    n_iso = iso_d.shape[0]
+    for idx in prange(n_voxels):
+        x, y, z = coords[idx]
+        sig = data_corr[x, y, z]
+        s0 = 0.0
+        cnt = 0
+        for i in range(len(bvals)):
+            if bvals[i] < b0_thr:
+                s0 += sig[i]
+                cnt += 1
+        if cnt > 0:
+            s0 /= cnt
+        if s0 < 1e-6:
+            continue
+        sig_norm = sig / s0
+
+        # Reconstruct the fiber set from the output (NaN n_pop => no fiber).
+        fdirs = np.zeros((2, 3))
+        fad = np.zeros(2)
+        frd = np.zeros(2)
+        n_fib = 0
+        npop = out[x, y, z, 11]
+        if not np.isnan(npop):
+            npi = int(npop)
+            if npi >= 1 and not np.isnan(out[x, y, z, 5]):
+                fdirs[0, 0] = out[x, y, z, 12]
+                fdirs[0, 1] = out[x, y, z, 13]
+                fdirs[0, 2] = out[x, y, z, 14]
+                fad[0] = out[x, y, z, 5]
+                frd[0] = out[x, y, z, 6]
+                n_fib = 1
+                if npi >= 2 and not np.isnan(out[x, y, z, 16]):
+                    fdirs[1, 0] = out[x, y, z, 19]
+                    fdirs[1, 1] = out[x, y, z, 20]
+                    fdirs[1, 2] = out[x, y, z, 21]
+                    fad[1] = out[x, y, z, 16]
+                    frd[1] = out[x, y, z, 17]
+                    n_fib = 2
+
+        w_out = np.zeros(n_fib + n_iso)
+        iso_fraction_resolve(sig_norm, bvals, bvecs, fdirs, fad, frd, n_fib, iso_d, w_out)
+        tot = 0.0
+        for a in range(n_fib + n_iso):
+            tot += w_out[a]
+        if tot < 1e-10:
+            continue
+
+        f_fib = 0.0
+        for k in range(n_fib):
+            f_fib += w_out[k]
+        f_fib /= tot
+        res = 0.0
+        hin = 0.0
+        wat = 0.0
+        for j in range(n_iso):
+            wj = w_out[n_fib + j] / tot
+            dj = iso_d[j]
+            if dj <= THRESH_RES:
+                res += wj
+            elif dj < THRESH_WAT:   # strict: the WF centroid sits AT THRESH_WAT
+                hin += wj
+            else:
+                wat += wj
+
+        if n_fib >= 2:
+            # CROSSINGS: keep the MRDS fiber_fraction (the over-complete Stage A
+            # captures the total anisotropic mass well; a reduced 2-column
+            # re-solve, sensitive to the imperfect crossing tensors, sheds fiber
+            # mass to iso and under-estimates FF_total -- validated). Use Stage D
+            # only for the ISO SPLIT (RF/HF/WF proportions), rescaled to the
+            # existing (1 - FF). FF (ch 0) and pop-2 fraction (ch 15) untouched.
+            ff_keep = out[x, y, z, 0]
+            if np.isnan(ff_keep):
+                ff_keep = f_fib
+            iso_sum = res + hin + wat
+            if iso_sum > 1e-10:
+                sc = (1.0 - ff_keep) / iso_sum
+                res = res * sc
+                hin = hin * sc
+                wat = wat * sc
+        else:
+            out[x, y, z, 0] = f_fib
+
+        out[x, y, z, 1] = res
+        out[x, y, z, 4] = hin + wat
+        if use_3iso:
+            out[x, y, z, 2] = hin
+            out[x, y, z, 3] = wat
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -890,8 +1365,9 @@ class DBSI_Adaptive:
         'DIR2_X': 19, 'DIR2_Y': 20, 'DIR2_Z': 21,
         'FF_POP3': 22, 'AD_POP3': 23, 'RD_POP3': 24, 'FA_POP3': 25,
         'DIR3_X': 26, 'DIR3_Y': 27, 'DIR3_Z': 28,
+        'CONC': 29,  # NEW — per-voxel dominant-basin angular concentration
     }
-    N_CHANNELS = 29
+    N_CHANNELS = 30
     N_CHANNELS_LEGACY = 11  # for reference / external code checking shape
 
     def __init__(self, n_iso=None, lambda_aniso=None, lambda_iso=None,
@@ -908,7 +1384,13 @@ class DBSI_Adaptive:
                  min_peak_ratio=_DEFAULT_MIN_PEAK_RATIO,
                  min_dominant_concentration=_DEFAULT_MIN_DOMINANT_CONCENTRATION,
                  enable_direction_refinement=True,
-                 target_angular_resolution_deg=1.0):
+                 target_angular_resolution_deg=1.0,
+                 lambda_aniso_conc_mod=_DEFAULT_LAMBDA_ANISO_CONC_MOD,
+                 conc_mod_c_lo=_DEFAULT_CONC_MOD_C_LO,
+                 conc_mod_c_hi=_DEFAULT_CONC_MOD_C_HI,
+                 conc_mod_gain=_DEFAULT_CONC_MOD_GAIN,
+                 stagec_refine=_DEFAULT_STAGEC_REFINE,
+                 iso_resolve=_DEFAULT_ISO_RESOLVE):
         if max_fiber_populations not in (1, 2, 3):
             raise ValueError(
                 f"max_fiber_populations must be 1, 2, or 3, got "
@@ -937,6 +1419,12 @@ class DBSI_Adaptive:
         self.min_dominant_concentration = min_dominant_concentration
         self.enable_direction_refinement = enable_direction_refinement
         self.target_angular_resolution_deg = target_angular_resolution_deg
+        self.lambda_aniso_conc_mod = lambda_aniso_conc_mod
+        self.conc_mod_c_lo = conc_mod_c_lo
+        self.conc_mod_c_hi = conc_mod_c_hi
+        self.conc_mod_gain = conc_mod_gain
+        self.stagec_refine = stagec_refine
+        self.iso_resolve = iso_resolve
 
         self.model_mode_ = None
         self.b_max_ = None
@@ -991,29 +1479,32 @@ class DBSI_Adaptive:
         if self.force_n_iso not in (None, 2, 3):
             raise ValueError("force_n_iso must be 2, 3, or None.")
 
-        # DEFAULT is 2-ISO (RF + NRF). The hindered/water split (3-ISO) is an
-        # OPT-IN (force_n_iso=3) reserved for future high-b protocols that can
-        # actually separate HF from WF: at typical clinical b-max the WF is
-        # unreliable (near the noise floor) and is not used downstream — the
-        # meaningful non-restricted "tissue destructuring" signal is NRF
-        # (HF+WF merged). `analyse_protocol` still runs, but only to advise
-        # whether a requested 3-ISO is supported.
+        # DEFAULT is now 3-ISO (RF + HF + WF) whenever the protocol supports it
+        # (>=2 shells, b_max>=2000 per `analyse_protocol`); 2-ISO (RF + NRF,
+        # HF+WF merged) is the fallback for single-shell / low-b_max protocols.
+        # This flip (from 2-ISO-default + opt-in 3-ISO) rests on the iso-block
+        # identifiability analysis + the Stage D fixed-3 estimator: 3 iso
+        # components are supported down to b_max~2000 and the constrained
+        # estimator recovers RF/HF/WF near-GT with low variance (and 3-ISO is
+        # MORE accurate on the restricted fraction than the 2-ISO merge even
+        # where the merge applies). `force_n_iso` overrides: 2 forces 2-ISO,
+        # 3 forces 3-ISO (with a warning if the protocol can't support it).
         protocol_supports_3iso = use_3iso
-        if self.force_n_iso == 3:
+        if self.force_n_iso == 2:
+            use_3iso = False
+            reason = "2-ISO model: force_n_iso=2 requested by user (RF + NRF)."
+        elif self.force_n_iso == 3:
             use_3iso = True
-            print(f"\n  [MODEL] force_n_iso=3 — 3-ISO opt-in (RF + HF + WF).")
+            print(f"\n  [MODEL] force_n_iso=3 — 3-ISO (RF + HF + WF).")
             if not protocol_supports_3iso:
                 print(f"  [WARNING] analyse_protocol judged this acquisition "
                       f"insufficient for a reliable HF/WF split: {reason} "
                       f"The 3-ISO water fraction may be unstable.")
-        else:  # None (DEFAULT) or 2 -> 2-ISO
-            use_3iso = False
-            if self.force_n_iso == 2:
-                reason = "2-ISO model: force_n_iso=2 requested by user."
-            else:
-                reason = ("2-ISO model (DEFAULT: RF + NRF, HF+WF merged). "
-                          "3-ISO (HF/WF split) is opt-in via force_n_iso=3. "
-                          f"[protocol_supports_3iso={protocol_supports_3iso}]")
+        else:  # None (DEFAULT) -> follow analyse_protocol
+            use_3iso = protocol_supports_3iso
+            if not use_3iso:
+                reason = ("2-ISO fallback (single-shell / low b_max protocol): "
+                          + reason)
 
         model_mode = 3 if use_3iso else 2
         self.model_mode_ = model_mode
@@ -1373,6 +1864,7 @@ class DBSI_Adaptive:
         results[..., 10] = np.nan
         results[..., 11] = np.nan  # N_POP: NaN outside fiber_threshold, not 0
         results[..., 12:29] = np.nan  # DIR1 + pop2/pop3 block, all NaN by default
+        results[..., 29] = np.nan  # CONC: dominant-basin concentration (diagnostic)
         if not use_3iso:
             results[..., 2] = np.nan
             results[..., 3] = np.nan
@@ -1393,6 +1885,28 @@ class DBSI_Adaptive:
                   f"2nd pop >= {self.min_peak_ratio:.2f} x dominant, "
                   f"concentration gate {self.min_dominant_concentration:.2f})")
 
+        if self.lambda_aniso_conc_mod:
+            print(f"   Plan A concentration modulation: ENABLED "
+                  f"(lambda_aniso boosted up to x{self.conc_mod_gain:.0f} where "
+                  f"dominant-basin concentration <= {self.conc_mod_c_lo:.2f}; "
+                  f"no boost >= {self.conc_mod_c_hi:.2f}; per-voxel re-solve)")
+
+        # ── Stage C precompute (constant across voxels) ─────────────────────
+        # Stage C isotropic grid + forward columns / Gram, and the (AD, RD)
+        # search grids for the joint mono-fiber re-solve. Built once per protocol.
+        # NOTE: a dedicated fine geomspace iso grid was tried and REVERTED — it
+        # did not help the low-FA / AD cases and slightly lowered discrimination
+        # (0.856 -> 0.831 on the validation brain). The model's iso_grid is used.
+        stagec_iso_grid = iso_grid
+        iso_forward = np.exp(-np.outer(bvals, stagec_iso_grid)).astype(np.float64)
+        iso_gram = iso_forward.T @ iso_forward
+        stagec_ad_grid = np.linspace(_STAGEC_AD_MIN, _STAGEC_AD_MAX, _STAGEC_N_AD)
+        stagec_rd_grid = np.linspace(_STAGEC_RD_MIN, _STAGEC_RD_MAX, _STAGEC_N_RD)
+        if self.stagec_refine:
+            print(f"   Stage C (joint mono-fiber tensor+fraction re-solve): ENABLED "
+                  f"(VARPRO over AD[{_STAGEC_N_AD}]xRD[{_STAGEC_N_RD}] grid + local "
+                  f"refine; raw signal; n_pop==1 voxels)")
+
         _min_separation_cos = float(np.cos(np.radians(self.min_separation_deg)))
         _kernel = _fit_voxels_3iso_v3 if use_3iso else _fit_voxels_2iso_v3
 
@@ -1411,7 +1925,13 @@ class DBSI_Adaptive:
                     self.min_dominant_concentration,
                     self.enable_direction_refinement,
                     _cone1, _n1, _cone2, _n2,
-                    neighbor_idx, self.max_fiber_populations, results
+                    neighbor_idx, self.max_fiber_populations, results,
+                    float(self.lambda_aniso), bool(self.lambda_aniso_conc_mod),
+                    float(self.conc_mod_c_lo), float(self.conc_mod_c_hi),
+                    float(self.conc_mod_gain),
+                    bool(self.stagec_refine), iso_forward, iso_gram,
+                    stagec_ad_grid, stagec_rd_grid, float(_STAGEC_ANISO_RATIO),
+                    data, stagec_iso_grid
                 )
                 pbar.update(end - start)
 
@@ -1427,6 +1947,18 @@ class DBSI_Adaptive:
               f"({pct:.1f}%)")
         print(f"   Multi-population (N_POP>=2) voxels: {n_multi:,} "
               f"({pct_multi:.1f}% of fitted voxels)")
+
+        # ── Stage D: final constrained fraction re-solve (fixed iso, corrected) ──
+        if self.iso_resolve:
+            _iso_d = np.array(_ISO_RESOLVE_D_3ISO if use_3iso else _ISO_RESOLVE_D_2ISO,
+                              dtype=np.float64)
+            print(f"\n   Stage D (constrained fraction re-solve on CORRECTED signal): "
+                  f"ENABLED  [fixed iso centroids {np.round(_iso_d*1e3, 2).tolist()} e-3, "
+                  f"{'3-ISO' if use_3iso else '2-ISO'}]")
+            _t0d = time.time()
+            _iso_resolve_pass(data_corr, coords, bvals, bvecs, b0_thr, _iso_d,
+                              use_3iso, results)
+            print(f"   Stage D completed: {time.time() - _t0d:.1f}s")
 
         # ── Data-driven restricted-fraction bias correction (IN-PLACE) ──────
         # Invert the per-dataset RF response function to undo the systematic
@@ -1514,6 +2046,7 @@ class DBSI_Adaptive:
             'radial_diffusivity_pop3',
             'fiber_fa_pop3',
             'dir3_x', 'dir3_y', 'dir3_z',
+            'dominant_basin_concentration',
         ]
         base = base_3iso if model_mode == 3 else base_2iso
         return base + mrds_block

@@ -55,10 +55,34 @@ def main():
                         help="Number of AD grid steps for Stage A's detection dictionary. Default: 3 (deliberately coarse).")
     parser.add_argument("--n-rd", type=int, default=3,
                         help="Number of RD grid steps for Stage A's detection dictionary. Default: 3 (deliberately coarse).")
-    parser.add_argument("--anisotropy-ratio", type=float, dest="anisotropy_ratio", default=1.15,
-                        help="Minimum AD/RD ratio for admissible Stage A pairs. Default: 1.15.")
+    parser.add_argument("--anisotropy-ratio", type=float, dest="anisotropy_ratio", default=2.0,
+                        help="Minimum AD/RD ratio for admissible Stage A pairs. Default: 2.0 "
+                             "(raised from 1.15: drops the near-isotropic ratio-1.83 grid column "
+                             "that leaks isotropic signal into fiber_fraction; safe band [2.0, 2.16]).")
     parser.add_argument("--min-weight-fraction", type=float, dest="min_weight_fraction", default=0.05,
                         help="Stage A direction-selection threshold. Default: 0.05.")
+    parser.add_argument("--disable-iso-resolve", dest="disable_iso_resolve", action="store_true",
+                        help="Disable the Stage D final constrained iso fraction re-solve. It is "
+                             "ON by default: for every voxel it re-estimates the compartment "
+                             "fractions by NNLS over [detected fibers | fixed iso centroids] on "
+                             "the Rician-corrected signal, replacing the over-complete Stage A "
+                             "spectrum (which mis-bins RF/HF/WF). Pass this to keep the raw "
+                             "Stage A fractions.")
+    parser.add_argument("--disable-stagec", dest="disable_stagec", action="store_true",
+                        help="Disable the Stage C joint mono-fiber re-solve (Plan A / bias #1 "
+                             "fix). It is ON by default: for single-fiber voxels it re-fits the "
+                             "fiber tensor (AD,RD) and all compartment fractions jointly on a "
+                             "reduced [fiber|iso] dictionary, correcting the fiber_fraction "
+                             "inflation / restricted collapse / AD under-estimation of the raw "
+                             "two-stage output. Pass this to keep the raw Stage A/B estimates.")
+    parser.add_argument("--disable-conc-modulation", dest="disable_conc_modulation",
+                        action="store_true",
+                        help="Disable the per-voxel angular-concentration modulation of "
+                             "lambda_aniso (Plan A). It is ON by default: it re-solves low-"
+                             "concentration (diffuse-leakage) voxels with boosted anisotropic "
+                             "regularization to suppress isotropic->fiber_fraction leakage, "
+                             "while sparing concentrated (genuine-fiber, incl. crossing) voxels. "
+                             "Pass this to fall back to a single unmodulated Stage A solve.")
     parser.add_argument("--calibration-method", choices=["data_driven", "monte_carlo"],
                         dest="calibration_method", default="data_driven",
                         help="Method to determine (lambda_aniso, lambda_iso). Default: data_driven "
@@ -124,6 +148,9 @@ def main():
         force_n_iso=args.force_n_iso,
         enable_direction_refinement=not args.disable_direction_refinement,
         target_angular_resolution_deg=args.target_angular_resolution_deg,
+        lambda_aniso_conc_mod=not args.disable_conc_modulation,
+        stagec_refine=not args.disable_stagec,
+        iso_resolve=not args.disable_iso_resolve,
     )
 
     results, model_mode = model.fit(

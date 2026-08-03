@@ -1811,6 +1811,21 @@ class DBSI_Adaptive:
         print(f"   Regularization: lambda_aniso={self.lambda_aniso:.4f}  "
               f"lambda_iso={self.lambda_iso:.4f}")
 
+        # Both MC-null calibrations below (concentration gate + RF response)
+        # simulate unit-S0 signals, so they need sigma in NORMALISED (S/S0)
+        # units — NOT the raw-signal sigma from estimate_snr_robust (which is on
+        # the S0 scale, ~thousands on real data). Passing the raw sigma makes the
+        # unit-amplitude MC pure noise, saturating the null concentration to ~1.0
+        # and forcing the gate to reject every fiber. `sigma_cal` is the
+        # calibration sample's normalised sigma and is set whenever any lambda/
+        # n_iso calibration ran; sample it here if the caller supplied everything
+        # explicitly so it is never None below.
+        if sigma_cal is None and run_calibration and (
+                calibrate_concentration_gate or correct_restricted_fraction):
+            _yc_tmp, sigma_cal = sample_calibration_voxels(
+                data_corr, mask, bvals, n_voxels=n_calibration_voxels, seed=0)
+            del _yc_tmp
+
         # ── Data-driven fiber-detection concentration gate (MC null) ────────
         # Set the concentration gate from a protocol/dictionary/lambda/SNR-
         # specific pure-isotropic NULL rather than the fixed default. Always on
@@ -1821,7 +1836,7 @@ class DBSI_Adaptive:
             _iso_d_lo = max(self.iso_range[0], 0.1e-3)
             _gate_mc, _gate_diag = calibrate_concentration_gate_mc(
                 bvals, At, AtA_reg, n_aniso_cols, self.n_dirs, n_pairs,
-                fiber_dirs, neighbor_idx, sigma,
+                fiber_dirs, neighbor_idx, sigma_cal,
                 iso_d_range=(_iso_d_lo, iso_d_max),
                 fiber_threshold=self.fiber_threshold,
                 default_gate=self.min_dominant_concentration,
@@ -1846,7 +1861,7 @@ class DBSI_Adaptive:
         if run_calibration and correct_restricted_fraction:
             _ff_rows, _rf_lv, _rf_grid = build_rf_response_table(
                 bvals, bvecs, At, AtA_reg, n_aniso_cols, iso_grid, THRESH_RES,
-                sigma, ff_levels=_RF_CORRECTION_FF_LEVELS,
+                sigma_cal, ff_levels=_RF_CORRECTION_FF_LEVELS,
                 rf_levels=_RF_CORRECTION_RF_LEVELS, reps=_RF_CORRECTION_REPS,
                 b0_thr=100.0, seed=0,
             )

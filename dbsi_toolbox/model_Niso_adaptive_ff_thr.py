@@ -400,7 +400,9 @@ _DEFAULT_STAGEC_REFINE = True
 _STAGEC_AD_MIN = 0.6e-3
 _STAGEC_AD_MAX = 2.6e-3
 _STAGEC_N_AD = 14
-_STAGEC_RD_MIN = 0.05e-3
+_STAGEC_RD_MIN = 0.15e-3   # Leva 1: physiological RD floor (was 0.05e-3) — fiber-compartment
+                           # perpendicular diffusivity below ~0.1e-3 is non-physiological and lets
+                           # noise push RD->0 -> FA->1 on real data. Caps reported FA at ~0.9.
 _STAGEC_RD_MAX = 1.1e-3
 _STAGEC_N_RD = 12
 _STAGEC_ANISO_RATIO = 1.1
@@ -1390,7 +1392,8 @@ class DBSI_Adaptive:
                  conc_mod_c_hi=_DEFAULT_CONC_MOD_C_HI,
                  conc_mod_gain=_DEFAULT_CONC_MOD_GAIN,
                  stagec_refine=_DEFAULT_STAGEC_REFINE,
-                 iso_resolve=_DEFAULT_ISO_RESOLVE):
+                 iso_resolve=_DEFAULT_ISO_RESOLVE,
+                 lambda_aniso_method='discrepancy'):
         if max_fiber_populations not in (1, 2, 3):
             raise ValueError(
                 f"max_fiber_populations must be 1, 2, or 3, got "
@@ -1425,6 +1428,10 @@ class DBSI_Adaptive:
         self.conc_mod_gain = conc_mod_gain
         self.stagec_refine = stagec_refine
         self.iso_resolve = iso_resolve
+        if lambda_aniso_method not in ('discrepancy', 'gcv', 'lcurve'):
+            raise ValueError("lambda_aniso_method must be 'discrepancy', 'gcv', or 'lcurve', "
+                             f"got {lambda_aniso_method!r}.")
+        self.lambda_aniso_method = lambda_aniso_method
 
         self.model_mode_ = None
         self.b_max_ = None
@@ -1681,9 +1688,15 @@ class DBSI_Adaptive:
                           f"brain mask (sigma_normalised={sigma_cal:.5f})")
                 self.lambda_aniso, self.lambda_iso, _dd_diag = select_lambdas_data_driven(
                     bvals, bvecs, fiber_dirs, diff_pairs, iso_grid, y_cal, sigma_cal,
+                    lambda_aniso_method=self.lambda_aniso_method,
                 )
                 print(f"   Data-driven result: lambda_aniso={self.lambda_aniso:.4f}, "
-                      f"lambda_iso={self.lambda_iso:.4f}")
+                      f"lambda_iso={self.lambda_iso:.4f}  "
+                      f"[lambda_aniso via {self.lambda_aniso_method}]")
+                _am_diag = _dd_diag.get('lambda_aniso_selection')
+                if _am_diag is not None and _am_diag.get('corner_weak'):
+                    print(f"   [note] {self.lambda_aniso_method} curve has no sharp corner/minimum "
+                          f"for this protocol — selection may be soft (see diag).")
                 if _dd_diag.get('lambda_iso_capped'):
                     print(f"   [lambda_iso ceiling] GCV wanted lambda_iso="
                           f"{_dd_diag['lambda_iso_gcv']:.4f}; capped to the "

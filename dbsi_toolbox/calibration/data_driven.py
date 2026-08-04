@@ -910,6 +910,142 @@ def select_lambda_aniso_discrepancy(AtA, At, y_voxels, n_aniso_cols,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SNR-ROBUST lambda_aniso — GCV / L-curve (alternative to the discrepancy pick)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def select_lambda_aniso_gcv_lcurve(AtA, At, y_voxels, n_aniso_cols,
+                                   lambda_iso_fixed, method='gcv',
+                                   lambda_grid=None):
+    """
+    Select lambda_aniso via Generalized Cross-Validation (GCV) or the L-curve
+    corner — an SNR-robust alternative to `select_lambda_aniso_discrepancy`.
+
+    WHY --------------------------------------------------------------------
+    The discrepancy (Morozov) pick targets a residual == N*sigma^2, i.e. it is
+    anchored to the noise VARIANCE. Across a multi-protocol acquisition of the
+    SAME brain, that makes lambda_aniso swing by ~60x with SNR (and collide with
+    the safety floor at high SNR), which corrupts cross-protocol comparability of
+    the fiber tensor and the crossing rate. GCV and the L-curve instead select
+    from the SHAPE of the residual/solution trade-off, with no reference to the
+    absolute noise level, so they are far more comparable across protocols.
+
+    HOW --------------------------------------------------------------------
+    For each candidate lambda_aniso on a log grid, this solves the SAME
+    block-regularized NNLS the fit uses (lambda_aniso on the anisotropic
+    columns [0:n_aniso_cols), lambda_iso_fixed on the isotropic columns),
+    averaged over the calibration voxels, recording per lambda:
+        RSS(l)  = ||A w - y||^2                       (residual sum of squares)
+        eta2(l) = ||w||^2                             (solution seminorm)
+        dof(l)  = tr(A (A^T A + R)^-1 A^T)            (ridge effective dof)
+    where w is the LINEAR ridge solution (see the implementation note on why
+    ridge, not NNLS, dof is used — active-set dof rails GCV to lambda->0). Then:
+        method='gcv'    : GCV(l) = (RSS/N) / (1 - dof/N)^2, take argmin
+                          (dof>=N -> +inf, i.e. too little regularization is
+                          rejected automatically).
+        method='lcurve' : take the corner (maximum Menger curvature) of the
+                          log-log curve (log||Aw-y||, log||w||).
+
+    The residual is computed via the At/AtA identity (no explicit A), matching
+    `select_lambda_aniso_discrepancy`. Cost is comparable to the discrepancy
+    bisection (a few dozen NNLS solves per calibration voxel).
+
+    Returns
+    -------
+    best_lambda_aniso : float
+    diag : dict
+        Full curves (lambda_grid, rss, eta2, dof, and gcv or curvature),
+        best_idx/best_lambda, and 'corner_weak' (True if the GCV minimum sits at
+        a grid edge / the curve is nearly flat, or the L-curve has no sharp
+        corner — i.e. the selection is not well-determined for this protocol).
+    """
+    if method not in ('gcv', 'lcurve'):
+        raise ValueError(f"method must be 'gcv' or 'lcurve', got {method!r}.")
+
+    y_voxels = np.atleast_2d(np.asarray(y_voxels, dtype=np.float64))
+    n_voxels, N = y_voxels.shape
+    n_total_cols = AtA.shape[0]
+
+    if lambda_grid is None:
+        lambda_grid = np.logspace(-4, 4, 40)
+    lambda_grid = np.sort(np.asarray(lambda_grid, dtype=np.float64))
+
+    # ── Vectorised LINEAR-RIDGE evaluation over the lambda grid ─────────────
+    # GCV/L-curve are evaluated on the linear Tikhonov (ridge) solution, NOT the
+    # NNLS solution, for two reasons:
+    #  (1) The effective dof of an NNLS fit is dominated by the active-set size,
+    #      which stays small because the non-negativity is itself a strong
+    #      implicit regulariser. An NNLS-dof GCV therefore never "feels" the
+    #      ill-conditioning lambda_aniso controls and RAILS to lambda->0 (the
+    #      same railing that forced a discrepancy CAP on the lambda_iso GCV).
+    #      The ridge dof = tr(A (A^T A + R)^-1 A^T) grows correctly as lambda->0
+    #      and penalises under-regularisation.
+    #  (2) It is fully vectorised (a few matmuls per lambda, no per-voxel NNLS),
+    #      ~1000x faster than the NNLS loop.
+    # The selected lambda is then used in the ACTUAL NNLS fit — ridge selection
+    # is a standard, well-conditioned proxy for the regularisation STRENGTH.
+    Y = y_voxels                                   # (n_voxels, N)
+    AtY = At @ Y.T                                 # (n_total, n_voxels)
+    yty = np.sum(Y * Y, axis=1)                    # (n_voxels,)
+    eye = np.eye(n_total_cols)
+
+    rss = np.zeros(len(lambda_grid))
+    eta2 = np.zeros(len(lambda_grid))
+    dof = np.zeros(len(lambda_grid))
+
+    for li, lam in enumerate(lambda_grid):
+        reg_vec = np.empty(n_total_cols, dtype=np.float64)
+        reg_vec[:n_aniso_cols] = lam
+        reg_vec[n_aniso_cols:] = lambda_iso_fixed
+        M = AtA + np.diag(reg_vec)
+        M[np.diag_indices_from(M)] += 1e-12        # numerical PD safety
+        Minv = np.linalg.solve(M, eye)             # M^-1  (n_total x n_total)
+
+        W = Minv @ AtY                             # ridge weights (n_total, n_voxels)
+        AtAW = AtA @ W
+        rss_v = np.sum(W * AtAW, axis=0) - 2.0 * np.sum(W * AtY, axis=0) + yty
+        eta2_v = np.sum(W * W, axis=0)
+        rss[li] = float(np.mean(np.maximum(rss_v, 0.0)))
+        eta2[li] = float(np.mean(eta2_v))
+        # ridge effective dof = tr(M^-1 A^T A) = n_total - sum_i reg_i (M^-1)_ii
+        dof[li] = float(n_total_cols - np.sum(reg_vec * np.diag(Minv)))
+
+    diag = dict(method=method, lambda_grid=lambda_grid, rss=rss, eta2=eta2,
+                dof=dof, lambda_iso_fixed=float(lambda_iso_fixed))
+
+    if method == 'gcv':
+        denom = (1.0 - dof / N) ** 2
+        gcv = np.where(dof < N, (rss / N) / np.maximum(denom, 1e-12), np.inf)
+        best_idx = int(np.argmin(gcv))
+        finite = gcv[np.isfinite(gcv)]
+        spread = (finite.max() / max(finite.min(), 1e-30)) if finite.size else 1.0
+        diag['gcv'] = gcv
+        diag['corner_weak'] = bool(best_idx in (0, len(lambda_grid) - 1)
+                                   or spread < 1.05)
+    else:  # lcurve — corner via maximum Menger curvature of the log-log curve
+        x = 0.5 * np.log(np.maximum(rss, 1e-300))     # log ||A w - y||
+        yc = 0.5 * np.log(np.maximum(eta2, 1e-300))   # log ||w||
+        curv = np.zeros(len(lambda_grid))
+        for i in range(1, len(lambda_grid) - 1):
+            x1, y1 = x[i - 1], yc[i - 1]
+            x2, y2 = x[i], yc[i]
+            x3, y3 = x[i + 1], yc[i + 1]
+            a = np.hypot(x2 - x1, y2 - y1)
+            b = np.hypot(x3 - x2, y3 - y2)
+            c = np.hypot(x3 - x1, y3 - y1)
+            area2 = abs((x2 - x1) * (y3 - y1) - (x3 - x1) * (y2 - y1))
+            d = a * b * c
+            curv[i] = (2.0 * area2 / d) if d > 1e-30 else 0.0
+        best_idx = int(np.argmax(curv))
+        diag['curvature'] = curv
+        diag['corner_weak'] = bool(curv.max() < 1e-6)
+
+    best_lambda = float(lambda_grid[best_idx])
+    diag['best_idx'] = best_idx
+    diag['best_lambda'] = best_lambda
+    return best_lambda, diag
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # REAL-DATA VOXEL SAMPLING (for use with select_lambdas_data_driven)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1030,7 +1166,8 @@ def sample_calibration_voxels(data, mask, bvals, b0_thr=100.0,
 def select_lambdas_data_driven(bvals, bvecs, fiber_dirs, diff_pairs, iso_grid,
                                 y_voxels, sigma,
                                 lambda_iso_grid=None,
-                                lambda_aniso_bracket=(1e-6, 1e4)):
+                                lambda_aniso_bracket=(1e-6, 1e4),
+                                lambda_aniso_method='discrepancy'):
     """
     Convenience wrapper: select (lambda_aniso, lambda_iso) for a given
     Stage A dictionary using GCV (lambda_iso) followed by the
@@ -1145,19 +1282,36 @@ def select_lambdas_data_driven(bvals, bvecs, fiber_dirs, diff_pairs, iso_grid,
     )
     lambda_iso = min(lambda_iso_gcv, lambda_iso_cap)
 
-    # ── lambda_aniso via discrepancy principle, using the refined lambda_iso.
+    # ── lambda_aniso via the requested method, using the refined lambda_iso.
     # (Uses the FULL signal — lambda_aniso governs the anisotropic fit.)
-    lambda_aniso, disc_diag = select_lambda_aniso_discrepancy(
-        AtA, At, y2d, n_aniso_cols, sigma, lambda_iso,
-        lambda_lo=lambda_aniso_bracket[0], lambda_hi=lambda_aniso_bracket[1],
-        n_dirs=n_dirs, max_eig_aniso=max_eig_aniso,
-    )
+    # 'discrepancy' = Morozov noise-matching (original, sigma-anchored);
+    # 'gcv'/'lcurve' = SNR-robust selection from the residual/solution curve.
+    if lambda_aniso_method == 'discrepancy':
+        lambda_aniso, aniso_sel_diag = select_lambda_aniso_discrepancy(
+            AtA, At, y2d, n_aniso_cols, sigma, lambda_iso,
+            lambda_lo=lambda_aniso_bracket[0], lambda_hi=lambda_aniso_bracket[1],
+            n_dirs=n_dirs, max_eig_aniso=max_eig_aniso,
+        )
+    elif lambda_aniso_method in ('gcv', 'lcurve'):
+        lambda_aniso, aniso_sel_diag = select_lambda_aniso_gcv_lcurve(
+            AtA, At, y2d, n_aniso_cols, lambda_iso, method=lambda_aniso_method,
+        )
+    else:
+        raise ValueError("lambda_aniso_method must be 'discrepancy', 'gcv', or "
+                         f"'lcurve', got {lambda_aniso_method!r}.")
 
     diagnostics = dict(
-        gcv=gcv_diag, discrepancy=disc_diag,
+        gcv=gcv_diag,
         lambda_iso_pass1=lambda_iso_pass1, lambda_aniso_pass1=lambda_aniso_pass1,
         lambda_iso_gcv=lambda_iso_gcv, lambda_iso_cap=lambda_iso_cap,
         lambda_iso_capped=(lambda_iso_cap < lambda_iso_gcv),
+        lambda_aniso_method=lambda_aniso_method,
+        lambda_aniso_selection=aniso_sel_diag,
     )
+    # Keep the 'discrepancy' key ONLY for the discrepancy path, so the model's
+    # floor-warning check (_dd_diag.get('discrepancy', {}).get('floor_applied'))
+    # is naturally silent under gcv/lcurve.
+    if lambda_aniso_method == 'discrepancy':
+        diagnostics['discrepancy'] = aniso_sel_diag
 
     return lambda_aniso, lambda_iso, diagnostics

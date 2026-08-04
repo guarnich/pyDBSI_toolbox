@@ -702,7 +702,7 @@ def estimate_AD_RD_conditioned(bvals, bvecs, sig_norm, fiber_dir,
     x = (sum_BB * sum_Ay - sum_AB * sum_By) / det
     y = (sum_AA * sum_By - sum_AB * sum_Ay) / det
 
-    RD_est = max(0.05e-3, min(3.0e-3, -x))
+    RD_est = max(0.15e-3, min(3.0e-3, -x))   # Leva 1: physiological RD floor (was 0.05e-3)
     AD_est = max(0.05e-3, min(3.5e-3, -x - y))
     if AD_est < RD_est:
         m = (AD_est + RD_est) / 2.0
@@ -872,7 +872,7 @@ def stagec_varpro_single_fiber(sig_norm, bvals, bvecs, fiber_dir,
         av = best_ad + (j - 2) * 0.5 * da
         rv = best_rd + (j - 2) * 0.5 * dr
         ad_loc[j] = av if av > 0.2e-3 else 0.2e-3
-        rd_loc[j] = rv if rv > 0.02e-3 else 0.02e-3
+        rd_loc[j] = rv if rv > 0.15e-3 else 0.15e-3   # Leva 1: physiological RD floor (was 0.02e-3)
     best_res, best_ad, best_rd = _stagec_scan(
         sig_norm, bvals, c2, iso_forward, iso_gram, iso_aty, yty,
         ad_loc, rd_loc, aniso_ratio, best_res, best_ad, best_rd, w_out)
@@ -1756,7 +1756,7 @@ def _stageB_single_given_residual(bvals, bvecs, direction, f_fib,
     x = (sum_BB * sum_Ay - sum_AB * sum_By) / det
     y = (sum_AA * sum_By - sum_AB * sum_Ay) / det
 
-    RD = max(0.05e-3, min(3.0e-3, -x))
+    RD = max(0.15e-3, min(3.0e-3, -x))   # Leva 1: physiological RD floor (was 0.05e-3)
     AD = max(0.05e-3, min(3.5e-3, -x - y))
     if AD < RD:
         m = (AD + RD) / 2.0
@@ -1869,7 +1869,7 @@ def estimate_AD_RD_nfiber_joint(bvals, bvecs, sig_norm, directions, fractions,
         p[2 * k + 1] = RD_init[k]
         lb[2 * k] = 0.05e-3
         ub[2 * k] = 3.5e-3
-        lb[2 * k + 1] = 0.05e-3
+        lb[2 * k + 1] = 0.15e-3   # Leva 1: physiological RD floor (was 0.05e-3)
         ub[2 * k + 1] = 3.0e-3
     for i in range(n_par):
         if p[i] < lb[i]:

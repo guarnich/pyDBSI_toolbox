@@ -451,3 +451,110 @@ def save_fit_quality(r2_map, rmse_map, affine, output_dir):
         paths[name] = fpath
 
     return paths
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AGGREGATE VOXEL-LEVEL FIBER MAPS (Map A) — derived, no re-fit
+# ─────────────────────────────────────────────────────────────────────────────
+
+def compute_aggregate_fiber_maps(results, channel_names):
+    """
+    Compact voxel-level AGGREGATE fiber maps across all detected populations,
+    derived purely from the existing per-population output channels (no re-fit).
+
+    DBSI stores the fiber tensor of the DOMINANT population (axial_/radial_
+    diffusivity, fiber_fa) plus, for crossings, the secondary/tertiary tensors
+    and fractions (…_pop2/…_pop3). The scalar `fiber_fraction` (channel 0) is
+    ALREADY the TOTAL anisotropic fraction (Stage A); the per-population
+    fractions are its MRDS split, so FF_pop1 = fiber_fraction − FF_pop2 − FF_pop3
+    (verified ≥ 0 on real data). This returns:
+
+      fiber_fraction_total        : total fiber fraction (identically channel 0,
+                                    surfaced here as the aggregate FF).
+      axial_diffusivity_weighted  : fraction-weighted mean of the populations'
+                                    axial diffusivity.
+      radial_diffusivity_weighted : fraction-weighted mean of the populations'
+                                    radial diffusivity.
+      fiber_fa_weighted           : FA of the fraction-weighted mean fiber
+                                    tensor — an INTRINSIC, orientation-
+                                    INDEPENDENT anisotropy ("how anisotropic are
+                                    this voxel's fibers, on average"). It does
+                                    NOT drop at crossings the way an
+                                    orientation-averaged (DTI-like) FA would;
+                                    that is deliberate.
+
+    In single-fiber voxels the weighted maps reduce EXACTLY to the dominant
+    tensor. Values are NaN where no fiber is present.
+
+    Parameters
+    ----------
+    results : ndarray (X, Y, Z, C)
+        DBSI output maps for one dataset.
+    channel_names : sequence of str
+        Channel names for `results` — DBSI_Adaptive.output_map_names(mode),
+        or the `channel_names` stored alongside a saved output_maps npz.
+
+    Returns
+    -------
+    dict {name: ndarray (X, Y, Z), float32}
+    """
+    names = list(channel_names)
+    shape3d = results.shape[:3]
+
+    def ch(name, zero_if_missing=False):
+        if name in names:
+            return results[..., names.index(name)].astype(np.float64)
+        if zero_if_missing:
+            return np.zeros(shape3d, np.float64)
+        raise KeyError(f"channel '{name}' not found in channel_names")
+
+    FFt = ch('fiber_fraction')
+    AD1 = ch('axial_diffusivity')
+    RD1 = ch('radial_diffusivity')
+
+    FF2 = np.nan_to_num(ch('fiber_fraction_pop2', True), nan=0.0)
+    AD2 = np.nan_to_num(ch('axial_diffusivity_pop2', True), nan=0.0)
+    RD2 = np.nan_to_num(ch('radial_diffusivity_pop2', True), nan=0.0)
+    FF3 = np.nan_to_num(ch('fiber_fraction_pop3', True), nan=0.0)
+    AD3 = np.nan_to_num(ch('axial_diffusivity_pop3', True), nan=0.0)
+    RD3 = np.nan_to_num(ch('radial_diffusivity_pop3', True), nan=0.0)
+
+    FFt_pos = np.where(np.isfinite(FFt), FFt, 0.0)
+    FF1 = np.clip(FFt_pos - FF2 - FF3, 0.0, None)          # dominant population share
+    AD1z = np.nan_to_num(AD1, nan=0.0)
+    RD1z = np.nan_to_num(RD1, nan=0.0)
+
+    fiber = np.isfinite(AD1) & (FFt_pos > 0)               # a real fiber tensor is present
+    denom = np.where(FFt_pos > 0, FFt_pos, 1.0)
+    ADw = (FF1 * AD1z + FF2 * AD2 + FF3 * AD3) / denom
+    RDw = (FF1 * RD1z + FF2 * RD2 + FF3 * RD3) / denom
+    ADw = np.where(fiber, ADw, np.nan)
+    RDw = np.where(fiber, RDw, np.nan)
+
+    md = (ADw + 2.0 * RDw) / 3.0
+    num = np.sqrt((ADw - md) ** 2 + 2.0 * (RDw - md) ** 2)
+    den = np.sqrt(ADw ** 2 + 2.0 * RDw ** 2)
+    with np.errstate(invalid='ignore', divide='ignore'):
+        FAw = np.sqrt(1.5) * num / den
+    FAw = np.where(fiber & (den > 0), FAw, np.nan)
+
+    FFtotal = np.where(np.isfinite(FFt), FFt, np.nan)
+    return {
+        'fiber_fraction_total': FFtotal.astype(np.float32),
+        'axial_diffusivity_weighted': ADw.astype(np.float32),
+        'radial_diffusivity_weighted': RDw.astype(np.float32),
+        'fiber_fa_weighted': FAw.astype(np.float32),
+    }
+
+
+def save_aggregate_fiber_maps(agg_maps, affine, output_dir):
+    """Save the `compute_aggregate_fiber_maps` output as compressed NIfTI files."""
+    import nibabel as nib
+    import os
+    os.makedirs(output_dir, exist_ok=True)
+    paths = {}
+    for name, arr in agg_maps.items():
+        fpath = os.path.join(output_dir, f'{name}.nii.gz')
+        nib.save(nib.Nifti1Image(np.asarray(arr, np.float32), affine), fpath)
+        paths[name] = fpath
+    return paths

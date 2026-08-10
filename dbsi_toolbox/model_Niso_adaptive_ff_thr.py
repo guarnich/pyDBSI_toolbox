@@ -1393,7 +1393,7 @@ class DBSI_Adaptive:
                  conc_mod_gain=_DEFAULT_CONC_MOD_GAIN,
                  stagec_refine=_DEFAULT_STAGEC_REFINE,
                  iso_resolve=_DEFAULT_ISO_RESOLVE,
-                 lambda_aniso_method='discrepancy'):
+                 lambda_aniso_method='gcv'):
         if max_fiber_populations not in (1, 2, 3):
             raise ValueError(
                 f"max_fiber_populations must be 1, 2, or 3, got "

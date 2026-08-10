@@ -72,6 +72,21 @@ _CH_AD = 5
 _CH_RD = 6
 _CH_ADC_ISO = 8
 
+# MRDS multi-population block (see model output_map_names). Used by the
+# multi-population reconstruction so genuine crossings are modelled with ALL
+# their populations (stored directions + per-population fractions/tensors),
+# rather than only the dominant one.
+_CH_NPOP = 11
+_CH_DIR1 = 12          # dir1_x, dir1_y, dir1_z = 12, 13, 14
+_CH_FF2 = 15
+_CH_AD2 = 16
+_CH_RD2 = 17
+_CH_DIR2 = 19          # dir2_x, dir2_y, dir2_z = 19, 20, 21
+_CH_FF3 = 22
+_CH_AD3 = 23
+_CH_RD3 = 24
+_CH_DIR3 = 26          # dir3_x, dir3_y, dir3_z = 26, 27, 28
+
 
 @njit(cache=True, fastmath=True)
 def _recover_iso_adcs_2iso(rf, nrf, adc_iso):
@@ -318,6 +333,147 @@ def _quality_kernel_3iso(data, coords, bvals, bvecs, fiber_dirs,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# NUMBA KERNEL — MULTI-POPULATION reconstruction (Point B): models ALL detected
+# fiber populations from their STORED directions/tensors + the isotropic block,
+# so genuine crossings no longer depress R² as an artefact of the previous
+# dominant-population-only reconstruction. No direction grid search needed.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@njit(parallel=True, cache=True)   # NOT fastmath: this kernel relies on np.isnan
+def _quality_kernel_multipop(data, coords, bvals, bvecs, params,     # to detect absent
+                             b0_thr, fiber_threshold, model_mode,     # populations, and
+                             out_r2, out_rmse):                       # fastmath assumes no NaNs
+    n_voxels = coords.shape[0]
+    N = len(bvals)
+
+    for idx in prange(n_voxels):
+        x, y, z = coords[idx]
+
+        ff_tot = params[x, y, z, _CH_FF]
+        ff_tot_v = 0.0 if np.isnan(ff_tot) else ff_tot
+
+        rf = params[x, y, z, _CH_RF]
+        if np.isnan(rf):
+            rf = 0.0
+        if model_mode == 3:
+            hf = params[x, y, z, _CH_HF]
+            wf = params[x, y, z, _CH_WF]
+            if np.isnan(hf):
+                hf = 0.0
+            if np.isnan(wf):
+                wf = 0.0
+            nrf = 0.0
+            iso_tot = rf + hf + wf
+        else:
+            nrf = params[x, y, z, _CH_NRF]
+            if np.isnan(nrf):
+                nrf = 0.0
+            hf = 0.0
+            wf = 0.0
+            iso_tot = rf + nrf
+
+        if (ff_tot_v + iso_tot) < 1e-6:
+            continue
+
+        adc_iso = params[x, y, z, _CH_ADC_ISO]
+        if np.isnan(adc_iso):
+            adc_iso = 1.0e-3
+
+        sig = data[x, y, z]
+        s0 = 0.0
+        cnt = 0
+        for i in range(N):
+            if bvals[i] < b0_thr:
+                s0 += sig[i]
+                cnt += 1
+        if cnt > 0:
+            s0 /= cnt
+        if s0 < 1e-6:
+            continue
+
+        if model_mode == 3:
+            D_res, D_hin, D_wat = _recover_iso_adcs_3iso(rf, hf, wf, adc_iso)
+            D_nonrf = 0.0
+        else:
+            D_res, D_nonrf = _recover_iso_adcs_2iso(rf, nrf, adc_iso)
+            D_hin = 0.0
+            D_wat = 0.0
+
+        # fiber populations (dominant + MRDS pop2/pop3), from stored channels
+        ad1 = params[x, y, z, _CH_AD]
+        rd1 = params[x, y, z, _CH_RD]
+        ff2 = params[x, y, z, _CH_FF2]
+        ff3 = params[x, y, z, _CH_FF3]
+        if np.isnan(ff2):
+            ff2 = 0.0
+        if np.isnan(ff3):
+            ff3 = 0.0
+        ff1 = ff_tot_v - ff2 - ff3
+        if ff1 < 0.0:
+            ff1 = 0.0
+        ad2 = params[x, y, z, _CH_AD2]
+        rd2 = params[x, y, z, _CH_RD2]
+        ad3 = params[x, y, z, _CH_AD3]
+        rd3 = params[x, y, z, _CH_RD3]
+        d1x = params[x, y, z, _CH_DIR1]
+        d1y = params[x, y, z, _CH_DIR1 + 1]
+        d1z = params[x, y, z, _CH_DIR1 + 2]
+        d2x = params[x, y, z, _CH_DIR2]
+        d2y = params[x, y, z, _CH_DIR2 + 1]
+        d2z = params[x, y, z, _CH_DIR2 + 2]
+        d3x = params[x, y, z, _CH_DIR3]
+        d3y = params[x, y, z, _CH_DIR3 + 1]
+        d3z = params[x, y, z, _CH_DIR3 + 2]
+
+        has_fiber = ff_tot_v > fiber_threshold
+        use1 = has_fiber and (ff1 > 1e-6) and (not np.isnan(ad1)) and (not np.isnan(d1x))
+        use2 = has_fiber and (ff2 > 1e-6) and (not np.isnan(ad2)) and (not np.isnan(d2x))
+        use3 = has_fiber and (ff3 > 1e-6) and (not np.isnan(ad3)) and (not np.isnan(d3x))
+
+        s_mean = 0.0
+        for i in range(N):
+            s_mean += sig[i] / s0
+        s_mean /= N
+
+        ss_res = 0.0
+        ss_tot = 0.0
+        rmse_sum = 0.0
+        for i in range(N):
+            b = bvals[i]
+            bx = bvecs[i, 0]
+            by = bvecs[i, 1]
+            bz = bvecs[i, 2]
+
+            if model_mode == 3:
+                s_pred = (rf * np.exp(-b * D_res)
+                          + hf * np.exp(-b * D_hin)
+                          + wf * np.exp(-b * D_wat))
+            else:
+                s_pred = (rf * np.exp(-b * D_res)
+                          + nrf * np.exp(-b * D_nonrf))
+
+            if use1:
+                c1 = bx * d1x + by * d1y + bz * d1z
+                s_pred += ff1 * np.exp(-b * (rd1 + (ad1 - rd1) * c1 * c1))
+            if use2:
+                c2 = bx * d2x + by * d2y + bz * d2z
+                s_pred += ff2 * np.exp(-b * (rd2 + (ad2 - rd2) * c2 * c2))
+            if use3:
+                c3 = bx * d3x + by * d3y + bz * d3z
+                s_pred += ff3 * np.exp(-b * (rd3 + (ad3 - rd3) * c3 * c3))
+
+            sn = sig[i] / s0
+            res = sn - s_pred
+            ss_res += res * res
+            ss_tot += (sn - s_mean) ** 2
+            rmse_sum += res * res
+
+        if ss_tot > 1e-14:
+            out_r2[x, y, z] = 1.0 - ss_res / ss_tot
+        out_rmse[x, y, z] = np.sqrt(rmse_sum / N)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # PUBLIC INTERFACE
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -359,9 +515,11 @@ def compute_fit_quality(data, bvals, bvecs, mask, results, model_mode,
     if verbose:
         print("\n" + "="*60)
         print("  DBSI FIT QUALITY (v3) — R² and RMSE")
-        print("  Single-tensor reconstruction; exact for single-fiber-")
-        print("  population voxels (the common case). See module")
-        print("  docstring for the genuine-crossing-fiber caveat.")
+        print("  MULTI-POPULATION reconstruction: models ALL detected fiber")
+        print("  populations (stored directions + tensors) + the isotropic")
+        print("  block. Exact for single-fiber voxels; genuine crossings are")
+        print("  now modelled, so a low R² reflects real misfit, not the old")
+        print("  dominant-population-only artefact.")
         print("="*60)
         print(f"  Model mode: {model_mode}-ISO")
         print(f"  Fiber threshold: {fiber_threshold}")
@@ -375,8 +533,6 @@ def compute_fit_quality(data, bvals, bvecs, mask, results, model_mode,
 
     bvals = np.asarray(bvals, dtype=np.float64)
 
-    fiber_dirs = generate_fibonacci_sphere_hemisphere(n_dirs)
-
     b0_thr = 100.0
 
     shape3d = data.shape[:3]
@@ -389,12 +545,10 @@ def compute_fit_quality(data, bvals, bvecs, mask, results, model_mode,
     n_batches = int(np.ceil(n_voxels / batch_sz))
 
     data_f32 = data.astype(np.float32)
+    # NaN is meaningful here (it marks absent populations/tensors), and the
+    # kernel handles it explicitly, so pass results through UNMODIFIED — do not
+    # zero out NaNs (that would fabricate zero-fraction populations/directions).
     results_f32 = results.astype(np.float32)
-
-    results_work = np.where(np.isnan(results_f32), 0.0, results_f32).astype(np.float32)
-    results_work[..., _CH_AD] = results_f32[..., _CH_AD]
-
-    _kernel = _quality_kernel_3iso if model_mode == 3 else _quality_kernel_2iso
 
     if verbose:
         print(f"\n  Computing quality maps for {n_voxels:,} voxels...")
@@ -404,11 +558,10 @@ def compute_fit_quality(data, bvals, bvecs, mask, results, model_mode,
         for i in range(n_batches):
             start = i * batch_sz
             end = min((i + 1) * batch_sz, n_voxels)
-            _kernel(
+            _quality_kernel_multipop(
                 data_f32, coords[start:end],
-                bvals, bvecs, fiber_dirs,
-                results_work, b0_thr, fiber_threshold,
-                r2_map, rmse_map
+                bvals, bvecs, results_f32, b0_thr, fiber_threshold,
+                int(model_mode), r2_map, rmse_map
             )
             pbar.update(end - start)
 
@@ -426,8 +579,8 @@ def compute_fit_quality(data, bvals, bvecs, mask, results, model_mode,
         print(f"    > 0.95 : {np.mean(r2_vals > 0.95)*100:.1f}%")
         print(f"    > 0.90 : {np.mean(r2_vals > 0.90)*100:.1f}%")
         print(f"    < 0.90 : {np.mean(r2_vals < 0.90)*100:.1f}%  <- inspect "
-              f"(may reflect genuine crossing fibers not modelled by the "
-              f"single dominant-population output, see module docstring)")
+              f"(genuine misfit now that all populations are modelled: low SNR, "
+              f"partial volume, or >max_fiber_populations configurations)")
         print(f"\n  RMSE summary (fraction of S0):")
         print(f"    Median : {np.median(rmse_vals):.4f}")
         print(f"    Mean   : {np.mean(rmse_vals):.4f}")

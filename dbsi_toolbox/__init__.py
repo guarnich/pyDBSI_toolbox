@@ -125,7 +125,8 @@ from .model_Niso_adaptive_ff_thr import DBSI_Adaptive
 from .utils.tools import load_data, estimate_snr_robust
 from .utils.autoconfig import autoconfigure_dictionary
 from .calibration.optimizer import optimize_hyperparameters
-from .fit_quality import compute_fit_quality, save_fit_quality
+from .fit_quality import (compute_fit_quality, save_fit_quality,
+                          compute_aggregate_fiber_maps, save_aggregate_fiber_maps)
 from .transition_confidence import compute_transition_confidence, save_transition_confidence
 
 # NOTE: `correct_rician_bias` is NOT imported here. In the source
@@ -144,6 +145,8 @@ __all__ = [
     "optimize_hyperparameters",
     "compute_fit_quality",
     "save_fit_quality",
+    "compute_aggregate_fiber_maps",
+    "save_aggregate_fiber_maps",
     "compute_transition_confidence",
     "save_transition_confidence",
 ]

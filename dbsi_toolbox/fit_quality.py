@@ -711,3 +711,42 @@ def save_aggregate_fiber_maps(agg_maps, affine, output_dir):
         nib.save(nib.Nifti1Image(np.asarray(arr, np.float32), affine), fpath)
         paths[name] = fpath
     return paths
+
+
+# Exact-duplicate output channels (verified on real data): ad_linear/rd_linear are
+# byte-identical to axial_/radial_diffusivity, and in 3-ISO mode
+# nonrestricted_fraction == hindered_fraction + water_fraction.
+_REDUNDANT_OUTPUT_MAPS = ('ad_linear', 'rd_linear')
+
+
+def save_output_maps(results, channel_names, affine, output_dir, skip_redundant=True):
+    """
+    Save the per-channel DBSI output maps as compressed NIfTI, skipping channels
+    that are invalid for the model mode ('*_NaN') and — when `skip_redundant` —
+    the exact-duplicate maps: `ad_linear`/`rd_linear` (identical to
+    axial_/radial_diffusivity) and, in 3-ISO mode, `nonrestricted_fraction`
+    (identical to hindered_fraction + water_fraction). This does NOT change the
+    internal `results` array (channel positions are load-bearing for
+    fit_quality / aggregate maps); it only trims the saved output files. The
+    compact aggregate maps (`compute_aggregate_fiber_maps`) are the recommended
+    voxel-level summary.
+
+    Returns the list of channel names actually written.
+    """
+    import nibabel as nib
+    import os
+    names = list(channel_names)
+    skip = set()
+    if skip_redundant:
+        skip.update(_REDUNDANT_OUTPUT_MAPS)
+        if 'hindered_fraction' in names:          # 3-ISO -> nonrestricted is hf+wf
+            skip.add('nonrestricted_fraction')
+    os.makedirs(output_dir, exist_ok=True)
+    saved = []
+    for i, nm in enumerate(names):
+        if nm.endswith('_NaN') or nm in skip:
+            continue
+        nib.save(nib.Nifti1Image(results[..., i].astype(np.float32), affine),
+                 os.path.join(output_dir, f'{i:02d}_{nm}.nii.gz'))
+        saved.append(nm)
+    return saved

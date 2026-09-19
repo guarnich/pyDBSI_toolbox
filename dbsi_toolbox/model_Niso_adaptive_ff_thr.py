@@ -438,6 +438,15 @@ _DEFAULT_CONC_MOD_GAIN = 8.0
 # are net MORE accurate. Real-data confirmation still pending; opt out with
 # stagec_refine=False (or --disable-stagec on the CLI).
 _DEFAULT_STAGEC_REFINE = True
+
+# EXPERIMENTAL (default OFF): run the MRDS-lite cone refinement BEFORE Stage C
+# and hand Stage C the refined direction, instead of the two being mutually
+# exclusive. They address orthogonal problems -- the cone fixes the angular
+# quantisation of Stage A's fixed dictionary, Stage C fixes the fraction/tensor
+# bias -- so in principle they compose. Whether Stage C is as sensitive to
+# direction error as the closed-form Stage B it replaced has never been
+# measured; until it has, this stays opt-in.
+_DEFAULT_STAGEC_DIR_REFINE = False
 _STAGEC_AD_MIN = 0.6e-3
 _STAGEC_AD_MAX = 2.6e-3
 _STAGEC_N_AD = 14
@@ -661,7 +670,7 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         conc_mod_c_lo, conc_mod_c_hi, conc_mod_gain,
                         stagec_enabled, iso_forward, iso_gram,
                         stagec_ad_grid, stagec_rd_grid, stagec_aniso_ratio,
-                        data_raw, stagec_iso_grid):
+                        data_raw, stagec_iso_grid, stagec_dir_refine):
     """
     v3 parallel fitting kernel — two-compartment isotropic model (2-ISO).
 
@@ -794,6 +803,15 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                 dominant_dir = fiber_dirs[dir_indices[0]]
 
                 if stagec_enabled:
+                    # EXPERIMENTAL: refine the direction first and hand the
+                    # refined one to Stage C (see _DEFAULT_STAGEC_DIR_REFINE).
+                    if stagec_dir_refine and enable_direction_refinement:
+                        dominant_dir, _, _ = refine_fiber_direction_cone(
+                            bvals, bvecs, sig_norm, dominant_dir,
+                            f_fib, f_res, f_nonrf, 0.0,
+                            D_res_c, D_nonrf_c, 0.0, False,
+                            cone1_half_angle, n1_cone, cone2_half_angle, n2_cone
+                        )
                     # ── STAGE C: joint (VARPRO) tensor+fraction re-solve ──
                     # Replaces the raw over-complete-block fractions AND the
                     # decoupled Stage B tensor with a residual-minimising joint
@@ -845,7 +863,11 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         out[x, y, z, _C_NRF] = f_nonrf
                         out[x, y, z, _C_ADC_ISO] = wd_sc / sum_iso_sc if sum_iso_sc > 1e-10 else 0.0
                 elif enable_direction_refinement:
-                    _, AD_est, RD_est = refine_fiber_direction_cone(
+                    # the refined direction is what AD/RD were fitted at, so it
+                    # is also what gets stored (it used to be discarded, and the
+                    # coarse grid node written to dir1 instead -- leaving the
+                    # stored direction inconsistent with the stored tensor).
+                    dominant_dir, AD_est, RD_est = refine_fiber_direction_cone(
                         bvals, bvecs, sig_norm, dominant_dir,
                         f_fib, f_res, f_nonrf, 0.0,
                         D_res_c, D_nonrf_c, 0.0, False,
@@ -928,7 +950,7 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         conc_mod_c_lo, conc_mod_c_hi, conc_mod_gain,
                         stagec_enabled, iso_forward, iso_gram,
                         stagec_ad_grid, stagec_rd_grid, stagec_aniso_ratio,
-                        data_raw, stagec_iso_grid):
+                        data_raw, stagec_iso_grid, stagec_dir_refine):
     """v3 parallel fitting kernel — three-compartment isotropic model
     (3-ISO). Same Stage A / Stage B (+ MRDS multi-fiber) structure as
     `_fit_voxels_2iso_v3`; see that kernel's docstring for the full
@@ -1056,6 +1078,15 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                 dominant_dir = fiber_dirs[dir_indices[0]]
 
                 if stagec_enabled:
+                    # EXPERIMENTAL: refine the direction first and hand the
+                    # refined one to Stage C (see _DEFAULT_STAGEC_DIR_REFINE).
+                    if stagec_dir_refine and enable_direction_refinement:
+                        dominant_dir, _, _ = refine_fiber_direction_cone(
+                            bvals, bvecs, sig_norm, dominant_dir,
+                            f_fib, f_res, f_hin, f_wat,
+                            D_res_c, D_hin_c, D_wat_c, True,
+                            cone1_half_angle, n1_cone, cone2_half_angle, n2_cone
+                        )
                     # ── STAGE C: joint (VARPRO) tensor+fraction re-solve (3-ISO
                     # binning RES/HIN/WAT). Uses the RAW normalised signal
                     # (data_raw), not data_corr. See stagec_varpro_single_fiber. ──
@@ -1108,7 +1139,11 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         out[x, y, z, _C_NRF] = f_hin + f_wat
                         out[x, y, z, _C_ADC_ISO] = wd_sc / sum_iso_sc if sum_iso_sc > 1e-10 else 0.0
                 elif enable_direction_refinement:
-                    _, AD_est, RD_est = refine_fiber_direction_cone(
+                    # the refined direction is what AD/RD were fitted at, so it
+                    # is also what gets stored (it used to be discarded, and the
+                    # coarse grid node written to dir1 instead -- leaving the
+                    # stored direction inconsistent with the stored tensor).
+                    dominant_dir, AD_est, RD_est = refine_fiber_direction_cone(
                         bvals, bvecs, sig_norm, dominant_dir,
                         f_fib, f_res, f_hin, f_wat,
                         D_res_c, D_hin_c, D_wat_c, True,
@@ -1448,6 +1483,7 @@ class DBSI_Adaptive:
                  conc_mod_c_hi=_DEFAULT_CONC_MOD_C_HI,
                  conc_mod_gain=_DEFAULT_CONC_MOD_GAIN,
                  stagec_refine=_DEFAULT_STAGEC_REFINE,
+                 stagec_dir_refine=_DEFAULT_STAGEC_DIR_REFINE,
                  iso_resolve=_DEFAULT_ISO_RESOLVE,
                  lambda_aniso_method='gcv'):
         self.n_iso = n_iso
@@ -1474,6 +1510,7 @@ class DBSI_Adaptive:
         self.conc_mod_c_hi = conc_mod_c_hi
         self.conc_mod_gain = conc_mod_gain
         self.stagec_refine = stagec_refine
+        self.stagec_dir_refine = stagec_dir_refine
         self.iso_resolve = iso_resolve
         if lambda_aniso_method not in ('discrepancy', 'gcv', 'lcurve'):
             raise ValueError("lambda_aniso_method must be 'discrepancy', 'gcv', or 'lcurve', "
@@ -1994,7 +2031,7 @@ class DBSI_Adaptive:
                     float(self.conc_mod_gain),
                     bool(self.stagec_refine), iso_forward, iso_gram,
                     stagec_ad_grid, stagec_rd_grid, float(_STAGEC_ANISO_RATIO),
-                    data, stagec_iso_grid
+                    data, stagec_iso_grid, bool(self.stagec_dir_refine)
                 )
                 pbar.update(end - start)
 

@@ -718,18 +718,126 @@ def save_aggregate_fiber_maps(agg_maps, affine, output_dir):
 # nonrestricted_fraction == hindered_fraction + water_fraction.
 _REDUNDANT_OUTPUT_MAPS = ('ad_linear', 'rd_linear')
 
+# Per-population output channels, indexed by population number. Populations
+# above the fit's `max_fiber_populations` are ALWAYS entirely NaN (the fit never
+# writes them), so writing them to disk costs one empty NIfTI per channel per
+# run. With max_fiber_populations=2 — the default — that is the 7 pop3 maps.
+_POP_OUTPUT_MAPS = {
+    2: ('fiber_fraction_pop2', 'axial_diffusivity_pop2', 'radial_diffusivity_pop2',
+        'fiber_fa_pop2', 'dir2_x', 'dir2_y', 'dir2_z'),
+    3: ('fiber_fraction_pop3', 'axial_diffusivity_pop3', 'radial_diffusivity_pop3',
+        'fiber_fa_pop3', 'dir3_x', 'dir3_y', 'dir3_z'),
+}
 
-def save_output_maps(results, channel_names, affine, output_dir, skip_redundant=True):
+
+def compute_fiber_validity_map(results, channel_names):
     """
-    Save the per-channel DBSI output maps as compressed NIfTI, skipping channels
-    that are invalid for the model mode ('*_NaN') and — when `skip_redundant` —
-    the exact-duplicate maps: `ad_linear`/`rd_linear` (identical to
-    axial_/radial_diffusivity) and, in 3-ISO mode, `nonrestricted_fraction`
-    (identical to hindered_fraction + water_fraction). This does NOT change the
-    internal `results` array (channel positions are load-bearing for
-    fit_quality / aggregate maps); it only trims the saved output files. The
-    compact aggregate maps (`compute_aggregate_fiber_maps`) are the recommended
-    voxel-level summary.
+    Voxel-level validity indicator for the fiber-tensor output channels.
+
+    THE NaN/0 CONVENTION (documented once, here, because every downstream
+    resampling step depends on it):
+
+    * **Compartment fractions** (fiber/restricted/hindered/water) use **0** for
+      "compartment absent". 0 is the correct physical value and the fractions
+      stay summable, so these maps need no companion mask.
+    * **Fiber-tensor metrics** (axial_diffusivity, radial_diffusivity, fiber_fa,
+      and the weighted aggregates) use **NaN** for "not estimated". 0 would be a
+      physically plausible diffusivity, so it cannot be used as a sentinel.
+    * `n_fiber_populations` is deliberately THREE-STATE, and the three states
+      are NOT interchangeable:
+        - NaN : fiber_fraction below `fiber_threshold` — no fiber compartment
+                was attempted in this voxel;
+        - 0   : fiber compartment present, but `select_dominant_directions`
+                rejected every candidate peak (concentration gate / weight /
+                angular separation) — fiber signal that could not be resolved
+                into a direction. These voxels have FF > 0 and AD/RD = NaN;
+        - >=1 : number of resolved fiber populations.
+
+    The NaN convention is correct in native space but does not survive a naive
+    interpolation: ANTs (and any linear resampler) turns NaN into 0 before
+    interpolating, so a reprojected AD/RD/FA map is silently depressed in
+    proportion to the local NaN density. The fix is a normalised convolution —
+    resample `value * valid` and `valid` with the same transform and divide.
+    This function returns the `valid` term, which `save_output_maps` writes
+    alongside the channel maps so the correction is available to anyone who
+    picks the maps up later.
+
+    Parameters
+    ----------
+    results : ndarray (X, Y, Z, C)
+    channel_names : sequence of str
+
+    Returns
+    -------
+    ndarray (X, Y, Z), uint8 — 1 where the fiber tensor is a real estimate.
+    """
+    names = list(channel_names)
+    ad = results[..., names.index('axial_diffusivity')]
+    ff = results[..., names.index('fiber_fraction')]
+    valid = np.isfinite(ad) & np.isfinite(ff) & (ff > 0)
+    return valid.astype(np.uint8)
+
+
+def _empty_population_maps(results, channel_names, max_fiber_populations=None):
+    """
+    Names of the per-population channels that carry no information and should
+    not be written to disk.
+
+    Two rules, both applied:
+
+    * by construction — when `max_fiber_populations` is given, every population
+      above it was never estimated;
+    * by inspection — a population block whose channels are ALL entirely
+      non-finite across the volume carries nothing, whatever the ceiling was.
+      This is what makes the trimming work for callers that do not pass
+      `max_fiber_populations`, and it also catches the case of a ceiling of 3
+      on data where no voxel actually resolved a third population.
+    """
+    names = list(channel_names)
+    drop = set()
+    for pop, chans in _POP_OUTPUT_MAPS.items():
+        present = [c for c in chans if c in names]
+        if not present:
+            continue
+        if max_fiber_populations is not None and pop > max_fiber_populations:
+            drop.update(present)
+            continue
+        if not any(np.any(np.isfinite(results[..., names.index(c)])) for c in present):
+            drop.update(present)
+    return drop
+
+
+def save_output_maps(results, channel_names, affine, output_dir, skip_redundant=True,
+                     max_fiber_populations=None, aggregate=True, validity=True):
+    """
+    Save the complete DBSI output set for one dataset: the per-channel maps, the
+    compact aggregate fiber maps, and the fiber-validity indicator. This is the
+    single saving entry point — `scripts/run_dbsi.py` and the analysis notebooks
+    both go through it, so the on-disk layout is defined in exactly one place.
+
+    Layout written under `output_dir`::
+
+        NN_<channel>.nii.gz          per-channel maps, trimmed (see below)
+        fiber_valid.nii.gz           uint8 validity mask for the tensor channels
+        aggregate_maps/*.nii.gz      compute_aggregate_fiber_maps output
+
+    Channels skipped:
+
+    * `*_NaN` — invalid for the model mode (e.g. hindered/water in 2-ISO);
+    * with `skip_redundant`, the exact duplicates `ad_linear`/`rd_linear` and,
+      in 3-ISO mode, `nonrestricted_fraction` (== hindered + water);
+    * the per-population channels of populations the fit never estimated — see
+      `_empty_population_maps`. Pass `max_fiber_populations` (the value given to
+      `DBSI_Adaptive`) to decide this by construction rather than by inspection;
+      with the default 2 this drops the 7 always-empty pop3 maps.
+
+    This does NOT change the internal `results` array — channel positions are
+    load-bearing for `compute_fit_quality` and `compute_aggregate_fiber_maps`,
+    and the saved `.npz` should keep every channel. Only the written files are
+    trimmed.
+
+    See `compute_fiber_validity_map` for the NaN/0 convention and why
+    `fiber_valid` matters as soon as the maps are resampled.
 
     Returns the list of channel names actually written.
     """
@@ -741,6 +849,7 @@ def save_output_maps(results, channel_names, affine, output_dir, skip_redundant=
         skip.update(_REDUNDANT_OUTPUT_MAPS)
         if 'hindered_fraction' in names:          # 3-ISO -> nonrestricted is hf+wf
             skip.add('nonrestricted_fraction')
+    skip.update(_empty_population_maps(results, names, max_fiber_populations))
     os.makedirs(output_dir, exist_ok=True)
     saved = []
     for i, nm in enumerate(names):
@@ -749,4 +858,10 @@ def save_output_maps(results, channel_names, affine, output_dir, skip_redundant=
         nib.save(nib.Nifti1Image(results[..., i].astype(np.float32), affine),
                  os.path.join(output_dir, f'{i:02d}_{nm}.nii.gz'))
         saved.append(nm)
+    if validity:
+        nib.save(nib.Nifti1Image(compute_fiber_validity_map(results, names), affine),
+                 os.path.join(output_dir, 'fiber_valid.nii.gz'))
+    if aggregate:
+        save_aggregate_fiber_maps(compute_aggregate_fiber_maps(results, names),
+                                  affine, os.path.join(output_dir, 'aggregate_maps'))
     return saved

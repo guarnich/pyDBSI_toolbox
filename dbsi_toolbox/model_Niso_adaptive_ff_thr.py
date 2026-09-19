@@ -2034,6 +2034,27 @@ class DBSI_Adaptive:
         depending on max_fiber_populations and per-voxel N_POP -- callers
         should still check for NaN per-voxel rather than assuming a
         channel is entirely absent.
+
+        NaN/0 CONVENTION. Compartment fractions use 0 for "compartment
+        absent" (0 is the correct physical value and the fractions stay
+        summable); fiber-tensor metrics (axial_diffusivity,
+        radial_diffusivity, fiber_fa) use NaN for "not estimated",
+        because 0 is a physically plausible diffusivity and cannot serve
+        as a sentinel. `fit_quality.save_output_maps` writes the matching
+        validity mask (`fiber_valid.nii.gz`) -- needed as soon as the
+        maps are resampled, since linear interpolation turns NaN into 0
+        and silently depresses the result.
+
+        `n_fiber_populations` (channel 11) is deliberately THREE-STATE,
+        and the states are NOT interchangeable:
+            NaN  fiber_fraction <= fiber_threshold -- no fiber
+                 compartment was attempted in this voxel;
+            0    fiber compartment present, but select_dominant_directions
+                 rejected every candidate peak (concentration gate,
+                 min_weight_fraction, angular separation). Fiber signal
+                 that could not be resolved into a direction: these
+                 voxels have fiber_fraction > 0 and AD/RD = NaN;
+            >=1  number of resolved fiber populations.
         """
         base_3iso = [
             'fiber_fraction',

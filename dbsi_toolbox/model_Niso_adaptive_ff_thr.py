@@ -97,7 +97,7 @@ Model Selection Criterion (unchanged from v1/v2)
 2-ISO vs 3-ISO selection based on b_max / shell count is unaffected by
 the MRDS extension -- it governs the isotropic block only.
 
-Output Channels (25 total)
+Output Channels (27 total)
 -------------------------------------------------------------------------
     0  : FF   — TOTAL fibre fraction (summed over all detected populations)
     1  : RF   — Restricted fraction  (ADC <= 0.3e-3)      (always valid)
@@ -120,8 +120,11 @@ Output Channels (25 total)
     21 : AD_W, 22: RD_W — fraction-weighted fibre diffusivities
     23 : FA_W  — FA OF the weighted tensor (intrinsic per-fibre anisotropy,
                  NOT the mean of FA_POP1 and FA_POP2)
-    ── diagnostic ──
+    ── diagnostics ──
     24 : CONC  — dominant-basin angular concentration
+    25 : R2    — goodness of fit of the reconstructed signal, all
+                 compartments and both populations (fit_quality.py)
+    26 : RMSE  — residual RMSE as a fraction of S0
 
 There is no population 3 (see MULTI-FIBER SCOPE), and no AD_lin/RD_lin:
 those were byte-identical copies of AD_POP1/RD_POP1. The `_C_*` module
@@ -264,7 +267,7 @@ MAX_FIBER_POPULATIONS = 2
 #   6     n_fiber_populations     -- THREE-STATE, see `output_map_names`
 #   7-20  per-population block    -- NaN means "this population is absent"
 #   21-23 FF-weighted aggregates  -- NaN where no fiber tensor was estimated
-#   24    diagnostic              -- NaN outside fitted voxels
+#   24-26 diagnostics             -- NaN outside fitted voxels
 _C_FF = 0             # fiber_fraction -- TOTAL anisotropic fraction (pop1+pop2)
 _C_RF = 1             # restricted_fraction
 _C_HF = 2             # hindered_fraction      (NaN in 2-ISO)
@@ -286,7 +289,9 @@ _C_ADW = 21           # ── FF-weighted over the populations present ──
 _C_RDW = 22
 _C_FAW = 23
 _C_CONC = 24          # dominant_basin_concentration (diagnostic)
-_N_CHANNELS = 25
+_C_R2 = 25            # fit_r2   -- goodness of fit of the reconstructed signal
+_C_RMSE = 26          # fit_rmse -- residual RMSE, as a fraction of S0
+_N_CHANNELS = 27
 
 # MRDS multi-fiber Stage B defaults (see core.solvers.estimate_AD_RD_mrds).
 _MRDS_INIT_N_ITER = 3        # short, deliberately non-converged alternating warm start
@@ -1502,7 +1507,7 @@ class DBSI_Adaptive:
 
         Returns
         -------
-        results : ndarray (X, Y, Z, 25)
+        results : ndarray (X, Y, Z, 27)
             See module docstring "Output Channels".
         model_mode : int
             2 or 3.
@@ -1919,7 +1924,7 @@ class DBSI_Adaptive:
                   f"FF rows {np.round(_ff_rows, 2).tolist()}, RF_true grid "
                   f"{list(_RF_CORRECTION_RF_LEVELS)} -> table built.")
 
-        # ── Allocate output (25 channels — see module docstring) ────────────
+        # ── Allocate output (27 channels — see module docstring) ────────────
         results = np.zeros(data.shape[:3] + (self.N_CHANNELS,), dtype=np.float32)
         # NaN defaults: N_POP (NaN outside fiber_threshold, NOT 0 -- the two
         # states mean different things, see `output_map_names`), the whole
@@ -2054,6 +2059,19 @@ class DBSI_Adaptive:
         # Last, because every stage above may still revise the fractions.
         _fill_derived_channels(results)
 
+        # ── Fit quality (R2 / RMSE), as output channels ─────────────────────
+        # Not optional: it is a forward evaluation of the model that was just
+        # fitted, it costs a small fraction of the fit itself, and a set of
+        # output maps nobody can judge the fit of is not a finished result.
+        # Imported here rather than at module scope because `fit_quality`
+        # imports this module's channel constants -- the deferred import is
+        # what keeps that one-directional.
+        from .fit_quality import compute_fit_quality
+        results[..., _C_R2], results[..., _C_RMSE] = compute_fit_quality(
+            data, bvals, bvecs, mask, results, model_mode,
+            fiber_threshold=self.fiber_threshold, verbose=True,
+        )
+
         print(f"\n{'='*70}\n")
 
         return results, model_mode
@@ -2073,7 +2091,7 @@ class DBSI_Adaptive:
         no second fiber, which is most of the brain -- so callers must check
         per-voxel rather than assume a channel is entirely present or absent.
 
-        LAYOUT (25 channels)::
+        LAYOUT (27 channels)::
 
             0      fiber_fraction              TOTAL anisotropic fraction
             1-4    restricted/hindered/water/nonrestricted fractions
@@ -2082,7 +2100,7 @@ class DBSI_Adaptive:
             7-13   population 1: fraction, AD, RD, FA, dir(x,y,z)
             14-20  population 2: fraction, AD, RD, FA, dir(x,y,z)
             21-23  FF-weighted AD, RD, FA over the populations present
-            24     dominant_basin_concentration (diagnostic)
+            24-26  diagnostics: dominant_basin_concentration, fit_r2, fit_rmse
 
         There is no population 3: the toolbox resolves at most TWO fiber
         populations per voxel (`MAX_FIBER_POPULATIONS`), which is the ceiling
@@ -2102,6 +2120,10 @@ class DBSI_Adaptive:
         * **The weighted aggregates (21-23)** are NaN wherever no fiber tensor
           was estimated, for the same reason as the tensors themselves: 0 is a
           physically plausible diffusivity and cannot serve as a sentinel.
+        * **`fit_r2` / `fit_rmse` (25-26)** are NaN outside the fitted mask.
+          They are filled by `fit()` itself, from a forward evaluation of the
+          model it just fitted -- so the maps always ship with the means to
+          judge them.
         * `fit_quality.save_output_maps` writes the matching validity mask
           (`fiber_valid.nii.gz`). It is needed as soon as the maps are
           resampled: linear interpolation turns NaN into 0 and silently
@@ -2151,6 +2173,8 @@ class DBSI_Adaptive:
             'radial_diffusivity_weighted',
             'fiber_fa_weighted',
             'dominant_basin_concentration',
+            'fit_r2',
+            'fit_rmse',
         ]
         base = base_3iso if model_mode == 3 else base_2iso
         return base + fiber_block

@@ -41,8 +41,12 @@ Usage
 
     r2, rmse = compute_fit_quality(
         data, bvals, bvecs, mask, results, model_mode,
-        fiber_threshold=0.15, n_dirs=100, verbose=True
+        fiber_threshold=0.15, verbose=True
     )
+
+`DBSI_Adaptive.fit` already calls this and stores the result in the
+`fit_r2` / `fit_rmse` output channels; call it directly only to recompute
+against different data or a different fiber_threshold.
 
 References
 ----------
@@ -53,8 +57,6 @@ import numpy as np
 from numba import njit, prange
 import time
 from tqdm import tqdm
-
-from .core.basis import generate_fibonacci_sphere_hemisphere
 
 THRESH_RES = 0.3e-3
 THRESH_WAT = 3.0e-3
@@ -117,209 +119,6 @@ def _recover_iso_adcs_3iso(rf, hf, wf, adc_iso):
         D_hin = 0.9e-3
 
     return D_res, D_hin, D_wat
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# NUMBA KERNELS — v3: single-tensor reconstruction, now EXACT (see module
-# docstring)
-# ─────────────────────────────────────────────────────────────────────────────
-
-@njit(parallel=True, cache=True, fastmath=True)
-def _quality_kernel_2iso(data, coords, bvals, bvecs, fiber_dirs,
-                         params, b0_thr, fiber_threshold,
-                         out_r2, out_rmse):
-    """
-    v3 parallel R²/RMSE kernel for the 2-ISO model.
-
-    Reconstructs the signal from the stored (AD, RD) — Stage B's
-    closed-form estimate — searching over direction (not stored) to find
-    the direction that best matches the reconstruction. For voxels where
-    Stage A detected a single dominant fiber population (the common
-    case), this direction search recovers the SAME direction Stage B
-    actually used, making this reconstruction exact rather than
-    approximate (contrast with v2).
-    """
-    n_voxels = coords.shape[0]
-    n_dirs = len(fiber_dirs)
-    N = len(bvals)
-
-    for idx in prange(n_voxels):
-        x, y, z = coords[idx]
-
-        ff = params[x, y, z, _CH_FF]
-        rf = params[x, y, z, _CH_RF]
-        nrf = params[x, y, z, _CH_NRF]
-        ad = params[x, y, z, _CH_AD]
-        rd = params[x, y, z, _CH_RD]
-        adc_iso = params[x, y, z, _CH_ADC_ISO]
-
-        if (ff + rf + nrf) < 1e-6:
-            continue
-
-        sig = data[x, y, z]
-        s0 = 0.0
-        cnt = 0
-        for i in range(N):
-            if bvals[i] < b0_thr:
-                s0 += sig[i]
-                cnt += 1
-        if cnt > 0:
-            s0 /= cnt
-        if s0 < 1e-6:
-            continue
-        sig_norm = sig / s0
-
-        D_res, D_nonrf = _recover_iso_adcs_2iso(rf, nrf, adc_iso)
-
-        has_fiber = (not np.isnan(ad)) and ff > fiber_threshold
-        best_dir = fiber_dirs[0]
-
-        if has_fiber:
-            best_sse = 1e20
-            for j in range(n_dirs):
-                v = fiber_dirs[j]
-                sse = 0.0
-                for i in range(N):
-                    b = bvals[i]
-                    cos_t = bvecs[i, 0]*v[0] + bvecs[i, 1]*v[1] + bvecs[i, 2]*v[2]
-                    D_app = rd + (ad - rd) * cos_t * cos_t
-                    s_p = (ff * np.exp(-b * D_app)
-                           + rf * np.exp(-b * D_res)
-                           + nrf * np.exp(-b * D_nonrf))
-                    diff = sig_norm[i] - s_p
-                    sse += diff * diff
-                if sse < best_sse:
-                    best_sse = sse
-                    best_dir = v
-
-        ss_res = 0.0
-        ss_tot = 0.0
-        rmse_sum = 0.0
-        s_mean = 0.0
-        for i in range(N):
-            s_mean += sig_norm[i]
-        s_mean /= N
-
-        for i in range(N):
-            b = bvals[i]
-
-            if has_fiber:
-                cos_t = (bvecs[i, 0]*best_dir[0]
-                         + bvecs[i, 1]*best_dir[1]
-                         + bvecs[i, 2]*best_dir[2])
-                D_app = rd + (ad - rd) * cos_t * cos_t
-                s_pred = (ff * np.exp(-b * D_app)
-                          + rf * np.exp(-b * D_res)
-                          + nrf * np.exp(-b * D_nonrf))
-            else:
-                s_pred = (rf * np.exp(-b * D_res)
-                          + nrf * np.exp(-b * D_nonrf))
-
-            res = sig_norm[i] - s_pred
-            ss_res += res * res
-            ss_tot += (sig_norm[i] - s_mean) ** 2
-            rmse_sum += res * res
-
-        if ss_tot > 1e-14:
-            out_r2[x, y, z] = 1.0 - ss_res / ss_tot
-        out_rmse[x, y, z] = np.sqrt(rmse_sum / N)
-
-
-@njit(parallel=True, cache=True, fastmath=True)
-def _quality_kernel_3iso(data, coords, bvals, bvecs, fiber_dirs,
-                         params, b0_thr, fiber_threshold,
-                         out_r2, out_rmse):
-    """v3 parallel R²/RMSE kernel for the 3-ISO model. See
-    `_quality_kernel_2iso` for why this reconstruction is now exact
-    rather than approximate.
-    """
-    n_voxels = coords.shape[0]
-    n_dirs = len(fiber_dirs)
-    N = len(bvals)
-
-    for idx in prange(n_voxels):
-        x, y, z = coords[idx]
-
-        ff = params[x, y, z, _CH_FF]
-        rf = params[x, y, z, _CH_RF]
-        hf = params[x, y, z, _CH_HF]
-        wf = params[x, y, z, _CH_WF]
-        ad = params[x, y, z, _CH_AD]
-        rd = params[x, y, z, _CH_RD]
-        adc_iso = params[x, y, z, _CH_ADC_ISO]
-
-        if (ff + rf + hf + wf) < 1e-6:
-            continue
-
-        sig = data[x, y, z]
-        s0 = 0.0
-        cnt = 0
-        for i in range(N):
-            if bvals[i] < b0_thr:
-                s0 += sig[i]
-                cnt += 1
-        if cnt > 0:
-            s0 /= cnt
-        if s0 < 1e-6:
-            continue
-        sig_norm = sig / s0
-
-        D_res, D_hin, D_wat = _recover_iso_adcs_3iso(rf, hf, wf, adc_iso)
-
-        has_fiber = (not np.isnan(ad)) and ff > fiber_threshold
-        best_dir = fiber_dirs[0]
-
-        if has_fiber:
-            best_sse = 1e20
-            for j in range(n_dirs):
-                v = fiber_dirs[j]
-                sse = 0.0
-                for i in range(N):
-                    b = bvals[i]
-                    cos_t = bvecs[i, 0]*v[0] + bvecs[i, 1]*v[1] + bvecs[i, 2]*v[2]
-                    D_app = rd + (ad - rd) * cos_t * cos_t
-                    s_p = (ff * np.exp(-b * D_app)
-                           + rf * np.exp(-b * D_res)
-                           + hf * np.exp(-b * D_hin)
-                           + wf * np.exp(-b * D_wat))
-                    diff = sig_norm[i] - s_p
-                    sse += diff * diff
-                if sse < best_sse:
-                    best_sse = sse
-                    best_dir = v
-
-        ss_res = 0.0
-        ss_tot = 0.0
-        rmse_sum = 0.0
-        s_mean = 0.0
-        for i in range(N):
-            s_mean += sig_norm[i]
-        s_mean /= N
-
-        for i in range(N):
-            b = bvals[i]
-            if has_fiber:
-                cos_t = (bvecs[i, 0]*best_dir[0]
-                         + bvecs[i, 1]*best_dir[1]
-                         + bvecs[i, 2]*best_dir[2])
-                D_app = rd + (ad - rd) * cos_t * cos_t
-                s_pred = (ff * np.exp(-b * D_app)
-                          + rf * np.exp(-b * D_res)
-                          + hf * np.exp(-b * D_hin)
-                          + wf * np.exp(-b * D_wat))
-            else:
-                s_pred = (rf * np.exp(-b * D_res)
-                          + hf * np.exp(-b * D_hin)
-                          + wf * np.exp(-b * D_wat))
-
-            res = sig_norm[i] - s_pred
-            ss_res += res * res
-            ss_tot += (sig_norm[i] - s_mean) ** 2
-            rmse_sum += res * res
-
-        if ss_tot > 1e-14:
-            out_r2[x, y, z] = 1.0 - ss_res / ss_tot
-        out_rmse[x, y, z] = np.sqrt(rmse_sum / N)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -457,7 +256,7 @@ def _quality_kernel_multipop(data, coords, bvals, bvecs, params,     # to detect
 # ─────────────────────────────────────────────────────────────────────────────
 
 def compute_fit_quality(data, bvals, bvecs, mask, results, model_mode,
-                        fiber_threshold=0.15, n_dirs=100, verbose=True):
+                        fiber_threshold=0.15, verbose=True):
     """
     Compute voxel-wise R² and RMSE goodness-of-fit maps from v3 DBSI
     parameter maps.
@@ -473,17 +272,13 @@ def compute_fit_quality(data, bvals, bvecs, mask, results, model_mode,
     bvals : ndarray (N,)
     bvecs : ndarray (N, 3)
     mask : ndarray (X, Y, Z), bool
-    results : ndarray (X, Y, Z, 11), float32
+    results : ndarray (X, Y, Z, C), float32
+        The model's output array, with the channel layout of
+        `DBSI_Adaptive.output_map_names`.
     model_mode : int
         2 or 3.
     fiber_threshold : float
         Same value used during fitting. Default: 0.15.
-    n_dirs : int
-        Number of fiber directions for the grid search used to recover
-        the dominant orientation during reconstruction (direction itself
-        is not stored in the 11-channel output). For best fidelity this
-        should be at least as fine as the Stage A dictionary used during
-        fitting; check `model.n_dirs` after fitting.
     verbose : bool
 
     Returns
@@ -568,21 +363,6 @@ def compute_fit_quality(data, bvals, bvecs, mask, results, model_mode,
 
     return r2_map, rmse_map
 
-
-def save_fit_quality(r2_map, rmse_map, affine, output_dir):
-    """Save R² and RMSE maps as compressed NIfTI files. Unchanged from v1/v2."""
-    import nibabel as nib
-    import os
-
-    os.makedirs(output_dir, exist_ok=True)
-
-    paths = {}
-    for name, arr in [('r2', r2_map), ('rmse', rmse_map)]:
-        fpath = os.path.join(output_dir, f'dbsi_fit_{name}.nii.gz')
-        nib.save(nib.Nifti1Image(arr.astype(np.float32), affine), fpath)
-        paths[name] = fpath
-
-    return paths
 
 # ─────────────────────────────────────────────────────────────────────────────
 # OUTPUT MAP SAVING

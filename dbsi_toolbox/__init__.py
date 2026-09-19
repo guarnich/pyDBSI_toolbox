@@ -60,10 +60,12 @@ optimize_hyperparameters
     grounded tissue scenarios.
 
 compute_fit_quality
-    Compute voxel-wise R² and RMSE goodness-of-fit maps. v3: this
-    reconstruction is exact (not approximate, unlike v2) for
-    single-fiber-population voxels — see `fit_quality.py` module
-    docstring.
+    Compute voxel-wise R² and RMSE goodness-of-fit maps. `DBSI_Adaptive.fit`
+    already calls this and stores the result in the `fit_r2` / `fit_rmse`
+    output channels; call it directly only to recompute against different
+    data or a different fiber_threshold. The reconstruction models ALL
+    detected fiber populations from their stored directions and tensors —
+    see `fit_quality.py` module docstring.
 
 compute_transition_confidence
     Compute voxel-wise confidence maps for the RES/HIN and HIN/WAT
@@ -74,13 +76,10 @@ compute_transition_confidence
     VALIDATED ON REAL DATA (see `transition_confidence.py` module
     docstring caveats).
 
-save_fit_quality
-    Save R² and RMSE maps as compressed NIfTI files.
-
 save_transition_confidence
     Save the two transition-confidence maps as compressed NIfTI files.
 
-Output Channels (25 — see DBSI_Adaptive.output_map_names for the full
+Output Channels (27 — see DBSI_Adaptive.output_map_names for the full
 contract, and the `_C_*` constants in model_Niso_adaptive_ff_thr.py for
 the indices, which are the single source of truth)
 ------------------------------------------------------------------------
@@ -100,8 +99,10 @@ the indices, which are the single source of truth)
     ---- FF-weighted over the populations present, NaN if no fiber ----
    21 : AD_W, 22: RD_W, 23: FA_W   (FA_W is the FA OF the weighted tensor,
                   NOT the mean of FA_POP1 and FA_POP2)
-    ---- diagnostic ----
+    ---- diagnostics ----
    24 : CONC    - Dominant-basin angular concentration
+   25 : R2      - Goodness of fit of the reconstructed signal
+   26 : RMSE    - Residual RMSE, as a fraction of S0
 
 There is no third population and no AD_lin/RD_lin: the toolbox resolves at
 most TWO fiber populations per voxel, and the linear channels were
@@ -127,7 +128,7 @@ Design document: toolbox_v2.md (orientation-space vs. parameter-space
     recovery validation of the v2 single-stage approach.
 """
 
-__version__ = "4.0.0-2pop"   # breaking: 25-channel output layout, 2 fiber populations
+__version__ = "1.0.0"
 __author__ = "DBSI Toolbox Contributors"
 
 
@@ -135,8 +136,8 @@ from .model_Niso_adaptive_ff_thr import DBSI_Adaptive
 from .utils.tools import load_data, estimate_snr_robust
 from .utils.autoconfig import autoconfigure_dictionary
 from .calibration.optimizer import optimize_hyperparameters
-from .fit_quality import (compute_fit_quality, save_fit_quality,
-                          compute_fiber_validity_map, save_output_maps)
+from .fit_quality import (compute_fit_quality, compute_fiber_validity_map,
+                          save_output_maps)
 from .transition_confidence import compute_transition_confidence, save_transition_confidence
 
 # NOTE: `correct_rician_bias` is NOT imported here. In the source
@@ -154,7 +155,6 @@ __all__ = [
     "autoconfigure_dictionary",
     "optimize_hyperparameters",
     "compute_fit_quality",
-    "save_fit_quality",
     "compute_fiber_validity_map",
     "save_output_maps",
     "compute_transition_confidence",

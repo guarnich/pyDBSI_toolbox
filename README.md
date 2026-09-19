@@ -60,7 +60,7 @@ and number of shells):
 
 ## Outputs
 
-25 channels. `DBSI_Adaptive.output_map_names(mode)` returns them in
+27 channels. `DBSI_Adaptive.output_map_names(mode)` returns them in
 order; the `_C_*` constants in `model_Niso_adaptive_ff_thr.py` are the
 single source of truth for the indices.
 
@@ -89,7 +89,13 @@ own fraction, tensor and direction:
   these for a single per-voxel fiber number; `fiber_fa_weighted` is the FA
   OF the weighted tensor, not the mean of the two FAs.
 
-**Diagnostic (24)** — **dominant_basin_concentration**.
+**Diagnostics (24-26)**
+
+- **dominant_basin_concentration**: angular concentration of the dominant basin.
+- **fit_r2 / fit_rmse**: voxel-wise goodness of fit of the reconstructed signal
+  (all compartments, both populations) and the residual RMSE as a fraction of
+  S0. Computed by the fit itself — the maps always ship with the means to judge
+  them.
 
 The fiber block is NaN wherever the population is absent, while the
 compartment fractions use 0. `save_output_maps` writes `fiber_valid.nii.gz`

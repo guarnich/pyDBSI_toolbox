@@ -263,7 +263,7 @@ def compute_transition_confidence(results, model_mode):
 def save_transition_confidence(confidence_res, confidence_wat, affine, output_dir):
     """
     Save the two confidence maps as compressed NIfTI files, analogous
-    to `fit_quality.save_fit_quality`.
+    to the other `save_*` helpers.
 
     Parameters
     ----------

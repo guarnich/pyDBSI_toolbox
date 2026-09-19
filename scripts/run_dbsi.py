@@ -37,12 +37,14 @@ inline loop private to this script. Consequences:
 - `nonrestricted_fraction` is not written in 3-ISO mode, where it is
   hindered + water by construction;
 - `fiber_valid.nii.gz`, the validity mask for the fiber-tensor channels,
-  is written as part of the normal run.
+  is written as part of the normal run;
+- the R2 / RMSE fit-quality maps are ordinary output channels now, always
+  computed by the fit, so `--compute-r2` is gone.
 
 The output layout itself changed too: at most TWO fiber populations, each
 with its own fraction/AD/RD/FA/direction, plus the FF-weighted tensor —
-25 channels, no pop3, no ad_linear/rd_linear. See
-`DBSI_Adaptive.output_map_names`.
+plus the R2/RMSE fit-quality maps — 27 channels, no pop3, no
+ad_linear/rd_linear. See `DBSI_Adaptive.output_map_names`.
 """
 
 import argparse
@@ -134,8 +136,6 @@ def main():
                         default=1.0,
                         help="Desired final angular precision (degrees) for direction refinement. "
                              "Default: 1.0. Ignored if --disable-direction-refinement is set.")
-    parser.add_argument("--compute-r2", action="store_true",
-                        help="Compute fit quality check (R2 and RMSE)")
     parser.add_argument("--compute-transition-confidence", action="store_true",
                         dest="compute_transition_confidence",
                         help="Compute RES/HIN and HIN/WAT transition-zone confidence maps "
@@ -193,15 +193,6 @@ def main():
     print(f"  fiber-tensor validity mask -> {args.out}/fiber_valid.nii.gz")
     print(f"  Skipped {len(skipped)} channels (invalid in {model_mode}-ISO mode "
           f"or exact duplicates): {', '.join(skipped)}")
-
-    if args.compute_r2:
-        print("\nComputing fit quality (R2 and RMSE)...")
-        from dbsi_toolbox.fit_quality import compute_fit_quality, save_fit_quality
-        r2, rmse = compute_fit_quality(
-            data, bvals, bvecs, mask, results, model_mode, n_dirs=model.n_dirs
-        )
-        save_fit_quality(r2, rmse, affine, args.out)
-        print("Fit quality maps saved.")
 
     if args.compute_transition_confidence:
         print("\nComputing transition-zone confidence maps...")

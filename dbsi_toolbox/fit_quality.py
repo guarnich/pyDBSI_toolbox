@@ -73,7 +73,7 @@ _ISO_ADC_MAX = 3.5e-3
 # per-population fractions/tensors), not only the dominant one.
 from .model_Niso_adaptive_ff_thr import (          # noqa: E402
     _C_FF as _CH_FF, _C_RF as _CH_RF, _C_HF as _CH_HF, _C_WF as _CH_WF,
-    _C_NRF as _CH_NRF, _C_ADC_ISO as _CH_ADC_ISO, _C_NPOP as _CH_NPOP,
+    _C_NRF as _CH_NRF, _C_ADC_ISO as _CH_ADC_ISO,
     _C_FF1 as _CH_FF1, _C_AD1 as _CH_AD, _C_RD1 as _CH_RD, _C_DIR1 as _CH_DIR1,
     _C_FF2 as _CH_FF2, _C_AD2 as _CH_AD2, _C_RD2 as _CH_RD2,
     _C_DIR2 as _CH_DIR2,

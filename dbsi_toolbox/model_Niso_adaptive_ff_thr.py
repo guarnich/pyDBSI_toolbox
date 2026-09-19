@@ -157,7 +157,6 @@ from .core.basis import (
     generate_exhaustive_diffusivity_pairs,
     generate_fibonacci_sphere_hemisphere,
     generate_isotropic_grid,
-    generate_log_uniform_isotropic_grid,
     generate_anchored_isotropic_grid,
 )
 from .core.solvers import (

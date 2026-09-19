@@ -110,7 +110,6 @@ _DEFAULT_DIRECTION_PEAK_K = 6
 # ─────────────────────────────────────────────────────────────────────────────
 
 THRESH_RESTRICTED = 0.3e-3
-THRESH_FREE = 3.0e-3
 
 _DEFAULT_AD_MIN = 0.5e-3
 _DEFAULT_AD_MAX = 2.2e-3

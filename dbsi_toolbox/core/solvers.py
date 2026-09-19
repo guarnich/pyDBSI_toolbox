@@ -1413,285 +1413,113 @@ def compute_fiber_fa(AD, RD):
     return FA_raw
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# v1/v2 LEGACY — single-stage centroid extraction and non-linear Step 2
-# (DEPRECATED, NOT USED IN v3)
-# ─────────────────────────────────────────────────────────────────────────────
-
-@njit(cache=True, fastmath=True)
-def compute_aniso_centroids(w_aniso, diff_pairs, n_dirs, noise_floor=1e-5):
-    """
-    .. deprecated:: 3.0.0 (v3 hybrid two-stage release)
-        This is the v2 single-stage centroid extraction, demonstrated by
-        synthetic recovery validation to be non-identifiable (median
-        AD/RD relative errors 20%-150%+ across all tested dictionary
-        densities — see module docstring). Replaced by the
-        `select_dominant_directions` (Stage A) +
-        `estimate_AD_RD_conditioned` (Stage B) pair.
-
-        Kept for backward compatibility / regression comparison against
-        the v2 pipeline only. Do not call from new code.
-    """
-    n_pairs = len(diff_pairs)
-
-    sum_w_fib = 0.0
-    sum_ad_weight = 0.0
-    sum_rd_weight = 0.0
-
-    idx_col = 0
-    for p in range(n_pairs):
-        ad_base = diff_pairs[p, 0]
-        rd_base = diff_pairs[p, 1]
-        for d in range(n_dirs):
-            wi = w_aniso[idx_col]
-            if wi > noise_floor:
-                sum_w_fib += wi
-                sum_ad_weight += wi * ad_base
-                sum_rd_weight += wi * rd_base
-            idx_col += 1
-
-    if sum_w_fib > 1e-10:
-        AD_final = sum_ad_weight / sum_w_fib
-        RD_final = sum_rd_weight / sum_w_fib
-    else:
-        AD_final = np.nan
-        RD_final = np.nan
-
-    return AD_final, RD_final, sum_w_fib
-
-
-@njit(cache=True, fastmath=True)
-def step2_refine_diffusivities_adaptive(bvals, bvecs, y_norm, fiber_dir,
-                                        f_fiber, f_res, f_hin, f_wat,
-                                        D_res, D_hin, D_wat,
-                                        AD_init, RD_init):
-    """
-    .. deprecated:: 2.0.0 (v2 parametric-dictionary release)
-        v1's non-linear Step 2 grid search. Not used in v2 or v3. Kept
-        only for external code that may still import this symbol.
-    """
-    center_ax = AD_init
-    center_rad = RD_init
-
-    best_sse = 1e20
-    best_ax = center_ax
-    best_rad = center_rad
-
-    ftot = f_fiber + f_res + f_hin + f_wat + 1e-12
-    ff = f_fiber / ftot
-    fr = f_res / ftot
-    fh = f_hin / ftot
-    fw = f_wat / ftot
-
-    n_ax, n_rad = 12, 10
-
-    ax_min = max(0.5e-3, center_ax * 0.5)
-    ax_max = min(2.5e-3, center_ax * 1.5)
-    rad_min = max(0.1e-3, center_rad * 0.5)
-    rad_max = min(1.2e-3, center_rad * 1.5)
-
-    ax_step = (ax_max - ax_min) / (n_ax - 1) if n_ax > 1 else 0.0
-    rad_step = (rad_max - rad_min) / (n_rad - 1) if n_rad > 1 else 0.0
-
-    for i_ax in range(n_ax):
-        ax = ax_min + i_ax * ax_step
-
-        for i_rad in range(n_rad):
-            rad = rad_min + i_rad * rad_step
-
-            if ax < rad * 1.1:
-                continue
-
-            sse = 0.0
-            for i in range(len(bvals)):
-                b = bvals[i]
-                if b < 50:
-                    continue
-
-                g = bvecs[i]
-                cos_t = g[0]*fiber_dir[0] + g[1]*fiber_dir[1] + g[2]*fiber_dir[2]
-                D_app = rad + (ax - rad) * cos_t * cos_t
-
-                s_pred = (ff * np.exp(-b * D_app) +
-                          fr * np.exp(-b * D_res) +
-                          fh * np.exp(-b * D_hin) +
-                          fw * np.exp(-b * D_wat))
-
-                diff = y_norm[i] - s_pred
-                sse += diff * diff
-
-            if sse < best_sse:
-                best_sse = sse
-                best_ax = ax
-                best_rad = rad
-
-    ax_c, rad_c = best_ax, best_rad
-    fine_ax = ax_step / 4 if ax_step > 0 else 0.05e-3
-    fine_rad = rad_step / 4 if rad_step > 0 else 0.05e-3
-
-    for di in range(-2, 3):
-        ax = ax_c + di * fine_ax
-        if ax < ax_min or ax > ax_max:
-            continue
-
-        for dj in range(-2, 3):
-            rad = rad_c + dj * fine_rad
-            if rad < rad_min or rad > rad_max:
-                continue
-            if ax < rad * 1.1:
-                continue
-
-            sse = 0.0
-            for i in range(len(bvals)):
-                b = bvals[i]
-                if b < 50:
-                    continue
-                g = bvecs[i]
-                cos_t = g[0]*fiber_dir[0] + g[1]*fiber_dir[1] + g[2]*fiber_dir[2]
-                D_app = rad + (ax - rad) * cos_t * cos_t
-
-                s_pred = (ff * np.exp(-b * D_app) +
-                          fr * np.exp(-b * D_res) +
-                          fh * np.exp(-b * D_hin) +
-                          fw * np.exp(-b * D_wat))
-
-                diff = y_norm[i] - s_pred
-                sse += diff * diff
-
-            if sse < best_sse:
-                best_sse = sse
-                best_ax = ax
-                best_rad = rad
-
-    return best_ax, best_rad
-
-
-@njit(cache=True, fastmath=True)
-def step2_refine_diffusivities(bvals, bvecs, y_norm, fiber_dir,
-                               f_fiber, f_res, f_hin, f_wat,
-                               D_res, D_hin, D_wat):
-    """
-    .. deprecated:: 2.0.0
-        See `step2_refine_diffusivities_adaptive`. Not used in v2 or v3.
-    """
-    return step2_refine_diffusivities_adaptive(
-        bvals, bvecs, y_norm, fiber_dir,
-        f_fiber, f_res, f_hin, f_wat,
-        D_res, D_hin, D_wat,
-        1.5e-3,
-        0.4e-3
-    )
-
-"""
-DBSI Core Solvers — MRDS Multi-Fiber Stage B (ADDITION to core/solvers.py)
-=============================================================================
-APPEND THE CONTENTS BELOW TO core/solvers.py (after the existing
-estimate_AD_RD_conditioned / MRDS-lite cone-refinement sections). Add
-`select_dominant_directions` already exists in that file -- do not
-duplicate it; only the functions below are new.
-
-WHY THIS EXISTS
--------------------
-Stage A already detects up to MAX_FIBER_POPULATIONS directions per voxel
-(`select_dominant_directions`), but prior to this addition only the
-DOMINANT direction was ever passed to Stage B; a second detected
-population was discarded before reaching the output. This module adds
-joint (AD, RD) estimation for 2-3 SIMULTANEOUS fiber populations, given
-their Stage-A-detected directions and fractions.
-
-METHOD SELECTION — WHY JOINT NONLINEAR, NOT ALTERNATING-TO-CONVERGENCE
------------------------------------------------------------------------------
-A synthetic sweep (2-fiber crossings at 30/60/90 deg, fraction splits
-45/45 and 63/27, SNR=30, 3-shell Verona-like protocol, isotropic
-compartment present, 20 noise seeds/condition) compared:
-
-  ALTERNATING (reuse the single-fiber closed-form WLS per population,
-  holding the other population's CURRENT estimate fixed, iterate to
-  convergence): found to be NUMERICALLY UNSTABLE, not just slow --
-  median AD-of-minority-population relative error on one representative
-  noisy realisation INCREASED from 24.8% at 4 iterations to 79.4% at 40
-  iterations (oscillation, not convergence, in this poorly-separated
-  block-coordinate-descent problem). No monotonic-improvement guarantee,
-  unlike the existing single-fiber MRDS-lite cone refinement.
-
-  JOINT NONLINEAR LEAST-SQUARES (this module): bounded Levenberg-Marquardt
-  over all 2*n_pop diffusivity parameters simultaneously, INITIALISED from
-  a SHORT (2-3 iteration, deliberately NOT converged) alternating pass.
-  Matched a scipy.optimize.least_squares reference to within numerical
-  noise across the sweep (median mean-abs-relative-error 10.75% vs
-  scipy's 10.51%; max per-parameter difference 1.15e-3 mm^2/s across 120
-  trials). Post-JIT-warmup: ~0.04 ms/voxel single-threaded.
-
-  CORRECTED 2026-07-15: the update step below had a sign error
-  (`p_new = p + delta` where `delta = (JtJ+lam*D)^-1 Jt r` with J the
-  Jacobian of the RESIDUAL, not the model) that made the LM step always
-  move in the ascent direction. Practical effect, confirmed by direct
-  reproduction: the inner accept/reject loop rejected every trial step
-  regardless of lambda, so `improved` was always False and the solver
-  exited after the FIRST outer iteration on essentially every voxel --
-  silently returning `alternating_init_nfiber`'s deliberately
-  under-converged 3-iteration warm start as if it were the converged
-  joint fit, with no error or flag. The scipy-agreement numbers above
-  cannot have been measured against this exact function in this state;
-  they either predate the sign flip or were produced by a differently
-  configured comparison. The fix (`p_new = p - delta`) has been verified
-  on a synthetic 2-population crossing: reproduces the exact ground
-  truth (cost ~1e-32) in 8 iterations, versus zero cost improvement over
-  1 iteration before the fix. See project re-validation sweep
-  (post-fix) for updated accuracy numbers replacing the ones above.
-
-CRITICAL: INITIALISATION MUST BREAK SYMMETRY BETWEEN POPULATIONS.
-Identical starting (AD, RD) for every population causes the joint solver
-to stall on a subset of populations (confirmed: in a 3-fiber test,
-population 1 converged to 0% error while populations 2-3 did not move AT
-ALL from an identical starting point -- a degenerate-Jacobian symmetry
-stall, not slow convergence). `alternating_init_nfiber`'s short,
-population-differentiating pass exists specifically to prevent this.
-
-SCOPE — WHAT THIS MODULE DOES NOT DO (read before relying on it)
------------------------------------------------------------------------
-- Does NOT touch, correct, or re-derive the isotropic-compartment
-  FRACTIONS (RF/HF/WF/NRF) or the anisotropic FRACTIONS (FF) computed by
-  Stage A's NNLS solve. Those are computed and written to the output
-  BEFORE this module ever runs and are architecturally independent of
-  it -- this module only refines AD/RD/FA/direction reporting for
-  populations Stage A already detected. An attempt to also correct
-  Stage A's fraction leakage via a small unregularized re-fit conditioned
-  on this module's output ("Stage C") was tested and REJECTED: it
-  collapses the isotropic compartment to 1-2 fixed-diffusivity columns,
-  discarding the spectral resolution that is the toolbox's core
-  contribution, and made FF/NRF recovery WORSE in 5 of 6 tested
-  synthetic conditions (median FF error increases of 0.03-0.09 vs. Stage
-  A's raw, uncorrected fractions). A "targeted" variant (full isotropic
-  spectrum retained, only the anisotropic block replaced by refined
-  fiber columns) was less harmful but still inconsistent (improved 4/6
-  conditions on FF, only 3/6 on NRF) and is NOT included here. Isotropic
-  fraction accuracy under true crossing-fiber ground truth is TRACKED AS
-  A DOCUMENTED OPEN LIMITATION, not something this module claims to fix.
-- Does NOT refine direction (unlike the existing single-fiber MRDS-lite
-  cone search): directions passed in are Stage A's raw discrete-grid
-  detections. Extending per-population cone refinement to 2-3 populations
-  is architecturally possible (call `refine_fiber_direction_cone` per
-  population before the joint fit) but has not been implemented or
-  validated here.
-- Validated (synthetic): 2-fiber crossings at 30/60/90 deg, symmetric and
-  2.3:1 splits; ONE 3-fiber configuration at well-separated (60 deg
-  apart) angles and roughly balanced fractions (comparable 4-16% errors).
-  NOT validated: 3-fiber with unbalanced fractions or narrow angular
-  separation; real (non-synthetic) data.
-
-References
-----------
-Coronado-Leija R, Ramirez-Manzanares A, Marroquin JL (2017). Medical
-    Image Analysis, 42, 26-43.
-Levenberg K (1944); Marquardt DW (1963).
-Project synthetic validation: 2-fiber and 3-fiber joint Stage B sweep;
-    Stage A fraction-recovery-under-crossing sweep; Stage C re-fit
-    rejection (see this docstring and project records).
-"""
-
-import numpy as np
-from numba import njit
+# ────────────────────────────────────────────────────────────────────────────
+# MRDS MULTI-FIBER STAGE B — joint (AD, RD) for simultaneous populations
+#
+# WHY THIS EXISTS
+# -------------------
+# Stage A already detects up to MAX_FIBER_POPULATIONS directions per voxel
+# (`select_dominant_directions`), but prior to this addition only the
+# DOMINANT direction was ever passed to Stage B; a second detected
+# population was discarded before reaching the output. This module adds
+# joint (AD, RD) estimation for 2-3 SIMULTANEOUS fiber populations, given
+# their Stage-A-detected directions and fractions.
+#
+# METHOD SELECTION — WHY JOINT NONLINEAR, NOT ALTERNATING-TO-CONVERGENCE
+# -----------------------------------------------------------------------------
+# A synthetic sweep (2-fiber crossings at 30/60/90 deg, fraction splits
+# 45/45 and 63/27, SNR=30, 3-shell Verona-like protocol, isotropic
+# compartment present, 20 noise seeds/condition) compared:
+#
+#   ALTERNATING (reuse the single-fiber closed-form WLS per population,
+#   holding the other population's CURRENT estimate fixed, iterate to
+#   convergence): found to be NUMERICALLY UNSTABLE, not just slow --
+#   median AD-of-minority-population relative error on one representative
+#   noisy realisation INCREASED from 24.8% at 4 iterations to 79.4% at 40
+#   iterations (oscillation, not convergence, in this poorly-separated
+#   block-coordinate-descent problem). No monotonic-improvement guarantee,
+#   unlike the existing single-fiber MRDS-lite cone refinement.
+#
+#   JOINT NONLINEAR LEAST-SQUARES (this module): bounded Levenberg-Marquardt
+#   over all 2*n_pop diffusivity parameters simultaneously, INITIALISED from
+#   a SHORT (2-3 iteration, deliberately NOT converged) alternating pass.
+#   Matched a scipy.optimize.least_squares reference to within numerical
+#   noise across the sweep (median mean-abs-relative-error 10.75% vs
+#   scipy's 10.51%; max per-parameter difference 1.15e-3 mm^2/s across 120
+#   trials). Post-JIT-warmup: ~0.04 ms/voxel single-threaded.
+#
+#   CORRECTED 2026-07-15: the update step below had a sign error
+#   (`p_new = p + delta` where `delta = (JtJ+lam*D)^-1 Jt r` with J the
+#   Jacobian of the RESIDUAL, not the model) that made the LM step always
+#   move in the ascent direction. Practical effect, confirmed by direct
+#   reproduction: the inner accept/reject loop rejected every trial step
+#   regardless of lambda, so `improved` was always False and the solver
+#   exited after the FIRST outer iteration on essentially every voxel --
+#   silently returning `alternating_init_nfiber`'s deliberately
+#   under-converged 3-iteration warm start as if it were the converged
+#   joint fit, with no error or flag. The scipy-agreement numbers above
+#   cannot have been measured against this exact function in this state;
+#   they either predate the sign flip or were produced by a differently
+#   configured comparison. The fix (`p_new = p - delta`) has been verified
+#   on a synthetic 2-population crossing: reproduces the exact ground
+#   truth (cost ~1e-32) in 8 iterations, versus zero cost improvement over
+#   1 iteration before the fix. See project re-validation sweep
+#   (post-fix) for updated accuracy numbers replacing the ones above.
+#
+# CRITICAL: INITIALISATION MUST BREAK SYMMETRY BETWEEN POPULATIONS.
+# Identical starting (AD, RD) for every population causes the joint solver
+# to stall on a subset of populations (confirmed: in a 3-fiber test,
+# population 1 converged to 0% error while populations 2-3 did not move AT
+# ALL from an identical starting point -- a degenerate-Jacobian symmetry
+# stall, not slow convergence). `alternating_init_nfiber`'s short,
+# population-differentiating pass exists specifically to prevent this.
+#
+# SCOPE — WHAT THIS MODULE DOES NOT DO (read before relying on it)
+# -----------------------------------------------------------------------
+# - Does NOT touch, correct, or re-derive the isotropic-compartment
+#   FRACTIONS (RF/HF/WF/NRF) or the anisotropic FRACTIONS (FF) computed by
+#   Stage A's NNLS solve. Those are computed and written to the output
+#   BEFORE this module ever runs and are architecturally independent of
+#   it -- this module only refines AD/RD/FA/direction reporting for
+#   populations Stage A already detected. An attempt to also correct
+#   Stage A's fraction leakage via a small unregularized re-fit conditioned
+#   on this module's output ("Stage C") was tested and REJECTED AT THE TIME.
+#   SUPERSEDED: the Stage C that ships today (joint VARPRO mono-fiber
+#   tensor+fraction re-solve, default ON) is a different estimator and does
+#   improve the fractions; the rejection below applies to the earlier variant
+#   described here, not to it. The rest of this paragraph is kept as the record
+#   of what was tried and why. The original text follows: it
+#   collapses the isotropic compartment to 1-2 fixed-diffusivity columns,
+#   discarding the spectral resolution that is the toolbox's core
+#   contribution, and made FF/NRF recovery WORSE in 5 of 6 tested
+#   synthetic conditions (median FF error increases of 0.03-0.09 vs. Stage
+#   A's raw, uncorrected fractions). A "targeted" variant (full isotropic
+#   spectrum retained, only the anisotropic block replaced by refined
+#   fiber columns) was less harmful but still inconsistent (improved 4/6
+#   conditions on FF, only 3/6 on NRF) and is NOT included here. Isotropic
+#   fraction accuracy under true crossing-fiber ground truth is TRACKED AS
+#   A DOCUMENTED OPEN LIMITATION, not something this module claims to fix.
+# - Does NOT refine direction (unlike the existing single-fiber MRDS-lite
+#   cone search): directions passed in are Stage A's raw discrete-grid
+#   detections. Extending per-population cone refinement to 2-3 populations
+#   is architecturally possible (call `refine_fiber_direction_cone` per
+#   population before the joint fit) but has not been implemented or
+#   validated here.
+# - Validated (synthetic): 2-fiber crossings at 30/60/90 deg, symmetric and
+#   2.3:1 splits; ONE 3-fiber configuration at well-separated (60 deg
+#   apart) angles and roughly balanced fractions (comparable 4-16% errors).
+#   NOT validated: 3-fiber with unbalanced fractions or narrow angular
+#   separation; real (non-synthetic) data.
+#
+# References
+# ----------
+# Coronado-Leija R, Ramirez-Manzanares A, Marroquin JL (2017). Medical
+#     Image Analysis, 42, 26-43.
+# Levenberg K (1944); Marquardt DW (1963).
+# Project synthetic validation: 2-fiber and 3-fiber joint Stage B sweep;
+#     Stage A fraction-recovery-under-crossing sweep; Stage C re-fit
+#     rejection (see this docstring and project records).
+# ────────────────────────────────────────────────────────────────────────────
 
 
 @njit(cache=True, fastmath=True)

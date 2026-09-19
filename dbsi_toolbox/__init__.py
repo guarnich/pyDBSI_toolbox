@@ -140,14 +140,6 @@ from .fit_quality import (compute_fit_quality, compute_fiber_validity_map,
                           save_output_maps)
 from .transition_confidence import compute_transition_confidence, save_transition_confidence
 
-# NOTE: `correct_rician_bias` is NOT imported here. In the source
-# `utils/tools.py` this function is entirely commented out (Koay-Basser
-# correction is currently applied inline inside DBSI_Adaptive.fit() via
-# the Gudbjartsson & Patz 1995 formula instead). Importing a
-# commented-out symbol here would raise ImportError at package import
-# time. Re-add this import once `correct_rician_bias` is actually
-# implemented and uncommented in utils/tools.py.
-
 __all__ = [
     "DBSI_Adaptive",
     "load_data",

@@ -14,25 +14,21 @@ Contains the mathematical core of the v3 DBSI implementation:
 - Decoupled (lambda_aniso, lambda_iso) regularization for Stage A
 - Fiber FA computation
 
-Note on v2 single-stage centroid extraction
-----------------------------------------------
-`compute_aniso_centroids` (v2) is no longer used: synthetic recovery
-validation showed it is not numerically identifiable (median AD/RD
-relative errors 20%-150%+ across all tested dictionary densities). It is
-kept in solvers.py for backward compatibility but NOT exported here.
-Use `select_dominant_directions` (Stage A) + `estimate_AD_RD_conditioned`
+Removed in 1.0.0 — the v1/v2 estimators these superseded
+-----------------------------------------------------------------
+`compute_aniso_centroids` (v2 single-stage centroid extraction) was not
+numerically identifiable: synthetic recovery validation gave median AD/RD
+relative errors of 20%-150%+ at every tested dictionary density. Use
+`select_dominant_directions` (Stage A) + `estimate_AD_RD_conditioned`
 (Stage B) instead.
 
-Note on v1 single-(AD,RD) design matrix and non-linear Step 2
------------------------------------------------------------------
-`build_design_matrix` (v1, orientation-only) and
-`step2_refine_diffusivities[_adaptive]` (v1, non-linear grid search) are
-kept for backward compatibility / regression comparison but are NOT used
-by `DBSI_Adaptive` in v3 and are NOT exported here.
+`build_design_matrix` (v1, orientation-only single-(AD,RD) dictionary) and
+`step2_refine_diffusivities[_adaptive]` (v1, non-linear grid search) were
+kept for regression comparison long after nothing called them. Use
+`build_design_matrix_exhaustive` for Stage A.
 """
 
 from .basis import (
-    build_design_matrix,                 # v1, deprecated — kept for compatibility
     build_design_matrix_exhaustive,      # v3 Stage A detection dictionary
     build_isotropic_dictionary,
     generate_exhaustive_diffusivity_pairs,  # v3 Stage A
@@ -53,7 +49,6 @@ from .solvers import (
 )
 
 __all__ = [
-    "build_design_matrix",
     "build_design_matrix_exhaustive",
     "build_isotropic_dictionary",
     "generate_exhaustive_diffusivity_pairs",

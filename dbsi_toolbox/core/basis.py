@@ -194,9 +194,9 @@ def build_design_matrix_exhaustive(bvals, bvecs, fiber_dirs, diff_pairs, iso_gri
 
     Column ordering in A_aniso is pair-major, direction-minor:
     for p in pairs: for d in fiber_dirs: column.
-    This ordering must be matched exactly by any centroid-extraction code
-    that re-derives (ad, rd) from a flat column index (see
-    `core.solvers.compute_aniso_centroids`).
+    This ordering must be matched exactly by any code that re-derives
+    (ad, rd) from a flat column index — `core.solvers.select_dominant_directions`
+    and the calibration modules all depend on it.
 
     Parameters
     ----------
@@ -464,64 +464,3 @@ def build_isotropic_dictionary(bvals, iso_grid):
             A_iso[i, j] = np.exp(-b * D_iso)
 
     return A_iso
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# v1 LEGACY — single-(AD,RD) design matrix (DEPRECATED)
-# ─────────────────────────────────────────────────────────────────────────────
-
-@njit(cache=True, fastmath=True)
-def build_design_matrix(bvals, bvecs, fiber_dirs, iso_grid, ad=1.5e-3, rd=0.5e-3):
-    """
-    .. deprecated:: 2.0.0 (superseded by v3 hybrid two-stage architecture)
-        This is the v1 single-(AD,RD) orientation-only anisotropic
-        dictionary. It samples ONLY the orientation space at a single
-        fixed (AD, RD), which under-constrains DBSI's ability to explain
-        pathological microstructural heterogeneity (axonal injury / RD
-        changes look identical to a healthy fiber reoriented, under this
-        construction).
-
-        v3 uses `build_design_matrix_exhaustive` for Stage A (direction
-        detection only) and `core.solvers.estimate_AD_RD_conditioned`
-        for Stage B (closed-form diffusivity estimation conditioned on
-        the detected direction) — see `model_Niso_adaptive_ff_thr.py`
-        module docstring for the full v3 rationale.
-
-        Kept for backward compatibility with external code and for
-        regression comparisons against the v1 pipeline. Not used by
-        `DBSI_Adaptive` in v2 or v3.
-
-    Parameters
-    ----------
-    bvals : array (N,)
-    bvecs : array (N, 3)
-    fiber_dirs : array (M, 3)
-    iso_grid : array (L,)
-    ad, rd : float
-        Fixed axial/radial diffusivity for every anisotropic column.
-
-    Returns
-    -------
-    A : array (N, M+L)
-    """
-    n_meas = len(bvals)
-    n_dirs = len(fiber_dirs)
-    n_iso = len(iso_grid)
-
-    A = np.zeros((n_meas, n_dirs + n_iso), dtype=np.float64)
-
-    for j in range(n_dirs):
-        fdir = fiber_dirs[j]
-        for i in range(n_meas):
-            b = bvals[i]
-            g = bvecs[i]
-            cos_t = g[0]*fdir[0] + g[1]*fdir[1] + g[2]*fdir[2]
-            D_app = rd + (ad - rd) * cos_t * cos_t
-            A[i, j] = np.exp(-b * D_app)
-
-    for j in range(n_iso):
-        D_iso = iso_grid[j]
-        for i in range(n_meas):
-            A[i, n_dirs + j] = np.exp(-bvals[i] * D_iso)
-
-    return A

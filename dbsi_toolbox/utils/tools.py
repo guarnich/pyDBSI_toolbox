@@ -1,7 +1,6 @@
 import os
 import numpy as np
 import nibabel as nib
-import warnings
 
 def print_protocol_summary(bvals):
     rounded_bvals = np.round(bvals, -2)
@@ -106,23 +105,3 @@ def estimate_snr_robust(data, bvals, mask, verbose=True):
             print(f"  Estimated SNR: {snr:.2f}")
             print(f"  Estimated Noise Sigma: {sigma:.4f}")
         return float(snr), float(sigma)
-
-# def correct_rician_bias(signal, sigma):
-#     """
-#     Koay-Basser approximation for Rician bias correction.
-#
-#     For voxels where signal^2 <= 2*sigma^2 (SNR < ~1.4), the correction
-#     cannot be applied (negative under sqrt). These are set to 0 rather than
-#     retaining the biased original signal, which would be the dominant noise
-#     contribution and not a meaningful signal estimate.
-#     """
-#     if sigma <= 0:
-#         return signal
-#     signal_sq = signal**2
-#     noise_floor = 2.0 * sigma**2
-#     mask_valid = signal_sq > noise_floor
-#     corrected = np.zeros_like(signal)
-#     corrected[mask_valid] = np.sqrt(signal_sq[mask_valid] - noise_floor)
-#     # ~mask_valid: SNR too low to correct -> 0 (noise floor; not the biased signal)
-#     corrected[~mask_valid] = 0.0
-#     return corrected

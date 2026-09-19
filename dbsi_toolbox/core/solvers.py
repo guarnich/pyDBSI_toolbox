@@ -993,10 +993,19 @@ def iso_fraction_resolve(sig_norm, bvals, bvecs, fdirs, fad, frd, n_fib,
 # refining the SINGLE dominant fiber direction's angular precision. The
 # parts of the original MRDS that do NOT apply here are deliberately left
 # out (see rationale recorded in project discussion):
-#   - No F-test / multi-population model selection: this toolbox currently
-#     saves only the dominant direction in its output channels regardless
-#     of how many populations Stage A detects, so refining a second
-#     population's orientation would have no effect on any output.
+#   - No F-test / multi-population model selection: this toolbox decides how
+#     many populations a voxel has in `select_dominant_directions` (basin
+#     mass + a data-driven concentration gate), not by nested model
+#     comparison, so the F-test has no role to play here.
+#     STALE JUSTIFICATION REMOVED (2026-09-19): this bullet used to argue
+#     that refining a second population's orientation "would have no effect
+#     on any output", because only the dominant direction was stored. That
+#     stopped being true when the MRDS multi-fiber extension added the
+#     dir2_x/y/z output channels -- population 2's direction IS stored and
+#     IS used, by Stage D and by the fit-quality reconstruction. Not
+#     refining it remains a deliberate scope limit (the crossing branch uses
+#     Stage A's raw grid directions, see the MRDS multi-fiber section), but
+#     the reason is cost and lack of validation, not irrelevance.
 #   - No iterative NNLS re-solving across resolution stages: the original
 #     MRDS re-solves compartment SIZES at each resolution stage via a
 #     small linear system. Here, Stage A's NNLS has ALREADY determined the
@@ -1031,6 +1040,24 @@ def iso_fraction_resolve(sig_norm, bvals, bvecs, fdirs, fad, frd, n_fib,
 # interaction between refinement and the isotropic block's own centroid
 # estimates (refinement here holds Stage A's isotropic fractions/centroids
 # fixed, exactly as Stage B already does).
+#
+# WHERE THIS ACTUALLY RUNS (read before trusting the numbers above)
+# -----------------------------------------------------------------------
+# The validation summary above compares refinement against the CLOSED-FORM
+# Stage B, which was the single-fiber estimator when this module was
+# written. It no longer is: Stage C (`stagec_varpro_single_fiber`) took that
+# role and is ON by default, and in the kernel the two sit in mutually
+# exclusive branches -- `if stagec_enabled: ... elif
+# enable_direction_refinement: ...` -- so with the default configuration this
+# refinement did not run at all, and a single fiber's stored direction was
+# Stage A's raw grid node.
+#
+# RESOLVED 2026-09-19: `stagec_dir_refine` (now default ON) composes the two
+# instead. The cone refines the direction and Stage C is then fitted at the
+# refined one. Validated across 3 protocols x 3 SNR -- AD error improves in
+# 9/9 conditions, median -18.5% -- see `_DEFAULT_STAGEC_DIR_REFINE` in
+# model_Niso_adaptive_ff_thr.py for the full table. The elif branch below is
+# still what runs when Stage C is explicitly disabled.
 #
 # DATA-DRIVEN PARAMETERISATION (no fixed "magic number" cone angles or
 # candidate counts)

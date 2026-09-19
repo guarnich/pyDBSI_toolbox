@@ -1,4 +1,4 @@
-# pyDBSI Toolbox (v1.0.0 — hybrid two-stage architecture)
+# pyDBSI Toolbox (v1.1.0 — hybrid two-stage architecture)
 
 **Diffusion Basis Spectrum Imaging (DBSI) - Adaptive Implementation with Numba Acceleration**
 
@@ -178,10 +178,13 @@ is in `voxel_journey_report`.
    angular non-maximum suppression. Yields 0, 1 or **at most 2**
    populations (`MAX_FIBER_POPULATIONS`, fixed).
 4. **Per-voxel tensor estimation**, by branch:
-   - **one population → Stage C (VARPRO)**: fiber tensor *and* compartment
-     fractions are re-solved jointly on a reduced `[fiber column | isotropic
-     grid]` dictionary, scanning a 14×12 (AD, RD) grid with a 5×5 local
-     refine. This replaces both the raw Stage A fractions and the Stage B
+   - **one population → cone refinement, then Stage C (VARPRO)**: Stage A's
+     direction is first refined inside a cone whose radius is tied to the
+     dictionary's own measured spacing, because the true fiber almost always
+     falls between grid nodes. Stage C then re-solves the fiber tensor *and*
+     the compartment fractions jointly at that refined direction, on a reduced
+     `[fiber column | isotropic grid]` dictionary, scanning a 14×12 (AD, RD)
+     grid with a 5×5 local refine. This replaces both the raw Stage A fractions and the Stage B
      tensor, which poison each other: near-fiber columns absorb restricted
      signal, so FF inflates, RF collapses and AD is under-estimated. Uses
      the **raw** normalised signal — Rician noise-floor subtraction biases
@@ -201,6 +204,12 @@ is in `voxel_journey_report`.
    is taken from Stage D, not the total FF.
 6. **Derived channels**: the population-1 fraction, the FF-weighted fiber
    tensor, and the R²/RMSE fit-quality maps.
+
+The restricted-fraction bias correction (`correct_restricted_fraction`) is
+**off** by default. It was built for the Stage-A-only pipeline and is
+superseded by Stages C and D, which fix the RF under-recovery at the source —
+applying it on top now double-corrects and makes RF 2.45× worse. See the
+docstring of `build_rf_response_table`.
 
 ### Key Parameters
 

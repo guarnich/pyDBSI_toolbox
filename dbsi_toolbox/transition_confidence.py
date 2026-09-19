@@ -160,7 +160,7 @@ def compute_transition_confidence(results, model_mode):
 
     Parameters
     ----------
-    results : ndarray (X, Y, Z, 11), float32
+    results : ndarray (X, Y, Z, C), float32
         Output of `DBSI_Adaptive.fit()`.
     model_mode : int
         2 or 3, as returned alongside `results`.
@@ -183,7 +183,10 @@ def compute_transition_confidence(results, model_mode):
         score describes how close its single NRF centroid sits to the
         3.0e-3 boundary, not a genuine HF-vs-WF distinction).
     """
-    CH_RF, CH_HF, CH_WF, CH_NRF, CH_ADC_ISO = 1, 2, 3, 4, 8
+    from .model_Niso_adaptive_ff_thr import (
+        _C_RF as CH_RF, _C_HF as CH_HF, _C_WF as CH_WF, _C_NRF as CH_NRF,
+        _C_ADC_ISO as CH_ADC_ISO,
+    )
 
     shape3d = results.shape[:3]
     confidence_res = np.full(shape3d, np.nan, dtype=np.float32)
@@ -260,7 +263,7 @@ def compute_transition_confidence(results, model_mode):
 def save_transition_confidence(confidence_res, confidence_wat, affine, output_dir):
     """
     Save the two confidence maps as compressed NIfTI files, analogous
-    to `fit_quality.save_fit_quality`.
+    to the other `save_*` helpers.
 
     Parameters
     ----------

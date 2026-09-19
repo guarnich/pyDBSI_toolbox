@@ -2,7 +2,7 @@
 """
 DBSI Adaptive CLI — v3 (Hybrid Two-Stage Architecture)
 
-Outputs (11 channels) dynamically adapted based on acquisition scheme (2-ISO or 3-ISO).
+Outputs dynamically adapted based on acquisition scheme (2-ISO or 3-ISO).
 
 CHANGES FROM v2
 -----------------
@@ -25,16 +25,34 @@ CHANGES FROM v2
   against whichever (lambda_aniso, lambda_iso) was selected, WITHOUT
   changing it — a sanity check, recommended at least once per new
   protocol/dataset type.
+
+OUTPUT LAYOUT (changed)
+-----------------------
+Saving now goes through `dbsi_toolbox.save_output_maps`, the single
+saving entry point shared with the analysis notebooks, instead of an
+inline loop private to this script. Consequences:
+
+- files are named `NN_<channel>.nii.gz` (channel index prefix), NOT
+  `dbsi_<channel>.nii.gz` as before;
+- `nonrestricted_fraction` is not written in 3-ISO mode, where it is
+  hindered + water by construction;
+- `fiber_valid.nii.gz`, the validity mask for the fiber-tensor channels,
+  is written as part of the normal run;
+- the R2 / RMSE fit-quality maps are ordinary output channels now, always
+  computed by the fit, so `--compute-r2` is gone.
+
+The output layout itself changed too: at most TWO fiber populations, each
+with its own fraction/AD/RD/FA/direction, plus the FF-weighted tensor —
+plus the R2/RMSE fit-quality maps — 27 channels, no pop3, no
+ad_linear/rd_linear. See `DBSI_Adaptive.output_map_names`.
 """
 
 import argparse
 import os
-import sys
-import nibabel as nib
-import numpy as np
 
 from dbsi_toolbox import DBSI_Adaptive
 from dbsi_toolbox import load_data
+from dbsi_toolbox import save_output_maps
 
 def main():
     parser = argparse.ArgumentParser(description="DBSI Adaptive Pipeline (v3, hybrid two-stage)")
@@ -118,8 +136,6 @@ def main():
                         default=1.0,
                         help="Desired final angular precision (degrees) for direction refinement. "
                              "Default: 1.0. Ignored if --disable-direction-refinement is set.")
-    parser.add_argument("--compute-r2", action="store_true",
-                        help="Compute fit quality check (R2 and RMSE)")
     parser.add_argument("--compute-transition-confidence", action="store_true",
                         dest="compute_transition_confidence",
                         help="Compute RES/HIN and HIN/WAT transition-zone confidence maps "
@@ -171,22 +187,12 @@ def main():
               f"{model.mc_crosscheck_report_['composite']:.4f}")
 
     print("\nSaving outputs...")
-    for i, name in enumerate(names):
-        fname = os.path.join(args.out, f"dbsi_{name}.nii.gz")
-        if not name.endswith('_NaN'):
-            nib.save(nib.Nifti1Image(results[..., i].astype(np.float32), affine), fname)
-            print(f"  {fname}")
-        else:
-            print(f"  Skipped {name} (not estimated in {model_mode}-ISO mode)")
-
-    if args.compute_r2:
-        print("\nComputing fit quality (R2 and RMSE)...")
-        from dbsi_toolbox.fit_quality import compute_fit_quality, save_fit_quality
-        r2, rmse = compute_fit_quality(
-            data, bvals, bvecs, mask, results, model_mode, n_dirs=model.n_dirs
-        )
-        save_fit_quality(r2, rmse, affine, args.out)
-        print("Fit quality maps saved.")
+    saved = save_output_maps(results, names, affine, args.out)
+    skipped = [n for n in names if n not in saved]
+    print(f"  {len(saved)} channel maps -> {args.out}/NN_<channel>.nii.gz")
+    print(f"  fiber-tensor validity mask -> {args.out}/fiber_valid.nii.gz")
+    print(f"  Skipped {len(skipped)} channels (invalid in {model_mode}-ISO mode "
+          f"or exact duplicates): {', '.join(skipped)}")
 
     if args.compute_transition_confidence:
         print("\nComputing transition-zone confidence maps...")

@@ -60,10 +60,12 @@ optimize_hyperparameters
     grounded tissue scenarios.
 
 compute_fit_quality
-    Compute voxel-wise R² and RMSE goodness-of-fit maps. v3: this
-    reconstruction is exact (not approximate, unlike v2) for
-    single-fiber-population voxels — see `fit_quality.py` module
-    docstring.
+    Compute voxel-wise R² and RMSE goodness-of-fit maps. `DBSI_Adaptive.fit`
+    already calls this and stores the result in the `fit_r2` / `fit_rmse`
+    output channels; call it directly only to recompute against different
+    data or a different fiber_threshold. The reconstruction models ALL
+    detected fiber populations from their stored directions and tensors —
+    see `fit_quality.py` module docstring.
 
 compute_transition_confidence
     Compute voxel-wise confidence maps for the RES/HIN and HIN/WAT
@@ -74,32 +76,41 @@ compute_transition_confidence
     VALIDATED ON REAL DATA (see `transition_confidence.py` module
     docstring caveats).
 
-save_fit_quality
-    Save R² and RMSE maps as compressed NIfTI files.
-
 save_transition_confidence
     Save the two transition-confidence maps as compressed NIfTI files.
 
-Output Channels (11, unified across both model modes — unchanged layout
-from v1/v2; channel semantics for 5-7, 9-10 updated, see
-model_Niso_adaptive_ff_thr.py)
+Output Channels (27 — see DBSI_Adaptive.output_map_names for the full
+contract, and the `_C_*` constants in model_Niso_adaptive_ff_thr.py for
+the indices, which are the single source of truth)
 ------------------------------------------------------------------------
-    0 : FF      - Fiber fraction                          (always valid)
-    1 : RF      - Restricted fraction / inflammation      (always valid)
+    0 : FF      - Fiber fraction, TOTAL over both populations
+    1 : RF      - Restricted fraction / inflammation
     2 : HF      - Hindered fraction                       (NaN in 2-ISO mode)
     3 : WF      - Free-water fraction / CSF               (NaN in 2-ISO mode)
-    4 : NRF     - Non-restricted fraction (= HF + WF)     (always valid)
-    5 : AD      - Axial diffusivity (v3: Stage B closed-form estimate
-                  conditioned on Stage A's detected direction)
-                                                            (NaN if FF <= fiber_threshold)
-    6 : RD      - Radial diffusivity (v3: Stage B closed-form estimate)
-                                                            (NaN if FF <= fiber_threshold)
-    7 : FA      - Intrinsic fiber FA                      (NaN if FF <= fiber_threshold)
-    8 : ADC_iso - Mean isotropic ADC                      (always valid)
-    9 : AD_lin  - v3: identical to channel 5 (retained for output-shape
-                  compatibility; Stage B's estimate is the only
-                  diffusivity estimate produced)
-   10 : RD_lin  - v3: identical to channel 6 (see note above)
+    4 : NRF     - Non-restricted fraction (= HF + WF)
+    5 : ADC_iso - Mean isotropic ADC
+    6 : N_POP   - Number of fiber populations resolved. THREE-STATE:
+                  NaN = no fiber compartment attempted, 0 = fiber present
+                  but no direction resolved, 1-2 = populations found.
+    ---- population 1 (dominant), NaN if absent ----
+    7 : FF_POP1, 8: AD_POP1, 9: RD_POP1, 10: FA_POP1, 11-13: DIR1_XYZ
+    ---- population 2, NaN if absent ----
+   14 : FF_POP2, 15: AD_POP2, 16: RD_POP2, 17: FA_POP2, 18-20: DIR2_XYZ
+    ---- FF-weighted over the populations present, NaN if no fiber ----
+   21 : AD_W, 22: RD_W, 23: FA_W   (FA_W is the FA OF the weighted tensor,
+                  NOT the mean of FA_POP1 and FA_POP2)
+    ---- diagnostics ----
+   24 : CONC    - Dominant-basin angular concentration
+   25 : R2      - Goodness of fit of the reconstructed signal
+   26 : RMSE    - Residual RMSE, as a fraction of S0
+
+There is no third population and no AD_lin/RD_lin: the toolbox resolves at
+most TWO fiber populations per voxel, and the linear channels were
+byte-identical copies of AD_POP1/RD_POP1.
+
+Compartment fractions (0-4) use 0 for "absent"; the fiber block (7-23)
+uses NaN. `save_output_maps` writes the matching `fiber_valid.nii.gz`,
+which you need before resampling any of the NaN-convention maps.
 
 References
 ----------
@@ -117,7 +128,7 @@ Design document: toolbox_v2.md (orientation-space vs. parameter-space
     recovery validation of the v2 single-stage approach.
 """
 
-__version__ = "3.0.0-hybrid"
+__version__ = "1.0.0"
 __author__ = "DBSI Toolbox Contributors"
 
 
@@ -125,18 +136,9 @@ from .model_Niso_adaptive_ff_thr import DBSI_Adaptive
 from .utils.tools import load_data, estimate_snr_robust
 from .utils.autoconfig import autoconfigure_dictionary
 from .calibration.optimizer import optimize_hyperparameters
-from .fit_quality import (compute_fit_quality, save_fit_quality,
-                          compute_aggregate_fiber_maps, save_aggregate_fiber_maps,
+from .fit_quality import (compute_fit_quality, compute_fiber_validity_map,
                           save_output_maps)
 from .transition_confidence import compute_transition_confidence, save_transition_confidence
-
-# NOTE: `correct_rician_bias` is NOT imported here. In the source
-# `utils/tools.py` this function is entirely commented out (Koay-Basser
-# correction is currently applied inline inside DBSI_Adaptive.fit() via
-# the Gudbjartsson & Patz 1995 formula instead). Importing a
-# commented-out symbol here would raise ImportError at package import
-# time. Re-add this import once `correct_rician_bias` is actually
-# implemented and uncommented in utils/tools.py.
 
 __all__ = [
     "DBSI_Adaptive",
@@ -145,9 +147,7 @@ __all__ = [
     "autoconfigure_dictionary",
     "optimize_hyperparameters",
     "compute_fit_quality",
-    "save_fit_quality",
-    "compute_aggregate_fiber_maps",
-    "save_aggregate_fiber_maps",
+    "compute_fiber_validity_map",
     "save_output_maps",
     "compute_transition_confidence",
     "save_transition_confidence",

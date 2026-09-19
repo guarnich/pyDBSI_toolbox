@@ -61,9 +61,10 @@ for single-fiber ground truth at this lambda_aniso) -- so the direction
 and magnitude of any true crossing-related isotropic bias remains
 unresolved and protocol/lambda-dependent, not a fixed, predictable offset.
 
-MULTI-FIBER SCOPE: WHY 2 DEFAULT, 3 OPTIONAL, NOT MORE
+MULTI-FIBER SCOPE: WHY EXACTLY 2, FIXED
 -----------------------------------------------------------
-`max_fiber_populations` defaults to 2, matching the practical ceiling
+`MAX_FIBER_POPULATIONS` is 2 and is not configurable. It matches the
+practical ceiling
 used elsewhere in multi-tensor/MRDS crossing-fiber literature (e.g.
 "ball and 2 sticks" as the standard default multi-compartment
 configuration) and this toolbox's own validation scope (see
@@ -73,12 +74,12 @@ fixed SNR (on the order of 3 deg for one tensor vs. 7 deg for two vs. 16
 deg for three at SNR~25:1) -- resolving 3 populations reliably typically
 requires denser angular sampling (HARDI-grade protocols) than this
 toolbox's coarse, deliberately protocol-agnostic Stage A dictionary is
-designed to assume. 3 is offered as an explicit opt-in
-(`max_fiber_populations=3`) for richer protocols, WITHOUT automatic
-protocol gating in this release (unlike the 3-ISO isotropic model
-selection, which IS auto-gated on b_max/n_shells) -- the person enabling
-it is responsible for confirming their protocol's angular sampling
-density supports it. Values above 3 are not supported: beyond that point
+designed to assume. A third population was previously offered as an
+un-gated opt-in; it has been REMOVED, along with its output channels.
+On real data it never resolved -- the pop3 maps came back 100% NaN on
+every protocol -- so the option only ever cost seven empty volumes per
+run and a branch nobody could validate. Anything beyond two populations
+is out of scope: past that point
 this toolbox would be duplicating the scope of dedicated multi-fiber
 tractography tools (CHARMED, ball-and-sticks, full MRDS) rather than
 serving its own stated purpose (isotropic-compartment quantification with
@@ -96,37 +97,39 @@ Model Selection Criterion (unchanged from v1/v2)
 2-ISO vs 3-ISO selection based on b_max / shell count is unaffected by
 the MRDS extension -- it governs the isotropic block only.
 
-Output Channels (EXTENDED to 29 total; channels 0-10 UNCHANGED from the
-original v3 layout for full backward compatibility with existing
-fit_quality.py, transition_confidence.py, and any already-produced
-figures/analyses -- channels 11-28 are a pure append)
+Output Channels (27 total)
 -------------------------------------------------------------------------
-    0  : FF   — Total fibre fraction (summed over ALL detected populations)
+    0  : FF   — TOTAL fibre fraction (summed over all detected populations)
     1  : RF   — Restricted fraction  (ADC <= 0.3e-3)      (always valid)
-    2  : HF   — Hindered fraction    (0.3e-3 < ADC <= 3.0e-3) (NaN in 2-ISO mode)
-    3  : WF   — Free-water fraction  (ADC > 3.0e-3)      (NaN in 2-ISO mode)
-    4  : NRF  — Non-Restricted fraction = HF + WF        (always valid)
-    5  : AD   — DOMINANT population's axial diffusivity (Stage B/MRDS estimate;
-                NaN if FF <= fiber_threshold)
-    6  : RD   — DOMINANT population's radial diffusivity
-    7  : FA   — DOMINANT population's intrinsic fibre FA
-    8  : ADC_iso — Mean isotropic ADC                     (always valid)
-    9  : AD_lin  — identical to channel 5 (retained for shape compatibility)
-    10 : RD_lin  — identical to channel 6 (retained for shape compatibility)
-    ── MRDS extension (NEW, channels 11-28) ──
-    11 : N_POP   — number of fiber populations Stage A reported in this
-                   voxel (0, 1, 2, or 3). N_POP==1 voxels have channels
-                   15-28 as NaN (nothing to report for pop 2/3).
-    12-14 : DIR1_XYZ — dominant population's direction (unit vector; NOT
-                   previously stored in the 11-channel layout -- lets
-                   `fit_quality.py` read the direction directly instead
-                   of re-deriving it via grid search, for voxels fit
-                   under this schema)
-    15 : FF_POP2, 16: AD_POP2, 17: RD_POP2, 18: FA_POP2   (NaN if N_POP<2)
-    19-21 : DIR2_XYZ                                       (NaN if N_POP<2)
-    22 : FF_POP3, 23: AD_POP3, 24: RD_POP3, 25: FA_POP3   (NaN if N_POP<3,
-                   including whenever max_fiber_populations==2)
-    26-28 : DIR3_XYZ                                       (NaN if N_POP<3)
+    2  : HF   — Hindered fraction    (0.3e-3 < ADC <= 3.0e-3) (NaN in 2-ISO)
+    3  : WF   — Free-water fraction  (ADC > 3.0e-3)       (NaN in 2-ISO)
+    4  : NRF  — Non-Restricted fraction = HF + WF         (always valid)
+    5  : ADC_iso — Mean isotropic ADC                     (always valid)
+    6  : N_POP   — number of fiber populations resolved in this voxel.
+                   THREE-STATE (NaN / 0 / 1-2): see `output_map_names`.
+    ── population 1 (dominant), NaN if N_POP < 1 ──
+    7  : FF_POP1 — this population's share of FF
+    8  : AD_POP1 — axial diffusivity  (Stage B closed-form / MRDS joint)
+    9  : RD_POP1 — radial diffusivity
+    10 : FA_POP1 — intrinsic fibre FA
+    11-13 : DIR1_XYZ — unit direction vector
+    ── population 2, NaN if N_POP < 2 ──
+    14 : FF_POP2, 15: AD_POP2, 16: RD_POP2, 17: FA_POP2
+    18-20 : DIR2_XYZ
+    ── FF-weighted over the populations present, NaN if no fiber tensor ──
+    21 : AD_W, 22: RD_W — fraction-weighted fibre diffusivities
+    23 : FA_W  — FA OF the weighted tensor (intrinsic per-fibre anisotropy,
+                 NOT the mean of FA_POP1 and FA_POP2)
+    ── diagnostics ──
+    24 : CONC  — dominant-basin angular concentration
+    25 : R2    — goodness of fit of the reconstructed signal, all
+                 compartments and both populations (fit_quality.py)
+    26 : RMSE  — residual RMSE as a fraction of S0
+
+There is no population 3 (see MULTI-FIBER SCOPE), and no AD_lin/RD_lin:
+those were byte-identical copies of AD_POP1/RD_POP1. The `_C_*` module
+constants are the single source of truth for these indices -- index
+through them, never through a literal.
 
 References
 ----------
@@ -154,7 +157,6 @@ from .core.basis import (
     generate_exhaustive_diffusivity_pairs,
     generate_fibonacci_sphere_hemisphere,
     generate_isotropic_grid,
-    generate_log_uniform_isotropic_grid,
     generate_anchored_isotropic_grid,
 )
 from .core.solvers import (
@@ -243,13 +245,52 @@ _DEFAULT_N_ISO_STEPS = 31    # Legacy fixed default — see select_n_iso_svd.
 
 _ISO_GRID_D_MAX_EXTENDED = 5.0e-3
 
-# Default maximum number of fiber populations Stage A/B will report per
-# voxel. Now a per-instance parameter (`DBSI_Adaptive(max_fiber_populations=
-# ...)`) rather than a hardcoded module constant -- see module docstring
-# "MULTI-FIBER SCOPE" for why the default is 2 and why 3 is offered as an
-# explicit, non-protocol-gated opt-in rather than a further-increased
-# default.
-_DEFAULT_MAX_FIBER_POPULATIONS = 2
+# Maximum number of fiber populations Stage A/B reports per voxel. FIXED at 2,
+# deliberately: it is the practical ceiling for the angular sampling of the
+# clinical protocols this toolbox targets, and a third population was never
+# resolvable on real data (the pop3 output channels came back 100% NaN on every
+# run). It was briefly a per-instance parameter with an opt-in value of 3; that
+# option is gone, along with the pop3 output block it fed. See module docstring
+# "MULTI-FIBER SCOPE".
+MAX_FIBER_POPULATIONS = 2
+
+# ── OUTPUT CHANNEL LAYOUT ────────────────────────────────────────────────────
+# Single source of truth for the channel indices: the njit kernels, the class,
+# `output_map_names`, `fit_quality` and `transition_confidence` all index
+# through these names, so the layout is defined in exactly one place.
+#
+# NaN/0 CONVENTION, by block:
+#   0-4   compartment fractions   -- 0 means "compartment absent" (0 is the
+#                                    correct physical value; they stay summable)
+#   5     mean isotropic ADC      -- 0 where no isotropic signal
+#   6     n_fiber_populations     -- THREE-STATE, see `output_map_names`
+#   7-20  per-population block    -- NaN means "this population is absent"
+#   21-23 FF-weighted aggregates  -- NaN where no fiber tensor was estimated
+#   24-26 diagnostics             -- NaN outside fitted voxels
+_C_FF = 0             # fiber_fraction -- TOTAL anisotropic fraction (pop1+pop2)
+_C_RF = 1             # restricted_fraction
+_C_HF = 2             # hindered_fraction      (NaN in 2-ISO)
+_C_WF = 3             # water_fraction         (NaN in 2-ISO)
+_C_NRF = 4            # nonrestricted_fraction (== HF+WF in 3-ISO)
+_C_ADC_ISO = 5        # mean_iso_adc
+_C_NPOP = 6           # n_fiber_populations
+_C_FF1 = 7            # ── population 1 (dominant) ──
+_C_AD1 = 8
+_C_RD1 = 9
+_C_FA1 = 10
+_C_DIR1 = 11          # dir1_x, dir1_y, dir1_z = 11, 12, 13
+_C_FF2 = 14           # ── population 2 ──
+_C_AD2 = 15
+_C_RD2 = 16
+_C_FA2 = 17
+_C_DIR2 = 18          # dir2_x, dir2_y, dir2_z = 18, 19, 20
+_C_ADW = 21           # ── FF-weighted over the populations present ──
+_C_RDW = 22
+_C_FAW = 23
+_C_CONC = 24          # dominant_basin_concentration (diagnostic)
+_C_R2 = 25            # fit_r2   -- goodness of fit of the reconstructed signal
+_C_RMSE = 26          # fit_rmse -- residual RMSE, as a fraction of S0
+_N_CHANNELS = 27
 
 # MRDS multi-fiber Stage B defaults (see core.solvers.estimate_AD_RD_mrds).
 _MRDS_INIT_N_ITER = 3        # short, deliberately non-converged alternating warm start
@@ -625,7 +666,7 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
     v3 parallel fitting kernel — two-compartment isotropic model (2-ISO).
 
     Stage A direction detection is unchanged. Stage B branches on how many
-    populations Stage A reported (n_pop, up to `max_fiber_populations`):
+    populations Stage A reported (n_pop, up to MAX_FIBER_POPULATIONS):
       n_pop == 1 : unchanged single-fiber path (closed-form Stage B,
                    optional MRDS-lite cone refinement).
       n_pop >= 2 : NEW MRDS multi-fiber joint Stage B
@@ -723,16 +764,16 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
         # ── Channels 0-10 (fractions): UNCHANGED regardless of n_pop.
         # See module docstring "WHAT THE MRDS EXTENSION DOES NOT DO":
         # these fractions are frozen here and never revisited by Stage B. ──
-        out[x, y, z, 0] = f_fib
-        out[x, y, z, 1] = f_res
-        out[x, y, z, 4] = f_nonrf
-        out[x, y, z, 8] = mean_iso_adc
+        out[x, y, z, _C_FF] = f_fib
+        out[x, y, z, _C_RF] = f_res
+        out[x, y, z, _C_NRF] = f_nonrf
+        out[x, y, z, _C_ADC_ISO] = mean_iso_adc
 
         # Per-voxel angular concentration of the anisotropic weight
         # (diagnostic channel; also the modulation lever for Plan A). Computed
         # for EVERY fitted voxel, independent of fiber_threshold, so leakage
         # voxels (diffuse -> low concentration) are characterised too.
-        out[x, y, z, 29] = dominant_basin_concentration(
+        out[x, y, z, _C_CONC] = dominant_basin_concentration(
             w_aniso, n_dirs, n_pairs, neighbor_idx, fiber_dirs
         )
 
@@ -747,7 +788,7 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
             for k in range(max_fiber_populations):
                 if dir_indices[k] >= 0:
                     n_pop += 1
-            out[x, y, z, 11] = n_pop
+            out[x, y, z, _C_NPOP] = n_pop
 
             if n_pop == 1:
                 dominant_dir = fiber_dirs[dir_indices[0]]
@@ -799,10 +840,10 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         f_res = res_sc / tot_sc
                         f_nonrf = nonrf_sc / tot_sc
                         sum_iso_sc = res_sc + nonrf_sc
-                        out[x, y, z, 0] = f_fib
-                        out[x, y, z, 1] = f_res
-                        out[x, y, z, 4] = f_nonrf
-                        out[x, y, z, 8] = wd_sc / sum_iso_sc if sum_iso_sc > 1e-10 else 0.0
+                        out[x, y, z, _C_FF] = f_fib
+                        out[x, y, z, _C_RF] = f_res
+                        out[x, y, z, _C_NRF] = f_nonrf
+                        out[x, y, z, _C_ADC_ISO] = wd_sc / sum_iso_sc if sum_iso_sc > 1e-10 else 0.0
                 elif enable_direction_refinement:
                     _, AD_est, RD_est = refine_fiber_direction_cone(
                         bvals, bvecs, sig_norm, dominant_dir,
@@ -821,14 +862,12 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                 if not np.isnan(AD_est) and not np.isnan(RD_est):
                     FA = compute_fiber_fa(AD_est, RD_est)
 
-                out[x, y, z, 5] = AD_est
-                out[x, y, z, 6] = RD_est
-                out[x, y, z, 7] = FA
-                out[x, y, z, 9] = AD_est
-                out[x, y, z, 10] = RD_est
-                out[x, y, z, 12] = dominant_dir[0]
-                out[x, y, z, 13] = dominant_dir[1]
-                out[x, y, z, 14] = dominant_dir[2]
+                out[x, y, z, _C_AD1] = AD_est
+                out[x, y, z, _C_RD1] = RD_est
+                out[x, y, z, _C_FA1] = FA
+                out[x, y, z, _C_DIR1] = dominant_dir[0]
+                out[x, y, z, _C_DIR1 + 1] = dominant_dir[1]
+                out[x, y, z, _C_DIR1 + 2] = dominant_dir[2]
 
             elif n_pop >= 2:
                 # ── NEW: MRDS multi-fiber joint Stage B ──
@@ -859,35 +898,22 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                 # legacy channels 5/6/7/9/10 + new DIR1, for backward
                 # compatibility with single-fiber-era downstream code.
                 FA0 = compute_fiber_fa(AD_out[0], RD_out[0])
-                out[x, y, z, 5] = AD_out[0]
-                out[x, y, z, 6] = RD_out[0]
-                out[x, y, z, 7] = FA0
-                out[x, y, z, 9] = AD_out[0]
-                out[x, y, z, 10] = RD_out[0]
-                out[x, y, z, 12] = directions[0, 0]
-                out[x, y, z, 13] = directions[0, 1]
-                out[x, y, z, 14] = directions[0, 2]
+                out[x, y, z, _C_AD1] = AD_out[0]
+                out[x, y, z, _C_RD1] = RD_out[0]
+                out[x, y, z, _C_FA1] = FA0
+                out[x, y, z, _C_DIR1] = directions[0, 0]
+                out[x, y, z, _C_DIR1 + 1] = directions[0, 1]
+                out[x, y, z, _C_DIR1 + 2] = directions[0, 2]
 
                 # Population 2
                 FA1 = compute_fiber_fa(AD_out[1], RD_out[1])
-                out[x, y, z, 15] = fractions[1]
-                out[x, y, z, 16] = AD_out[1]
-                out[x, y, z, 17] = RD_out[1]
-                out[x, y, z, 18] = FA1
-                out[x, y, z, 19] = directions[1, 0]
-                out[x, y, z, 20] = directions[1, 1]
-                out[x, y, z, 21] = directions[1, 2]
-
-                # Population 3 (only if detected AND max_fiber_populations==3)
-                if n_pop >= 3:
-                    FA2 = compute_fiber_fa(AD_out[2], RD_out[2])
-                    out[x, y, z, 22] = fractions[2]
-                    out[x, y, z, 23] = AD_out[2]
-                    out[x, y, z, 24] = RD_out[2]
-                    out[x, y, z, 25] = FA2
-                    out[x, y, z, 26] = directions[2, 0]
-                    out[x, y, z, 27] = directions[2, 1]
-                    out[x, y, z, 28] = directions[2, 2]
+                out[x, y, z, _C_FF2] = fractions[1]
+                out[x, y, z, _C_AD2] = AD_out[1]
+                out[x, y, z, _C_RD2] = RD_out[1]
+                out[x, y, z, _C_FA2] = FA1
+                out[x, y, z, _C_DIR2] = directions[1, 0]
+                out[x, y, z, _C_DIR2 + 1] = directions[1, 1]
+                out[x, y, z, _C_DIR2 + 2] = directions[1, 2]
 
 
 @njit(parallel=True, cache=True, fastmath=True)
@@ -1000,16 +1026,16 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
         f_hin = f_hin_raw / ftot
         f_wat = f_wat_raw / ftot
 
-        out[x, y, z, 0] = f_fib
-        out[x, y, z, 1] = f_res
-        out[x, y, z, 2] = f_hin
-        out[x, y, z, 3] = f_wat
-        out[x, y, z, 4] = f_hin + f_wat
-        out[x, y, z, 8] = mean_iso_adc
+        out[x, y, z, _C_FF] = f_fib
+        out[x, y, z, _C_RF] = f_res
+        out[x, y, z, _C_HF] = f_hin
+        out[x, y, z, _C_WF] = f_wat
+        out[x, y, z, _C_NRF] = f_hin + f_wat
+        out[x, y, z, _C_ADC_ISO] = mean_iso_adc
 
         # Per-voxel angular concentration (diagnostic + Plan A modulation lever);
         # see the 2-ISO kernel note. Computed for every fitted voxel.
-        out[x, y, z, 29] = dominant_basin_concentration(
+        out[x, y, z, _C_CONC] = dominant_basin_concentration(
             w_aniso, n_dirs, n_pairs, neighbor_idx, fiber_dirs
         )
 
@@ -1024,7 +1050,7 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
             for k in range(max_fiber_populations):
                 if dir_indices[k] >= 0:
                     n_pop += 1
-            out[x, y, z, 11] = n_pop
+            out[x, y, z, _C_NPOP] = n_pop
 
             if n_pop == 1:
                 dominant_dir = fiber_dirs[dir_indices[0]]
@@ -1075,12 +1101,12 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         f_hin = hin_sc / tot_sc
                         f_wat = wat_sc / tot_sc
                         sum_iso_sc = res_sc + hin_sc + wat_sc
-                        out[x, y, z, 0] = f_fib
-                        out[x, y, z, 1] = f_res
-                        out[x, y, z, 2] = f_hin
-                        out[x, y, z, 3] = f_wat
-                        out[x, y, z, 4] = f_hin + f_wat
-                        out[x, y, z, 8] = wd_sc / sum_iso_sc if sum_iso_sc > 1e-10 else 0.0
+                        out[x, y, z, _C_FF] = f_fib
+                        out[x, y, z, _C_RF] = f_res
+                        out[x, y, z, _C_HF] = f_hin
+                        out[x, y, z, _C_WF] = f_wat
+                        out[x, y, z, _C_NRF] = f_hin + f_wat
+                        out[x, y, z, _C_ADC_ISO] = wd_sc / sum_iso_sc if sum_iso_sc > 1e-10 else 0.0
                 elif enable_direction_refinement:
                     _, AD_est, RD_est = refine_fiber_direction_cone(
                         bvals, bvecs, sig_norm, dominant_dir,
@@ -1099,14 +1125,12 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                 if not np.isnan(AD_est) and not np.isnan(RD_est):
                     FA = compute_fiber_fa(AD_est, RD_est)
 
-                out[x, y, z, 5] = AD_est
-                out[x, y, z, 6] = RD_est
-                out[x, y, z, 7] = FA
-                out[x, y, z, 9] = AD_est
-                out[x, y, z, 10] = RD_est
-                out[x, y, z, 12] = dominant_dir[0]
-                out[x, y, z, 13] = dominant_dir[1]
-                out[x, y, z, 14] = dominant_dir[2]
+                out[x, y, z, _C_AD1] = AD_est
+                out[x, y, z, _C_RD1] = RD_est
+                out[x, y, z, _C_FA1] = FA
+                out[x, y, z, _C_DIR1] = dominant_dir[0]
+                out[x, y, z, _C_DIR1 + 1] = dominant_dir[1]
+                out[x, y, z, _C_DIR1 + 2] = dominant_dir[2]
 
             elif n_pop >= 2:
                 directions = np.empty((n_pop, 3))
@@ -1131,33 +1155,21 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                 )
 
                 FA0 = compute_fiber_fa(AD_out[0], RD_out[0])
-                out[x, y, z, 5] = AD_out[0]
-                out[x, y, z, 6] = RD_out[0]
-                out[x, y, z, 7] = FA0
-                out[x, y, z, 9] = AD_out[0]
-                out[x, y, z, 10] = RD_out[0]
-                out[x, y, z, 12] = directions[0, 0]
-                out[x, y, z, 13] = directions[0, 1]
-                out[x, y, z, 14] = directions[0, 2]
+                out[x, y, z, _C_AD1] = AD_out[0]
+                out[x, y, z, _C_RD1] = RD_out[0]
+                out[x, y, z, _C_FA1] = FA0
+                out[x, y, z, _C_DIR1] = directions[0, 0]
+                out[x, y, z, _C_DIR1 + 1] = directions[0, 1]
+                out[x, y, z, _C_DIR1 + 2] = directions[0, 2]
 
                 FA1 = compute_fiber_fa(AD_out[1], RD_out[1])
-                out[x, y, z, 15] = fractions[1]
-                out[x, y, z, 16] = AD_out[1]
-                out[x, y, z, 17] = RD_out[1]
-                out[x, y, z, 18] = FA1
-                out[x, y, z, 19] = directions[1, 0]
-                out[x, y, z, 20] = directions[1, 1]
-                out[x, y, z, 21] = directions[1, 2]
-
-                if n_pop >= 3:
-                    FA2 = compute_fiber_fa(AD_out[2], RD_out[2])
-                    out[x, y, z, 22] = fractions[2]
-                    out[x, y, z, 23] = AD_out[2]
-                    out[x, y, z, 24] = RD_out[2]
-                    out[x, y, z, 25] = FA2
-                    out[x, y, z, 26] = directions[2, 0]
-                    out[x, y, z, 27] = directions[2, 1]
-                    out[x, y, z, 28] = directions[2, 2]
+                out[x, y, z, _C_FF2] = fractions[1]
+                out[x, y, z, _C_AD2] = AD_out[1]
+                out[x, y, z, _C_RD2] = RD_out[1]
+                out[x, y, z, _C_FA2] = FA1
+                out[x, y, z, _C_DIR2] = directions[1, 0]
+                out[x, y, z, _C_DIR2 + 1] = directions[1, 1]
+                out[x, y, z, _C_DIR2 + 2] = directions[1, 2]
 
 
 @njit(parallel=True, cache=True, fastmath=True)
@@ -1195,22 +1207,22 @@ def _iso_resolve_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso, 
         fad = np.zeros(2)
         frd = np.zeros(2)
         n_fib = 0
-        npop = out[x, y, z, 11]
+        npop = out[x, y, z, _C_NPOP]
         if not np.isnan(npop):
             npi = int(npop)
-            if npi >= 1 and not np.isnan(out[x, y, z, 5]):
-                fdirs[0, 0] = out[x, y, z, 12]
-                fdirs[0, 1] = out[x, y, z, 13]
-                fdirs[0, 2] = out[x, y, z, 14]
-                fad[0] = out[x, y, z, 5]
-                frd[0] = out[x, y, z, 6]
+            if npi >= 1 and not np.isnan(out[x, y, z, _C_AD1]):
+                fdirs[0, 0] = out[x, y, z, _C_DIR1]
+                fdirs[0, 1] = out[x, y, z, _C_DIR1 + 1]
+                fdirs[0, 2] = out[x, y, z, _C_DIR1 + 2]
+                fad[0] = out[x, y, z, _C_AD1]
+                frd[0] = out[x, y, z, _C_RD1]
                 n_fib = 1
-                if npi >= 2 and not np.isnan(out[x, y, z, 16]):
-                    fdirs[1, 0] = out[x, y, z, 19]
-                    fdirs[1, 1] = out[x, y, z, 20]
-                    fdirs[1, 2] = out[x, y, z, 21]
-                    fad[1] = out[x, y, z, 16]
-                    frd[1] = out[x, y, z, 17]
+                if npi >= 2 and not np.isnan(out[x, y, z, _C_AD2]):
+                    fdirs[1, 0] = out[x, y, z, _C_DIR2]
+                    fdirs[1, 1] = out[x, y, z, _C_DIR2 + 1]
+                    fdirs[1, 2] = out[x, y, z, _C_DIR2 + 2]
+                    fad[1] = out[x, y, z, _C_AD2]
+                    frd[1] = out[x, y, z, _C_RD2]
                     n_fib = 2
 
         w_out = np.zeros(n_fib + n_iso)
@@ -1245,7 +1257,7 @@ def _iso_resolve_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso, 
             # mass to iso and under-estimates FF_total -- validated). Use Stage D
             # only for the ISO SPLIT (RF/HF/WF proportions), rescaled to the
             # existing (1 - FF). FF (ch 0) and pop-2 fraction (ch 15) untouched.
-            ff_keep = out[x, y, z, 0]
+            ff_keep = out[x, y, z, _C_FF]
             if np.isnan(ff_keep):
                 ff_keep = f_fib
             iso_sum = res + hin + wat
@@ -1255,13 +1267,65 @@ def _iso_resolve_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso, 
                 hin = hin * sc
                 wat = wat * sc
         else:
-            out[x, y, z, 0] = f_fib
+            out[x, y, z, _C_FF] = f_fib
 
-        out[x, y, z, 1] = res
-        out[x, y, z, 4] = hin + wat
+        out[x, y, z, _C_RF] = res
+        out[x, y, z, _C_NRF] = hin + wat
         if use_3iso:
-            out[x, y, z, 2] = hin
-            out[x, y, z, 3] = wat
+            out[x, y, z, _C_HF] = hin
+            out[x, y, z, _C_WF] = wat
+
+
+def _fill_derived_channels(out):
+    """
+    Final vectorised pass: fill the channels that are DERIVED from the fitted
+    ones, so that no downstream consumer has to re-derive them (and so they
+    cannot silently disagree with the fractions they are built from).
+
+    * `fiber_fraction_pop1` = fiber_fraction (total) - fiber_fraction_pop2.
+      Stage A computes the pop-1 share explicitly but the kernels never stored
+      it, and Stage D then revises the TOTAL for single-fiber voxels while
+      leaving the pop-2 fraction alone -- so the only value consistent with the
+      final output is this difference, taken here, after every in-place stage.
+    * `*_weighted` = the fiber tensor averaged over the populations present,
+      weighted by their fractions. For a single-fiber voxel this is just the
+      pop-1 tensor; for a crossing it is the one number that summarises both.
+      `fiber_fa_weighted` is the FA OF the weighted tensor (an intrinsic
+      per-fiber anisotropy), NOT the average of the two FAs.
+
+    Must run AFTER Stage C, Stage D and the RF bias correction. In-place.
+    """
+    ff_t = out[..., _C_FF].astype(np.float64)
+    ff2 = np.nan_to_num(out[..., _C_FF2].astype(np.float64), nan=0.0)
+    ad1 = out[..., _C_AD1].astype(np.float64)
+    rd1 = out[..., _C_RD1].astype(np.float64)
+    ad2 = np.nan_to_num(out[..., _C_AD2].astype(np.float64), nan=0.0)
+    rd2 = np.nan_to_num(out[..., _C_RD2].astype(np.float64), nan=0.0)
+
+    ff_t = np.where(np.isfinite(ff_t), ff_t, 0.0)
+    ff1 = np.clip(ff_t - ff2, 0.0, None)
+
+    # A fiber tensor exists exactly where population 1 was estimated; the
+    # per-population block is NaN where the population is absent.
+    fiber = np.isfinite(ad1) & (ff_t > 0)
+    out[..., _C_FF1] = np.where(fiber, ff1, np.nan).astype(np.float32)
+
+    denom = np.where(ff_t > 0, ff_t, 1.0)
+    adw = (ff1 * np.nan_to_num(ad1, nan=0.0) + ff2 * ad2) / denom
+    rdw = (ff1 * np.nan_to_num(rd1, nan=0.0) + ff2 * rd2) / denom
+    adw = np.where(fiber, adw, np.nan)
+    rdw = np.where(fiber, rdw, np.nan)
+
+    md = (adw + 2.0 * rdw) / 3.0
+    num = np.sqrt((adw - md) ** 2 + 2.0 * (rdw - md) ** 2)
+    den = np.sqrt(adw ** 2 + 2.0 * rdw ** 2)
+    with np.errstate(invalid='ignore', divide='ignore'):
+        faw = np.sqrt(1.5) * num / den
+    faw = np.where(fiber & (den > 0), faw, np.nan)
+
+    out[..., _C_ADW] = adw.astype(np.float32)
+    out[..., _C_RDW] = rdw.astype(np.float32)
+    out[..., _C_FAW] = faw.astype(np.float32)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1275,18 +1339,17 @@ class DBSI_Adaptive:
     direction(s) from an exhaustive (direction x AD/RD-pair) dictionary
     under heavy sparsity regularization; Stage B estimates AD/RD/FA either
     via closed-form WLS (single fiber) or MRDS joint nonlinear
-    least-squares (2-3 crossing fibers) conditioned on the detected
+    least-squares (2 crossing fibers) conditioned on the detected
     direction(s).
 
-    NEW: `max_fiber_populations` (default 2, optionally 3) controls how
-    many simultaneous fiber populations Stage A/B will detect and report
-    per voxel. See module docstring "MULTI-FIBER SCOPE" for why the
-    default is 2 and why this toolbox does not support values beyond 3.
+    At most TWO fiber populations are detected and reported per voxel
+    (`MAX_FIBER_POPULATIONS`); this is fixed, not configurable. See module
+    docstring "MULTI-FIBER SCOPE".
 
     IMPORTANT: the MRDS extension improves AD/RD/FA/direction accuracy
     for detected crossing populations. It does NOT correct the isotropic
     or total-fiber FRACTION estimates (FF/RF/HF/WF/NRF), which are
-    computed by Stage A and are unaffected by `max_fiber_populations` --
+    computed by Stage A and are unaffected by the population count --
     see module docstring "WHAT THE MRDS EXTENSION DOES NOT DO" for the
     validation that led to this being an explicit, documented open
     limitation rather than a "fixed" behaviour.
@@ -1325,12 +1388,6 @@ class DBSI_Adaptive:
         must carry to be reported as a fiber population. Default: 0.05.
     force_n_iso : int or None
         Override automatic isotropic-model selection (2 or 3).
-    max_fiber_populations : int
-        Maximum number of simultaneous fiber populations to detect and
-        report per voxel. Default: 2. May be set to 3 for protocols with
-        sufficiently dense angular sampling (NOT automatically checked --
-        see module docstring "MULTI-FIBER SCOPE"). Values other than
-        1, 2, or 3 are rejected.
     enable_direction_refinement : bool
         Whether to refine Stage A's dominant direction estimate with a
         two-level "MRDS-lite" cone search for SINGLE-fiber voxels
@@ -1369,7 +1426,7 @@ class DBSI_Adaptive:
         'DIR3_X': 26, 'DIR3_Y': 27, 'DIR3_Z': 28,
         'CONC': 29,  # NEW — per-voxel dominant-basin angular concentration
     }
-    N_CHANNELS = 30
+    N_CHANNELS = _N_CHANNELS
     N_CHANNELS_LEGACY = 11  # for reference / external code checking shape
 
     def __init__(self, n_iso=None, lambda_aniso=None, lambda_iso=None,
@@ -1380,7 +1437,6 @@ class DBSI_Adaptive:
                  iso_range=(_DEFAULT_ISO_MIN, _DEFAULT_ISO_MAX),
                  fiber_threshold=FIBER_THRESHOLD,
                  min_weight_fraction=0.05, force_n_iso=None,
-                 max_fiber_populations=_DEFAULT_MAX_FIBER_POPULATIONS,
                  direction_peak_k=_DEFAULT_DIRECTION_PEAK_K,
                  min_separation_deg=_DEFAULT_MIN_SEPARATION_DEG,
                  min_peak_ratio=_DEFAULT_MIN_PEAK_RATIO,
@@ -1394,14 +1450,6 @@ class DBSI_Adaptive:
                  stagec_refine=_DEFAULT_STAGEC_REFINE,
                  iso_resolve=_DEFAULT_ISO_RESOLVE,
                  lambda_aniso_method='gcv'):
-        if max_fiber_populations not in (1, 2, 3):
-            raise ValueError(
-                f"max_fiber_populations must be 1, 2, or 3, got "
-                f"{max_fiber_populations!r}. See module docstring "
-                f"'MULTI-FIBER SCOPE' for why this toolbox does not "
-                f"support values beyond 3."
-            )
-
         self.n_iso = n_iso
         self.lambda_aniso = lambda_aniso
         self.lambda_iso = lambda_iso
@@ -1415,7 +1463,6 @@ class DBSI_Adaptive:
         self.fiber_threshold = fiber_threshold
         self.min_weight_fraction = min_weight_fraction
         self.force_n_iso = force_n_iso
-        self.max_fiber_populations = max_fiber_populations
         self.direction_peak_k = direction_peak_k
         self.min_separation_deg = min_separation_deg
         self.min_peak_ratio = min_peak_ratio
@@ -1457,12 +1504,9 @@ class DBSI_Adaptive:
         Fit the v3 hybrid two-stage adaptive DBSI model (+ MRDS
         multi-fiber extension) to 4D diffusion MRI data.
 
-        Parameters are unchanged from the pre-MRDS release EXCEPT for the
-        constructor's new `max_fiber_populations`; see class docstring.
-
         Returns
         -------
-        results : ndarray (X, Y, Z, 29)
+        results : ndarray (X, Y, Z, 27)
             See module docstring "Output Channels".
         model_mode : int
             2 or 3.
@@ -1521,8 +1565,7 @@ class DBSI_Adaptive:
               f"({'RF + HF + WF' if use_3iso else 'RF + NRF (HF+WF merged)'})")
         print(f"  b_max detected: {b_max:.0f} s/mm^2  |  "
               f"Non-zero shells: {n_shells}")
-        print(f"  Max fiber populations: {self.max_fiber_populations} "
-              f"{'(default)' if self.max_fiber_populations == _DEFAULT_MAX_FIBER_POPULATIONS else '(OPT-IN — confirm protocol angular density supports this, see module docstring)'}")
+        print(f"  Max fiber populations: {MAX_FIBER_POPULATIONS} (fixed)")
 
         # ── Stage A dictionary autoconfiguration ─────────────────────────
         print("\n1. Autoconfiguring Stage A detection dictionary...")
@@ -1569,10 +1612,9 @@ class DBSI_Adaptive:
             print(f"   Dictionary spacing: {self.hemisphere_spacing_deg_:.2f} deg  |  "
                   f"Level 1 cone: +/-{np.degrees(_cone1):.2f} deg ({_n1} candidates)  |  "
                   f"Level 2 cone: +/-{np.degrees(_cone2):.2f} deg ({_n2} candidates)")
-            if self.max_fiber_populations >= 2:
-                print(f"   NOTE: n_pop>=2 voxels use Stage A's RAW grid directions as "
-                      f"MRDS joint Stage B input (no per-population cone refinement in "
-                      f"this release — see module docstring scope note).")
+            print(f"   NOTE: n_pop==2 voxels use Stage A's RAW grid directions as "
+                  f"MRDS joint Stage B input (no per-population cone refinement in "
+                  f"this release — see module docstring scope note).")
         else:
             _cone1, _n1, _cone2, _n2 = 0.0, 1, 0.0, 0
             print(f"\n   MRDS-lite direction refinement: DISABLED "
@@ -1761,7 +1803,7 @@ class DBSI_Adaptive:
         )
         print(f"   Compartments: {_thresh_str}")
         print(f"   NOTE: isotropic/fiber FRACTIONS above are Stage A's raw NNLS "
-              f"output regardless of max_fiber_populations -- the MRDS extension "
+              f"output regardless of the fiber-population count -- the MRDS extension "
               f"does not revise them (see module docstring).")
 
         # ── Monte Carlo cross-check (optional, does not change lambda) ─────
@@ -1842,10 +1884,8 @@ class DBSI_Adaptive:
         # ── Data-driven fiber-detection concentration gate (MC null) ────────
         # Set the concentration gate from a protocol/dictionary/lambda/SNR-
         # specific pure-isotropic NULL rather than the fixed default. Always on
-        # during calibration for max_fiber_populations>=2; falls back to the
-        # constructor default otherwise.
-        if (run_calibration and calibrate_concentration_gate
-                and self.max_fiber_populations >= 2):
+        # during calibration; falls back to the constructor default otherwise.
+        if run_calibration and calibrate_concentration_gate:
             _iso_d_lo = max(self.iso_range[0], 0.1e-3)
             _gate_mc, _gate_diag = calibrate_concentration_gate_mc(
                 bvals, At, AtA_reg, n_aniso_cols, self.n_dirs, n_pairs,
@@ -1883,19 +1923,15 @@ class DBSI_Adaptive:
                   f"FF rows {np.round(_ff_rows, 2).tolist()}, RF_true grid "
                   f"{list(_RF_CORRECTION_RF_LEVELS)} -> table built.")
 
-        # ── Allocate output (EXTENDED: 29 channels) ─────────────────────────
+        # ── Allocate output (27 channels — see module docstring) ────────────
         results = np.zeros(data.shape[:3] + (self.N_CHANNELS,), dtype=np.float32)
-        results[..., 5] = np.nan
-        results[..., 6] = np.nan
-        results[..., 7] = np.nan
-        results[..., 9] = np.nan
-        results[..., 10] = np.nan
-        results[..., 11] = np.nan  # N_POP: NaN outside fiber_threshold, not 0
-        results[..., 12:29] = np.nan  # DIR1 + pop2/pop3 block, all NaN by default
-        results[..., 29] = np.nan  # CONC: dominant-basin concentration (diagnostic)
+        # NaN defaults: N_POP (NaN outside fiber_threshold, NOT 0 -- the two
+        # states mean different things, see `output_map_names`), the whole
+        # per-population block, the FF-weighted aggregates, and the diagnostic.
+        results[..., _C_NPOP:] = np.nan
         if not use_3iso:
-            results[..., 2] = np.nan
-            results[..., 3] = np.nan
+            results[..., _C_HF] = np.nan
+            results[..., _C_WF] = np.nan
 
         # ── Parallel voxel fitting ─────────────────────────────────────────
         n_voxels = len(coords)
@@ -1905,13 +1941,12 @@ class DBSI_Adaptive:
         print(f"\n7. Fitting {n_voxels:,} voxels "
               f"[{model_mode}-ISO model, Stage A + Stage B "
               f"(single-fiber closed-form / MRDS joint up to "
-              f"{self.max_fiber_populations} populations)]...")
-        if self.max_fiber_populations >= 2:
-            print(f"   Population detection: basin-mass local-maxima + angular "
-                  f"NMS (min separation {self.min_separation_deg:.0f} deg, "
-                  f"min basin mass {self.min_weight_fraction:.2f} of aniso weight, "
-                  f"2nd pop >= {self.min_peak_ratio:.2f} x dominant, "
-                  f"concentration gate {self.min_dominant_concentration:.2f})")
+              f"{MAX_FIBER_POPULATIONS} populations)]...")
+        print(f"   Population detection: basin-mass local-maxima + angular "
+              f"NMS (min separation {self.min_separation_deg:.0f} deg, "
+              f"min basin mass {self.min_weight_fraction:.2f} of aniso weight, "
+              f"2nd pop >= {self.min_peak_ratio:.2f} x dominant, "
+              f"concentration gate {self.min_dominant_concentration:.2f})")
 
         if self.lambda_aniso_conc_mod:
             print(f"   Plan A concentration modulation: ENABLED "
@@ -1953,7 +1988,7 @@ class DBSI_Adaptive:
                     self.min_dominant_concentration,
                     self.enable_direction_refinement,
                     _cone1, _n1, _cone2, _n2,
-                    neighbor_idx, self.max_fiber_populations, results,
+                    neighbor_idx, MAX_FIBER_POPULATIONS, results,
                     float(self.lambda_aniso), bool(self.lambda_aniso_conc_mod),
                     float(self.conc_mod_c_lo), float(self.conc_mod_c_hi),
                     float(self.conc_mod_gain),
@@ -1964,8 +1999,8 @@ class DBSI_Adaptive:
                 pbar.update(end - start)
 
         elapsed = time.time() - t0
-        n_fitted = int(np.sum(~np.isnan(results[..., 5]) & mask))
-        n_multi = int(np.sum((results[..., 11] >= 2) & mask))
+        n_fitted = int(np.sum(~np.isnan(results[..., _C_AD1]) & mask))
+        n_multi = int(np.sum((results[..., _C_NPOP] >= 2) & mask))
         pct = n_fitted / n_voxels * 100 if n_voxels > 0 else 0.0
         pct_multi = n_multi / n_fitted * 100 if n_fitted > 0 else 0.0
 
@@ -1996,14 +2031,14 @@ class DBSI_Adaptive:
         # NRF in 2-ISO) so FF + RF + NRF stays consistent.
         if self.rf_response_table_ is not None:
             _ff_rows, _rf_lv, _rf_grid = self.rf_response_table_
-            _m = mask & ~np.isnan(results[..., 1]) & ~np.isnan(results[..., 0])
+            _m = mask & ~np.isnan(results[..., _C_RF]) & ~np.isnan(results[..., _C_FF])
             if np.any(_m):
-                rf_raw = results[..., 1][_m].astype(np.float64)
-                ff_raw = results[..., 0][_m].astype(np.float64)
+                rf_raw = results[..., _C_RF][_m].astype(np.float64)
+                ff_raw = results[..., _C_FF][_m].astype(np.float64)
                 rf_corr = apply_rf_correction(rf_raw, ff_raw, _ff_rows, _rf_lv, _rf_grid)
                 delta = rf_corr - rf_raw
-                _rf_slice = results[..., 1]; _rf_slice[_m] = rf_corr.astype(np.float32)
-                _nrf_ch = 2 if use_3iso else 4
+                _rf_slice = results[..., _C_RF]; _rf_slice[_m] = rf_corr.astype(np.float32)
+                _nrf_ch = _C_HF if use_3iso else _C_NRF
                 _nrf_slice = results[..., _nrf_ch]
                 _nrf_slice[_m] = np.clip(_nrf_slice[_m].astype(np.float64) - delta,
                                          0.0, 1.0).astype(np.float32)
@@ -2018,6 +2053,24 @@ class DBSI_Adaptive:
                           f"{_RF_DEADZONE_EST:.2f} (response dead-zone): their restricted "
                           f"signal is below the b-max detection limit, so the corrected "
                           f"value is a lower bound, not a reliable point estimate.")
+
+        # ── Derived channels (pop-1 fraction + FF-weighted tensor) ──────────
+        # Last, because every stage above may still revise the fractions.
+        _fill_derived_channels(results)
+
+        # ── Fit quality (R2 / RMSE), as output channels ─────────────────────
+        # Not optional: it is a forward evaluation of the model that was just
+        # fitted, it costs a small fraction of the fit itself, and a set of
+        # output maps nobody can judge the fit of is not a finished result.
+        # Imported here rather than at module scope because `fit_quality`
+        # imports this module's channel constants -- the deferred import is
+        # what keeps that one-directional.
+        from .fit_quality import compute_fit_quality
+        results[..., _C_R2], results[..., _C_RMSE] = compute_fit_quality(
+            data, bvals, bvecs, mask, results, model_mode,
+            fiber_threshold=self.fiber_threshold, verbose=True,
+        )
+
         print(f"\n{'='*70}\n")
 
         return results, model_mode
@@ -2026,14 +2079,66 @@ class DBSI_Adaptive:
     @staticmethod
     def output_map_names(model_mode):
         """
-        Return the ordered list of output map file names for the given
-        model mode. Channels 0-10 unchanged from the pre-MRDS release;
-        11-28 are the new MRDS/multi-population block. Names ending in
-        '_NaN' mark channels invalid in the given model_mode OR (for the
-        pop2/pop3 block) channels that are frequently/always NaN
-        depending on max_fiber_populations and per-voxel N_POP -- callers
-        should still check for NaN per-voxel rather than assuming a
-        channel is entirely absent.
+        Return the ordered list of output channel names for the given model
+        mode. The order IS the channel order of the `results` array; the
+        `_C_*` module constants are the single source of truth for the indices
+        and this function must stay in step with them.
+
+        Names ending in '_NaN' mark channels that are invalid for the given
+        model_mode (hindered/water in 2-ISO). Every other channel can still be
+        NaN per-voxel -- the population-2 block is NaN wherever the voxel has
+        no second fiber, which is most of the brain -- so callers must check
+        per-voxel rather than assume a channel is entirely present or absent.
+
+        LAYOUT (27 channels)::
+
+            0      fiber_fraction              TOTAL anisotropic fraction
+            1-4    restricted/hindered/water/nonrestricted fractions
+            5      mean_iso_adc
+            6      n_fiber_populations         three-state, see below
+            7-13   population 1: fraction, AD, RD, FA, dir(x,y,z)
+            14-20  population 2: fraction, AD, RD, FA, dir(x,y,z)
+            21-23  FF-weighted AD, RD, FA over the populations present
+            24-26  diagnostics: dominant_basin_concentration, fit_r2, fit_rmse
+
+        There is no population 3: the toolbox resolves at most TWO fiber
+        populations per voxel (`MAX_FIBER_POPULATIONS`), which is the ceiling
+        the targeted clinical angular sampling supports. `ad_linear`/`rd_linear`
+        are gone too -- they were byte-identical copies of the population-1
+        diffusivities.
+
+        NaN/0 CONVENTION, by block:
+
+        * **Compartment fractions (0-4)** use 0 for "compartment absent". 0 is
+          the correct physical value and the fractions stay summable, so these
+          need no companion mask.
+        * **The per-population block (7-20)** uses NaN for "this population is
+          absent" -- including its fraction. This is deliberately NOT the
+          fraction convention above: 0 would be indistinguishable from a
+          detected population that carries no weight.
+        * **The weighted aggregates (21-23)** are NaN wherever no fiber tensor
+          was estimated, for the same reason as the tensors themselves: 0 is a
+          physically plausible diffusivity and cannot serve as a sentinel.
+        * **`fit_r2` / `fit_rmse` (25-26)** are NaN outside the fitted mask.
+          They are filled by `fit()` itself, from a forward evaluation of the
+          model it just fitted -- so the maps always ship with the means to
+          judge them.
+        * `fit_quality.save_output_maps` writes the matching validity mask
+          (`fiber_valid.nii.gz`). It is needed as soon as the maps are
+          resampled: linear interpolation turns NaN into 0 and silently
+          depresses the result in proportion to the local NaN density.
+
+        `n_fiber_populations` (channel 6) is THREE-STATE, and the states are
+        NOT interchangeable::
+
+            NaN   fiber_fraction <= fiber_threshold -- no fiber compartment was
+                  attempted in this voxel;
+            0     fiber compartment present, but select_dominant_directions
+                  rejected every candidate peak (concentration gate,
+                  min_weight_fraction, angular separation). Fiber signal that
+                  could not be resolved into a direction: these voxels have
+                  fiber_fraction > 0 and AD/RD = NaN;
+            1, 2  number of resolved fiber populations.
         """
         base_3iso = [
             'fiber_fraction',
@@ -2041,12 +2146,7 @@ class DBSI_Adaptive:
             'hindered_fraction',
             'water_fraction',
             'nonrestricted_fraction',
-            'axial_diffusivity',
-            'radial_diffusivity',
-            'fiber_fa',
             'mean_iso_adc',
-            'ad_linear',
-            'rd_linear',
         ]
         base_2iso = [
             'fiber_fraction',
@@ -2054,27 +2154,26 @@ class DBSI_Adaptive:
             'hindered_fraction_NaN',
             'water_fraction_NaN',
             'nonrestricted_fraction',
-            'axial_diffusivity',
-            'radial_diffusivity',
-            'fiber_fa',
             'mean_iso_adc',
-            'ad_linear',
-            'rd_linear',
         ]
-        mrds_block = [
+        fiber_block = [
             'n_fiber_populations',
+            'fiber_fraction_pop1',
+            'axial_diffusivity_pop1',
+            'radial_diffusivity_pop1',
+            'fiber_fa_pop1',
             'dir1_x', 'dir1_y', 'dir1_z',
             'fiber_fraction_pop2',
             'axial_diffusivity_pop2',
             'radial_diffusivity_pop2',
             'fiber_fa_pop2',
             'dir2_x', 'dir2_y', 'dir2_z',
-            'fiber_fraction_pop3',
-            'axial_diffusivity_pop3',
-            'radial_diffusivity_pop3',
-            'fiber_fa_pop3',
-            'dir3_x', 'dir3_y', 'dir3_z',
+            'axial_diffusivity_weighted',
+            'radial_diffusivity_weighted',
+            'fiber_fa_weighted',
             'dominant_basin_concentration',
+            'fit_r2',
+            'fit_rmse',
         ]
         base = base_3iso if model_mode == 3 else base_2iso
-        return base + mrds_block
+        return base + fiber_block

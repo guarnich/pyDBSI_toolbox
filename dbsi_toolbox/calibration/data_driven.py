@@ -459,7 +459,28 @@ def build_rf_response_table(bvals, bvecs, At, AtA_reg, n_aniso_cols, iso_grid,
                             fiber_rd_range=(0.1e-3, 0.8e-3)):
     """Build the per-dataset RESPONSE FUNCTION for the restricted fraction.
 
-    WHY (data-driven bias correction) --------------------------------------
+    SUPERSEDED BY STAGE C / STAGE D -- OFF BY DEFAULT SINCE 2026-09-19 -------
+    This table measures RF recovery through Stage A's over-complete NNLS ALONE
+    (see the `nnls_coordinate_descent` call below). That was the whole pipeline
+    when it was written, on 2026-07-22. Stage C landed on 07-28 and Stage D on
+    07-29, and both re-estimate the fractions precisely to fix the RF
+    under-recovery this table was built to invert -- so the inverse now gets
+    applied to a value that no longer carries the bias, and double-corrects.
+
+    Measured on 320 synthetic voxels across 8 tissue classes with true RF from
+    0.02 to 0.50, SNR 30 (`experiments/exp_rf_correction.py`): mean |RF error|
+    0.049 with the correction OFF, 0.121 with it ON -- 2.45x WORSE. It is a
+    systematic inflation, not added variance: mean RF 0.149 -> 0.274, and
+    healthy WM goes from 0.076 (true 0.08) to 0.272. The only class it helps is
+    the one at the top of the RF grid.
+
+    The routine is kept, not deleted: the transfer it measures is real for a
+    Stage-A-only pipeline, and rebuilding it to run through Stage C/D would
+    make it valid again. Until someone does that, leave
+    `correct_restricted_fraction=False` -- which is what the 5-protocol
+    validation always used.
+
+    ORIGINAL RATIONALE (accurate for the Stage-A-only pipeline) -------------
     At clinical b-max the estimated restricted fraction (RF) is systematically
     UNDER-recovered: the D~0.15e-3 signal is partly absorbed by the hindered
     band (and, in fiber voxels, the fiber block). An RF_true -> RF_est transfer

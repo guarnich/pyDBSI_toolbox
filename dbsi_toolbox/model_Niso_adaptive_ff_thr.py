@@ -439,14 +439,35 @@ _DEFAULT_CONC_MOD_GAIN = 8.0
 # stagec_refine=False (or --disable-stagec on the CLI).
 _DEFAULT_STAGEC_REFINE = True
 
-# EXPERIMENTAL (default OFF): run the MRDS-lite cone refinement BEFORE Stage C
-# and hand Stage C the refined direction, instead of the two being mutually
-# exclusive. They address orthogonal problems -- the cone fixes the angular
-# quantisation of Stage A's fixed dictionary, Stage C fixes the fraction/tensor
-# bias -- so in principle they compose. Whether Stage C is as sensitive to
-# direction error as the closed-form Stage B it replaced has never been
-# measured; until it has, this stays opt-in.
-_DEFAULT_STAGEC_DIR_REFINE = False
+# Run the MRDS-lite cone refinement BEFORE Stage C and hand Stage C the refined
+# direction. The two used to sit in mutually exclusive branches, so with Stage C
+# on by default the cone never ran and a single fiber's direction stayed on
+# Stage A's discrete grid. They address orthogonal problems -- the cone fixes
+# angular quantisation, Stage C fixes the fraction/tensor bias -- so they
+# compose.
+#
+# VALIDATED 2026-09-19 (`experiments/exp_cone_multiproto.py`): 3 protocols
+# (n_dirs 36/62/78, i.e. 22.8/17.2/15.4 deg grid spacing) x 3 SNR (20/30/50),
+# 200 synthetic single-fiber voxels each, AD and RD swept per voxel, true
+# directions uniform on the hemisphere so they fall between grid nodes. Paired,
+# mean absolute error, refined vs unrefined:
+#
+#   AD  improves in 9/9 conditions, median -18.5% (worst case -5.2%)
+#   RD  improves in 9/9,            median -10.1%
+#   RF  improves in 9/9,            median  -8.7%
+#   FF  improves in 7/9,            median  -8.8% (worst case +2.1%)
+#   angular error 7.21-10.82 deg -> 1.78-5.60 deg, always
+#
+# Runtime cost is within measurement noise. The gain scales with grid spacing
+# (P4-like -20.5%, P3-like -16.7%, P1-like -12.9%), which is the mechanism
+# working as expected. It does NOT scale the way first predicted with SNR: at
+# SNR 20 it drops to -7.8% against -22.8% at SNR 30, because the baseline AD
+# error is noise-dominated there (21.2% vs 16.9%) and removing a fixed
+# systematic term buys proportionally less.
+#
+# Single-fiber voxels only: crossings use Stage A's raw grid directions either
+# way. Synthetic only -- not yet confirmed on real data.
+_DEFAULT_STAGEC_DIR_REFINE = True
 _STAGEC_AD_MIN = 0.6e-3
 _STAGEC_AD_MAX = 2.6e-3
 _STAGEC_N_AD = 14
@@ -803,8 +824,8 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                 dominant_dir = fiber_dirs[dir_indices[0]]
 
                 if stagec_enabled:
-                    # EXPERIMENTAL: refine the direction first and hand the
-                    # refined one to Stage C (see _DEFAULT_STAGEC_DIR_REFINE).
+                    # Refine the direction first, then hand the refined one to
+                    # Stage C (see _DEFAULT_STAGEC_DIR_REFINE).
                     if stagec_dir_refine and enable_direction_refinement:
                         dominant_dir, _, _ = refine_fiber_direction_cone(
                             bvals, bvecs, sig_norm, dominant_dir,
@@ -1078,8 +1099,8 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                 dominant_dir = fiber_dirs[dir_indices[0]]
 
                 if stagec_enabled:
-                    # EXPERIMENTAL: refine the direction first and hand the
-                    # refined one to Stage C (see _DEFAULT_STAGEC_DIR_REFINE).
+                    # Refine the direction first, then hand the refined one to
+                    # Stage C (see _DEFAULT_STAGEC_DIR_REFINE).
                     if stagec_dir_refine and enable_direction_refinement:
                         dominant_dir, _, _ = refine_fiber_direction_cone(
                             bvals, bvecs, sig_norm, dominant_dir,
@@ -1536,7 +1557,7 @@ class DBSI_Adaptive:
            run_n_iso_sweep_diagnostic=False,
            calibrate_concentration_gate=True,
            concentration_gate_percentile=_CONCENTRATION_GATE_PERCENTILE,
-           correct_restricted_fraction=True):
+           correct_restricted_fraction=False):
         """
         Fit the v3 hybrid two-stage adaptive DBSI model (+ MRDS
         multi-fiber extension) to 4D diffusion MRI data.

@@ -1048,11 +1048,16 @@ def iso_fraction_resolve(sig_norm, bvals, bvecs, fdirs, fad, frd, n_fib,
 # written. It no longer is: Stage C (`stagec_varpro_single_fiber`) took that
 # role and is ON by default, and in the kernel the two sit in mutually
 # exclusive branches -- `if stagec_enabled: ... elif
-# enable_direction_refinement: ...`. With the default configuration this
-# refinement therefore DOES NOT RUN, and a single fiber's stored direction
-# is Stage A's raw grid node. The `stagec_dir_refine` flag (experimental,
-# default OFF) composes the two instead, refining the direction and handing
-# the refined one to Stage C.
+# enable_direction_refinement: ...` -- so with the default configuration this
+# refinement did not run at all, and a single fiber's stored direction was
+# Stage A's raw grid node.
+#
+# RESOLVED 2026-09-19: `stagec_dir_refine` (now default ON) composes the two
+# instead. The cone refines the direction and Stage C is then fitted at the
+# refined one. Validated across 3 protocols x 3 SNR -- AD error improves in
+# 9/9 conditions, median -18.5% -- see `_DEFAULT_STAGEC_DIR_REFINE` in
+# model_Niso_adaptive_ff_thr.py for the full table. The elif branch below is
+# still what runs when Stage C is explicitly disabled.
 #
 # DATA-DRIVEN PARAMETERISATION (no fixed "magic number" cone angles or
 # candidate counts)

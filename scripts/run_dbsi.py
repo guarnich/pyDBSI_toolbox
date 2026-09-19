@@ -25,8 +25,6 @@ CHANGES FROM v2
   against whichever (lambda_aniso, lambda_iso) was selected, WITHOUT
   changing it — a sanity check, recommended at least once per new
   protocol/dataset type.
-- New: `--max-fiber-populations` (default 2), previously not reachable
-  from the CLI at all.
 
 OUTPUT LAYOUT (changed)
 -----------------------
@@ -36,12 +34,15 @@ inline loop private to this script. Consequences:
 
 - files are named `NN_<channel>.nii.gz` (channel index prefix), NOT
   `dbsi_<channel>.nii.gz` as before;
-- exact-duplicate channels (`ad_linear`, `rd_linear`, and in 3-ISO
-  `nonrestricted_fraction`) are no longer written;
-- the channels of fiber populations above `--max-fiber-populations` are
-  no longer written — they are always entirely NaN;
-- `fiber_valid.nii.gz` (validity mask for the fiber-tensor channels) and
-  `aggregate_maps/` are written as part of the normal run.
+- `nonrestricted_fraction` is not written in 3-ISO mode, where it is
+  hindered + water by construction;
+- `fiber_valid.nii.gz`, the validity mask for the fiber-tensor channels,
+  is written as part of the normal run.
+
+The output layout itself changed too: at most TWO fiber populations, each
+with its own fraction/AD/RD/FA/direction, plus the FF-weighted tensor —
+25 channels, no pop3, no ad_linear/rd_linear. See
+`DBSI_Adaptive.output_map_names`.
 """
 
 import argparse
@@ -76,12 +77,6 @@ def main():
                              "that leaks isotropic signal into fiber_fraction; safe band [2.0, 2.16]).")
     parser.add_argument("--min-weight-fraction", type=float, dest="min_weight_fraction", default=0.05,
                         help="Stage A direction-selection threshold. Default: 0.05.")
-    parser.add_argument("--max-fiber-populations", type=int, dest="max_fiber_populations",
-                        choices=[1, 2, 3], default=2,
-                        help="Maximum number of fiber populations resolved per voxel. Default: 2 "
-                             "(the practical ceiling for clinical angular sampling). The output "
-                             "maps of populations above this value are never estimated, and are "
-                             "not written to disk.")
     parser.add_argument("--disable-iso-resolve", dest="disable_iso_resolve", action="store_true",
                         help="Disable the Stage D final constrained iso fraction re-solve. It is "
                              "ON by default: for every voxel it re-estimates the compartment "
@@ -166,7 +161,6 @@ def main():
         n_rd=args.n_rd,
         anisotropy_ratio=args.anisotropy_ratio,
         min_weight_fraction=args.min_weight_fraction,
-        max_fiber_populations=args.max_fiber_populations,
         force_n_iso=args.force_n_iso,
         enable_direction_refinement=not args.disable_direction_refinement,
         target_angular_resolution_deg=args.target_angular_resolution_deg,
@@ -193,15 +187,12 @@ def main():
               f"{model.mc_crosscheck_report_['composite']:.4f}")
 
     print("\nSaving outputs...")
-    saved = save_output_maps(results, names, affine, args.out,
-                             max_fiber_populations=args.max_fiber_populations)
+    saved = save_output_maps(results, names, affine, args.out)
     skipped = [n for n in names if n not in saved]
     print(f"  {len(saved)} channel maps -> {args.out}/NN_<channel>.nii.gz")
     print(f"  fiber-tensor validity mask -> {args.out}/fiber_valid.nii.gz")
-    print(f"  aggregate fiber maps -> {args.out}/aggregate_maps/")
-    print(f"  Skipped {len(skipped)} channels (invalid in {model_mode}-ISO mode, "
-          f"exact duplicates, or populations above max_fiber_populations="
-          f"{args.max_fiber_populations}): {', '.join(skipped)}")
+    print(f"  Skipped {len(skipped)} channels (invalid in {model_mode}-ISO mode "
+          f"or exact duplicates): {', '.join(skipped)}")
 
     if args.compute_r2:
         print("\nComputing fit quality (R2 and RMSE)...")

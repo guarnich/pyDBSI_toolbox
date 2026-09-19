@@ -63,29 +63,19 @@ _D_WAT_NOM = 3.05e-3
 
 _ISO_ADC_MAX = 3.5e-3
 
-_CH_FF = 0
-_CH_RF = 1
-_CH_HF = 2
-_CH_WF = 3
-_CH_NRF = 4
-_CH_AD = 5
-_CH_RD = 6
-_CH_ADC_ISO = 8
-
-# MRDS multi-population block (see model output_map_names). Used by the
-# multi-population reconstruction so genuine crossings are modelled with ALL
-# their populations (stored directions + per-population fractions/tensors),
-# rather than only the dominant one.
-_CH_NPOP = 11
-_CH_DIR1 = 12          # dir1_x, dir1_y, dir1_z = 12, 13, 14
-_CH_FF2 = 15
-_CH_AD2 = 16
-_CH_RD2 = 17
-_CH_DIR2 = 19          # dir2_x, dir2_y, dir2_z = 19, 20, 21
-_CH_FF3 = 22
-_CH_AD3 = 23
-_CH_RD3 = 24
-_CH_DIR3 = 26          # dir3_x, dir3_y, dir3_z = 26, 27, 28
+# Channel indices come from the model, which is the single source of truth for
+# the output layout -- they used to be redeclared here, which is exactly how a
+# layout change silently corrupts a downstream reader. The multi-population
+# reconstruction below needs the whole per-population block so that genuine
+# crossings are modelled with BOTH their populations (stored directions and
+# per-population fractions/tensors), not only the dominant one.
+from .model_Niso_adaptive_ff_thr import (          # noqa: E402
+    _C_FF as _CH_FF, _C_RF as _CH_RF, _C_HF as _CH_HF, _C_WF as _CH_WF,
+    _C_NRF as _CH_NRF, _C_ADC_ISO as _CH_ADC_ISO, _C_NPOP as _CH_NPOP,
+    _C_FF1 as _CH_FF1, _C_AD1 as _CH_AD, _C_RD1 as _CH_RD, _C_DIR1 as _CH_DIR1,
+    _C_FF2 as _CH_FF2, _C_AD2 as _CH_AD2, _C_RD2 as _CH_RD2,
+    _C_DIR2 as _CH_DIR2,
+)
 
 
 @njit(cache=True, fastmath=True)
@@ -399,36 +389,28 @@ def _quality_kernel_multipop(data, coords, bvals, bvecs, params,     # to detect
             D_hin = 0.0
             D_wat = 0.0
 
-        # fiber populations (dominant + MRDS pop2/pop3), from stored channels
+        # fiber populations (up to MAX_FIBER_POPULATIONS = 2), from stored
+        # channels. FF_pop1 is now stored, not re-derived here.
         ad1 = params[x, y, z, _CH_AD]
         rd1 = params[x, y, z, _CH_RD]
+        ff1 = params[x, y, z, _CH_FF1]
         ff2 = params[x, y, z, _CH_FF2]
-        ff3 = params[x, y, z, _CH_FF3]
+        if np.isnan(ff1):
+            ff1 = 0.0
         if np.isnan(ff2):
             ff2 = 0.0
-        if np.isnan(ff3):
-            ff3 = 0.0
-        ff1 = ff_tot_v - ff2 - ff3
-        if ff1 < 0.0:
-            ff1 = 0.0
         ad2 = params[x, y, z, _CH_AD2]
         rd2 = params[x, y, z, _CH_RD2]
-        ad3 = params[x, y, z, _CH_AD3]
-        rd3 = params[x, y, z, _CH_RD3]
         d1x = params[x, y, z, _CH_DIR1]
         d1y = params[x, y, z, _CH_DIR1 + 1]
         d1z = params[x, y, z, _CH_DIR1 + 2]
         d2x = params[x, y, z, _CH_DIR2]
         d2y = params[x, y, z, _CH_DIR2 + 1]
         d2z = params[x, y, z, _CH_DIR2 + 2]
-        d3x = params[x, y, z, _CH_DIR3]
-        d3y = params[x, y, z, _CH_DIR3 + 1]
-        d3z = params[x, y, z, _CH_DIR3 + 2]
 
         has_fiber = ff_tot_v > fiber_threshold
         use1 = has_fiber and (ff1 > 1e-6) and (not np.isnan(ad1)) and (not np.isnan(d1x))
         use2 = has_fiber and (ff2 > 1e-6) and (not np.isnan(ad2)) and (not np.isnan(d2x))
-        use3 = has_fiber and (ff3 > 1e-6) and (not np.isnan(ad3)) and (not np.isnan(d3x))
 
         s_mean = 0.0
         for i in range(N):
@@ -458,9 +440,6 @@ def _quality_kernel_multipop(data, coords, bvals, bvecs, params,     # to detect
             if use2:
                 c2 = bx * d2x + by * d2y + bz * d2z
                 s_pred += ff2 * np.exp(-b * (rd2 + (ad2 - rd2) * c2 * c2))
-            if use3:
-                c3 = bx * d3x + by * d3y + bz * d3z
-                s_pred += ff3 * np.exp(-b * (rd3 + (ad3 - rd3) * c3 * c3))
 
             sn = sig[i] / s0
             res = sn - s_pred
@@ -580,7 +559,7 @@ def compute_fit_quality(data, bvals, bvecs, mask, results, model_mode,
         print(f"    > 0.90 : {np.mean(r2_vals > 0.90)*100:.1f}%")
         print(f"    < 0.90 : {np.mean(r2_vals < 0.90)*100:.1f}%  <- inspect "
               f"(genuine misfit now that all populations are modelled: low SNR, "
-              f"partial volume, or >max_fiber_populations configurations)")
+              f"partial volume, or >2-population configurations)")
         print(f"\n  RMSE summary (fraction of S0):")
         print(f"    Median : {np.median(rmse_vals):.4f}")
         print(f"    Mean   : {np.mean(rmse_vals):.4f}")
@@ -605,159 +584,32 @@ def save_fit_quality(r2_map, rmse_map, affine, output_dir):
 
     return paths
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# AGGREGATE VOXEL-LEVEL FIBER MAPS (Map A) — derived, no re-fit
+# OUTPUT MAP SAVING
 # ─────────────────────────────────────────────────────────────────────────────
 
-def compute_aggregate_fiber_maps(results, channel_names):
-    """
-    Compact voxel-level AGGREGATE fiber maps across all detected populations,
-    derived purely from the existing per-population output channels (no re-fit).
-
-    DBSI stores the fiber tensor of the DOMINANT population (axial_/radial_
-    diffusivity, fiber_fa) plus, for crossings, the secondary/tertiary tensors
-    and fractions (…_pop2/…_pop3). The scalar `fiber_fraction` (channel 0) is
-    ALREADY the TOTAL anisotropic fraction (Stage A); the per-population
-    fractions are its MRDS split, so FF_pop1 = fiber_fraction − FF_pop2 − FF_pop3
-    (verified ≥ 0 on real data). This returns:
-
-      fiber_fraction_total        : total fiber fraction (identically channel 0,
-                                    surfaced here as the aggregate FF).
-      axial_diffusivity_weighted  : fraction-weighted mean of the populations'
-                                    axial diffusivity.
-      radial_diffusivity_weighted : fraction-weighted mean of the populations'
-                                    radial diffusivity.
-      fiber_fa_weighted           : FA of the fraction-weighted mean fiber
-                                    tensor — an INTRINSIC, orientation-
-                                    INDEPENDENT anisotropy ("how anisotropic are
-                                    this voxel's fibers, on average"). It does
-                                    NOT drop at crossings the way an
-                                    orientation-averaged (DTI-like) FA would;
-                                    that is deliberate.
-
-    In single-fiber voxels the weighted maps reduce EXACTLY to the dominant
-    tensor. Values are NaN where no fiber is present.
-
-    Parameters
-    ----------
-    results : ndarray (X, Y, Z, C)
-        DBSI output maps for one dataset.
-    channel_names : sequence of str
-        Channel names for `results` — DBSI_Adaptive.output_map_names(mode),
-        or the `channel_names` stored alongside a saved output_maps npz.
-
-    Returns
-    -------
-    dict {name: ndarray (X, Y, Z), float32}
-    """
-    names = list(channel_names)
-    shape3d = results.shape[:3]
-
-    def ch(name, zero_if_missing=False):
-        if name in names:
-            return results[..., names.index(name)].astype(np.float64)
-        if zero_if_missing:
-            return np.zeros(shape3d, np.float64)
-        raise KeyError(f"channel '{name}' not found in channel_names")
-
-    FFt = ch('fiber_fraction')
-    AD1 = ch('axial_diffusivity')
-    RD1 = ch('radial_diffusivity')
-
-    FF2 = np.nan_to_num(ch('fiber_fraction_pop2', True), nan=0.0)
-    AD2 = np.nan_to_num(ch('axial_diffusivity_pop2', True), nan=0.0)
-    RD2 = np.nan_to_num(ch('radial_diffusivity_pop2', True), nan=0.0)
-    FF3 = np.nan_to_num(ch('fiber_fraction_pop3', True), nan=0.0)
-    AD3 = np.nan_to_num(ch('axial_diffusivity_pop3', True), nan=0.0)
-    RD3 = np.nan_to_num(ch('radial_diffusivity_pop3', True), nan=0.0)
-
-    FFt_pos = np.where(np.isfinite(FFt), FFt, 0.0)
-    FF1 = np.clip(FFt_pos - FF2 - FF3, 0.0, None)          # dominant population share
-    AD1z = np.nan_to_num(AD1, nan=0.0)
-    RD1z = np.nan_to_num(RD1, nan=0.0)
-
-    fiber = np.isfinite(AD1) & (FFt_pos > 0)               # a real fiber tensor is present
-    denom = np.where(FFt_pos > 0, FFt_pos, 1.0)
-    ADw = (FF1 * AD1z + FF2 * AD2 + FF3 * AD3) / denom
-    RDw = (FF1 * RD1z + FF2 * RD2 + FF3 * RD3) / denom
-    ADw = np.where(fiber, ADw, np.nan)
-    RDw = np.where(fiber, RDw, np.nan)
-
-    md = (ADw + 2.0 * RDw) / 3.0
-    num = np.sqrt((ADw - md) ** 2 + 2.0 * (RDw - md) ** 2)
-    den = np.sqrt(ADw ** 2 + 2.0 * RDw ** 2)
-    with np.errstate(invalid='ignore', divide='ignore'):
-        FAw = np.sqrt(1.5) * num / den
-    FAw = np.where(fiber & (den > 0), FAw, np.nan)
-
-    FFtotal = np.where(np.isfinite(FFt), FFt, np.nan)
-    return {
-        'fiber_fraction_total': FFtotal.astype(np.float32),
-        'axial_diffusivity_weighted': ADw.astype(np.float32),
-        'radial_diffusivity_weighted': RDw.astype(np.float32),
-        'fiber_fa_weighted': FAw.astype(np.float32),
-    }
-
-
-def save_aggregate_fiber_maps(agg_maps, affine, output_dir):
-    """Save the `compute_aggregate_fiber_maps` output as compressed NIfTI files."""
-    import nibabel as nib
-    import os
-    os.makedirs(output_dir, exist_ok=True)
-    paths = {}
-    for name, arr in agg_maps.items():
-        fpath = os.path.join(output_dir, f'{name}.nii.gz')
-        nib.save(nib.Nifti1Image(np.asarray(arr, np.float32), affine), fpath)
-        paths[name] = fpath
-    return paths
-
-
-# Exact-duplicate output channels (verified on real data): ad_linear/rd_linear are
-# byte-identical to axial_/radial_diffusivity, and in 3-ISO mode
-# nonrestricted_fraction == hindered_fraction + water_fraction.
-_REDUNDANT_OUTPUT_MAPS = ('ad_linear', 'rd_linear')
-
-# Per-population output channels, indexed by population number. Populations
-# above the fit's `max_fiber_populations` are ALWAYS entirely NaN (the fit never
-# writes them), so writing them to disk costs one empty NIfTI per channel per
-# run. With max_fiber_populations=2 — the default — that is the 7 pop3 maps.
-_POP_OUTPUT_MAPS = {
-    2: ('fiber_fraction_pop2', 'axial_diffusivity_pop2', 'radial_diffusivity_pop2',
-        'fiber_fa_pop2', 'dir2_x', 'dir2_y', 'dir2_z'),
-    3: ('fiber_fraction_pop3', 'axial_diffusivity_pop3', 'radial_diffusivity_pop3',
-        'fiber_fa_pop3', 'dir3_x', 'dir3_y', 'dir3_z'),
-}
+# In 3-ISO mode nonrestricted_fraction is an exact duplicate: it equals
+# hindered_fraction + water_fraction by construction. The other former
+# duplicates, ad_linear/rd_linear, no longer exist as channels — they were
+# byte-identical copies of the population-1 diffusivities and were dropped from
+# the output layout itself.
 
 
 def compute_fiber_validity_map(results, channel_names):
     """
-    Voxel-level validity indicator for the fiber-tensor output channels.
+    Voxel-level validity indicator for the fiber-tensor output channels: 1
+    where a real fiber tensor was estimated, 0 elsewhere.
 
-    THE NaN/0 CONVENTION (documented once, here, because every downstream
-    resampling step depends on it):
+    The NaN/0 convention it companions is documented in
+    `DBSI_Adaptive.output_map_names`. The short version: the per-population
+    block and the FF-weighted aggregates use NaN for "absent / not estimated",
+    because 0 is a physically plausible diffusivity and cannot be a sentinel.
 
-    * **Compartment fractions** (fiber/restricted/hindered/water) use **0** for
-      "compartment absent". 0 is the correct physical value and the fractions
-      stay summable, so these maps need no companion mask.
-    * **Fiber-tensor metrics** (axial_diffusivity, radial_diffusivity, fiber_fa,
-      and the weighted aggregates) use **NaN** for "not estimated". 0 would be a
-      physically plausible diffusivity, so it cannot be used as a sentinel.
-    * `n_fiber_populations` is deliberately THREE-STATE, and the three states
-      are NOT interchangeable:
-        - NaN : fiber_fraction below `fiber_threshold` — no fiber compartment
-                was attempted in this voxel;
-        - 0   : fiber compartment present, but `select_dominant_directions`
-                rejected every candidate peak (concentration gate / weight /
-                angular separation) — fiber signal that could not be resolved
-                into a direction. These voxels have FF > 0 and AD/RD = NaN;
-        - >=1 : number of resolved fiber populations.
-
-    The NaN convention is correct in native space but does not survive a naive
+    That convention is correct in native space but does not survive a naive
     interpolation: ANTs (and any linear resampler) turns NaN into 0 before
     interpolating, so a reprojected AD/RD/FA map is silently depressed in
     proportion to the local NaN density. The fix is a normalised convolution —
-    resample `value * valid` and `valid` with the same transform and divide.
+    resample `value * valid` and `valid` through the same transform and divide.
     This function returns the `valid` term, which `save_output_maps` writes
     alongside the channel maps so the correction is available to anyone who
     picks the maps up later.
@@ -769,75 +621,47 @@ def compute_fiber_validity_map(results, channel_names):
 
     Returns
     -------
-    ndarray (X, Y, Z), uint8 — 1 where the fiber tensor is a real estimate.
+    ndarray (X, Y, Z), uint8
     """
     names = list(channel_names)
-    ad = results[..., names.index('axial_diffusivity')]
+    ad1 = results[..., names.index('axial_diffusivity_pop1')]
     ff = results[..., names.index('fiber_fraction')]
-    valid = np.isfinite(ad) & np.isfinite(ff) & (ff > 0)
-    return valid.astype(np.uint8)
+    return (np.isfinite(ad1) & np.isfinite(ff) & (ff > 0)).astype(np.uint8)
 
 
-def _empty_population_maps(results, channel_names, max_fiber_populations=None):
+def save_output_maps(results, channel_names, affine, output_dir,
+                     skip_redundant=True, validity=True):
     """
-    Names of the per-population channels that carry no information and should
-    not be written to disk.
-
-    Two rules, both applied:
-
-    * by construction — when `max_fiber_populations` is given, every population
-      above it was never estimated;
-    * by inspection — a population block whose channels are ALL entirely
-      non-finite across the volume carries nothing, whatever the ceiling was.
-      This is what makes the trimming work for callers that do not pass
-      `max_fiber_populations`, and it also catches the case of a ceiling of 3
-      on data where no voxel actually resolved a third population.
-    """
-    names = list(channel_names)
-    drop = set()
-    for pop, chans in _POP_OUTPUT_MAPS.items():
-        present = [c for c in chans if c in names]
-        if not present:
-            continue
-        if max_fiber_populations is not None and pop > max_fiber_populations:
-            drop.update(present)
-            continue
-        if not any(np.any(np.isfinite(results[..., names.index(c)])) for c in present):
-            drop.update(present)
-    return drop
-
-
-def save_output_maps(results, channel_names, affine, output_dir, skip_redundant=True,
-                     max_fiber_populations=None, aggregate=True, validity=True):
-    """
-    Save the complete DBSI output set for one dataset: the per-channel maps, the
-    compact aggregate fiber maps, and the fiber-validity indicator. This is the
-    single saving entry point — `scripts/run_dbsi.py` and the analysis notebooks
-    both go through it, so the on-disk layout is defined in exactly one place.
+    Save the DBSI output set for one dataset as compressed NIfTI: the channel
+    maps plus the fiber-validity indicator. This is the single saving entry
+    point — `scripts/run_dbsi.py` and the analysis notebooks both go through
+    it, so the on-disk layout is defined in exactly one place.
 
     Layout written under `output_dir`::
 
-        NN_<channel>.nii.gz          per-channel maps, trimmed (see below)
-        fiber_valid.nii.gz           uint8 validity mask for the tensor channels
-        aggregate_maps/*.nii.gz      compute_aggregate_fiber_maps output
+        NN_<channel>.nii.gz    per-channel maps (NN = channel index)
+        fiber_valid.nii.gz     uint8 validity mask for the tensor channels
+
+    The FF-weighted aggregate maps are ordinary channels now (21-23:
+    axial_/radial_diffusivity_weighted, fiber_fa_weighted), computed by the
+    model itself, so they are written by the loop below like any other channel.
+    They used to be a separate `compute_aggregate_fiber_maps` step that every
+    caller had to remember; that function is gone.
 
     Channels skipped:
 
-    * `*_NaN` — invalid for the model mode (e.g. hindered/water in 2-ISO);
-    * with `skip_redundant`, the exact duplicates `ad_linear`/`rd_linear` and,
-      in 3-ISO mode, `nonrestricted_fraction` (== hindered + water);
-    * the per-population channels of populations the fit never estimated — see
-      `_empty_population_maps`. Pass `max_fiber_populations` (the value given to
-      `DBSI_Adaptive`) to decide this by construction rather than by inspection;
-      with the default 2 this drops the 7 always-empty pop3 maps.
+    * `*_NaN` — invalid for the model mode (hindered/water in 2-ISO);
+    * with `skip_redundant`, `nonrestricted_fraction` in 3-ISO mode, where it
+      is hindered_fraction + water_fraction by construction.
+
+    Nothing else is trimmed: with at most two fiber populations, every
+    remaining channel carries information, and a population-2 block that
+    happens to be empty on one subject must still produce the same file set as
+    on every other subject.
 
     This does NOT change the internal `results` array — channel positions are
-    load-bearing for `compute_fit_quality` and `compute_aggregate_fiber_maps`,
-    and the saved `.npz` should keep every channel. Only the written files are
-    trimmed.
-
-    See `compute_fiber_validity_map` for the NaN/0 convention and why
-    `fiber_valid` matters as soon as the maps are resampled.
+    load-bearing for `compute_fit_quality`, and the saved `.npz` should keep
+    every channel. Only the written files are trimmed.
 
     Returns the list of channel names actually written.
     """
@@ -845,11 +669,8 @@ def save_output_maps(results, channel_names, affine, output_dir, skip_redundant=
     import os
     names = list(channel_names)
     skip = set()
-    if skip_redundant:
-        skip.update(_REDUNDANT_OUTPUT_MAPS)
-        if 'hindered_fraction' in names:          # 3-ISO -> nonrestricted is hf+wf
-            skip.add('nonrestricted_fraction')
-    skip.update(_empty_population_maps(results, names, max_fiber_populations))
+    if skip_redundant and 'hindered_fraction' in names:   # 3-ISO: NRF == HF + WF
+        skip.add('nonrestricted_fraction')
     os.makedirs(output_dir, exist_ok=True)
     saved = []
     for i, nm in enumerate(names):
@@ -861,7 +682,4 @@ def save_output_maps(results, channel_names, affine, output_dir, skip_redundant=
     if validity:
         nib.save(nib.Nifti1Image(compute_fiber_validity_map(results, names), affine),
                  os.path.join(output_dir, 'fiber_valid.nii.gz'))
-    if aggregate:
-        save_aggregate_fiber_maps(compute_aggregate_fiber_maps(results, names),
-                                  affine, os.path.join(output_dir, 'aggregate_maps'))
     return saved

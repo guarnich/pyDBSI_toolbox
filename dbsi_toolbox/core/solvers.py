@@ -1592,7 +1592,7 @@ duplicate it; only the functions below are new.
 
 WHY THIS EXISTS
 -------------------
-Stage A already detects up to `max_fiber_populations` directions per voxel
+Stage A already detects up to MAX_FIBER_POPULATIONS directions per voxel
 (`select_dominant_directions`), but prior to this addition only the
 DOMINANT direction was ever passed to Stage B; a second detected
 population was discarded before reaching the output. This module adds

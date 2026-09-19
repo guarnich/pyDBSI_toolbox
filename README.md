@@ -60,20 +60,41 @@ and number of shells):
 
 ## Outputs
 
-1. **fiber_fraction (FF)**: Apparent axonal density.
-2. **restricted_fraction (RF)**: Cellularity marker (inflammation).
-3. **hindered_fraction (HF)**: Vasogenic edema *(NaN in 2-ISO mode)*.
-4. **water_fraction (WF)**: CSF / Free water *(NaN in 2-ISO mode)*.
-5. **nonrestricted_fraction (NRF)**: HF + WF combined.
-6. **axial_diffusivity (AD)**: Axonal integrity — v3: Stage B closed-form estimate conditioned on Stage A's detected fiber direction *(NaN if FF < threshold)*.
-7. **radial_diffusivity (RD)**: Demyelination marker — v3: Stage B closed-form estimate *(NaN if FF < threshold)*.
-8. **fiber_fa**: Intrinsic fiber fractional anisotropy *(NaN if FF < threshold)*.
-9. **mean_iso_adc**: Mean isotropic ADC.
+25 channels. `DBSI_Adaptive.output_map_names(mode)` returns them in
+order; the `_C_*` constants in `model_Niso_adaptive_ff_thr.py` are the
+single source of truth for the indices.
 
-`ad_linear` / `rd_linear` (channels 9-10) are retained for output-array
-shape compatibility with v1/v2 but contain the same value as
-`axial_diffusivity` / `radial_diffusivity` — Stage B's estimate is the
-only diffusivity estimate produced.
+**Isotropic block and total fiber fraction (0-5)**
+
+1. **fiber_fraction (FF)**: apparent axonal density — the TOTAL over both populations.
+2. **restricted_fraction (RF)**: cellularity marker (inflammation).
+3. **hindered_fraction (HF)**: vasogenic edema *(NaN in 2-ISO mode)*.
+4. **water_fraction (WF)**: CSF / free water *(NaN in 2-ISO mode)*.
+5. **nonrestricted_fraction (NRF)**: HF + WF combined.
+6. **mean_iso_adc**: mean isotropic ADC.
+
+**Fiber block (6-23)** — at most TWO populations per voxel, each with its
+own fraction, tensor and direction:
+
+- **n_fiber_populations**: three-state (NaN = no fiber compartment attempted,
+  0 = fiber present but no direction resolved, 1-2 = populations found).
+- **fiber_fraction_pop1 / _pop2**: each population's share of FF.
+- **axial_diffusivity_pop1 / _pop2**: axonal integrity — Stage B closed-form
+  (single fiber) or MRDS joint estimate (crossing).
+- **radial_diffusivity_pop1 / _pop2**: demyelination marker.
+- **fiber_fa_pop1 / _pop2**: intrinsic fiber fractional anisotropy.
+- **dir1_x/y/z, dir2_x/y/z**: unit direction vectors.
+- **axial_/radial_diffusivity_weighted, fiber_fa_weighted**: the fiber tensor
+  averaged over the populations present, weighted by their fractions. Use
+  these for a single per-voxel fiber number; `fiber_fa_weighted` is the FA
+  OF the weighted tensor, not the mean of the two FAs.
+
+**Diagnostic (24)** — **dominant_basin_concentration**.
+
+The fiber block is NaN wherever the population is absent, while the
+compartment fractions use 0. `save_output_maps` writes `fiber_valid.nii.gz`
+alongside the maps: resample `value * valid` and `valid` together and divide,
+or linear interpolation will turn those NaNs into 0 and depress the result.
 
 ## Installation
 

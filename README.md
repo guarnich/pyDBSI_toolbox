@@ -1,4 +1,4 @@
-# pyDBSI Toolbox (v1.1.0 — hybrid two-stage architecture)
+# pyDBSI Toolbox (v1.2.0 — hybrid two-stage architecture)
 
 **Diffusion Basis Spectrum Imaging (DBSI) - Adaptive Implementation with Numba Acceleration**
 

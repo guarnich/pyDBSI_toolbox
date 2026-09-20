@@ -1,4 +1,4 @@
-# pyDBSI Toolbox (v1.1.0 — hybrid two-stage architecture)
+# pyDBSI Toolbox (v1.2.0 — hybrid two-stage architecture)
 
 **Diffusion Basis Spectrum Imaging (DBSI) - Adaptive Implementation with Numba Acceleration**
 
@@ -90,6 +90,11 @@ own fraction, tensor and direction:
   these for a single per-voxel fiber number; `fiber_fa_weighted` is the FA
   OF the weighted tensor, not the mean of the two FAs.
 
+Every run also writes `run_report.txt` into the output directory when the
+fitted model is passed to `save_output_maps`. A folder of NIfTI files with no
+record of what produced them is not reproducible, and the toolbox version
+cannot be recovered from the maps afterwards.
+
 **Diagnostics (24-26)**
 
 - **dominant_basin_concentration**: angular concentration of the dominant basin.
@@ -129,7 +134,10 @@ model = DBSI_Adaptive()
 results, model_mode = model.fit(data, bvals, bvecs, mask, run_calibration=True)
 
 names = DBSI_Adaptive.output_map_names(model_mode)
-save_output_maps(results, names, affine, 'results/')
+# Passing the model writes run_report.txt next to the maps: version, git
+# commit, calibrated hyperparameters, noise estimate, every option in force,
+# the per-voxel population census and the channel list.
+save_output_maps(results, names, affine, 'results/', model=model)
 ```
 
 ### Command Line

@@ -137,7 +137,7 @@ from .utils.tools import load_data, estimate_snr_robust
 from .utils.autoconfig import autoconfigure_dictionary
 from .calibration.optimizer import optimize_hyperparameters
 from .fit_quality import (compute_fit_quality, compute_fiber_validity_map,
-                          save_output_maps)
+                          format_run_report, save_output_maps)
 from .transition_confidence import compute_transition_confidence, save_transition_confidence
 
 __all__ = [
@@ -148,6 +148,7 @@ __all__ = [
     "optimize_hyperparameters",
     "compute_fit_quality",
     "compute_fiber_validity_map",
+    "format_run_report",
     "save_output_maps",
     "compute_transition_confidence",
     "save_transition_confidence",

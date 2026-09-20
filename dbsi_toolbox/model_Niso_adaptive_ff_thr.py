@@ -1332,6 +1332,52 @@ def _iso_resolve_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso, 
             out[x, y, z, _C_WF] = wat
 
 
+def _package_provenance():
+    """Where this code came from: install path, and the git state if the
+    package is being run out of a checkout. Everything is best-effort — an
+    installed wheel has no git, and that is not an error, it just means the
+    version string is all the provenance there is."""
+    import os
+    from . import __version__ as _v          # deferred: __init__ imports us
+    info = {'toolbox_version': _v,
+            'package_path': os.path.dirname(os.path.abspath(__file__))}
+    try:
+        import subprocess
+        repo = os.path.dirname(info['package_path'])
+        def _g(*a):
+            r = subprocess.run(['git', '-C', repo, *a], capture_output=True,
+                               text=True, timeout=5)
+            return r.stdout.strip() if r.returncode == 0 else ''
+        info['git_commit'] = _g('rev-parse', '--short', 'HEAD')
+        info['git_branch'] = _g('rev-parse', '--abbrev-ref', 'HEAD')
+        info['git_dirty'] = bool(_g('status', '--porcelain'))
+    except Exception:
+        info['git_commit'] = info['git_branch'] = ''
+        info['git_dirty'] = False
+    return info
+
+
+def _population_census(results, mask):
+    """Voxel counts for the three states of `n_fiber_populations`, over the
+    fitted mask. The three states are not interchangeable (see
+    `output_map_names`), so a run report that collapsed them would hide the
+    thing worth noticing: on angularly poor protocols a large share of
+    single-fiber voxels never resolves a direction at all."""
+    npop = results[..., _C_NPOP]
+    m = np.asarray(mask, bool)
+    n = int(m.sum())
+    if n == 0:
+        return {}
+    out = {'n_mask': n,
+           'npop_nan': int(np.sum(np.isnan(npop) & m)),
+           'npop_0': int(np.sum((npop == 0) & m)),
+           'npop_1': int(np.sum((npop == 1) & m)),
+           'npop_2': int(np.sum((npop == 2) & m))}
+    for k in ('npop_nan', 'npop_0', 'npop_1', 'npop_2'):
+        out[k + '_pct'] = round(out[k] / n * 100.0, 2)
+    return out
+
+
 def _fill_derived_channels(out):
     """
     Final vectorised pass: fill the channels that are DERIVED from the fitted
@@ -1547,6 +1593,7 @@ class DBSI_Adaptive:
         self.sure_crosscheck_report_ = None
         self.hemisphere_spacing_deg_ = None
         self.cone_refinement_schedule_ = None
+        self.run_report_ = None
 
     # ------------------------------------------------------------------
     def fit(self, data, bvals, bvecs, mask, run_calibration=True,
@@ -2127,6 +2174,43 @@ class DBSI_Adaptive:
         results[..., _C_R2], results[..., _C_RMSE] = compute_fit_quality(
             data, bvals, bvecs, mask, results, model_mode,
             fiber_threshold=self.fiber_threshold, verbose=True,
+        )
+
+        # ── Run report: what produced these maps ────────────────────────────
+        # Built here because `fit` is the only place that has all of it at once
+        # — the calibrated hyperparameters, the protocol, the noise estimate and
+        # the flags. `save_output_maps` writes it next to the maps.
+        import datetime as _dt
+        self.run_report_ = dict(
+            run_utc=_dt.datetime.now(_dt.timezone.utc).isoformat(timespec='seconds'),
+            **_package_provenance(),
+            protocol=dict(b_max=float(self.b_max_), n_shells=int(self.n_shells_),
+                          n_volumes=int(len(bvals)), model_mode=int(model_mode),
+                          n_dirs=int(self.n_dirs),
+                          hemisphere_spacing_deg=self.hemisphere_spacing_deg_),
+            noise=dict(snr=float(snr), sigma_raw=float(sigma)),
+            calibrated=dict(n_iso=int(self.n_iso),
+                            lambda_aniso=float(self.lambda_aniso),
+                            lambda_iso=float(self.lambda_iso),
+                            concentration_gate=float(self.min_dominant_concentration),
+                            calibration_run=bool(run_calibration),
+                            calibration_method=str(calibration_method),
+                            lambda_aniso_method=str(self.lambda_aniso_method),
+                            n_iso_method=str(n_iso_method)),
+            options=dict(max_fiber_populations=MAX_FIBER_POPULATIONS,
+                         fiber_threshold=float(self.fiber_threshold),
+                         anisotropy_ratio=float(self.anisotropy_ratio),
+                         stagec_refine=bool(self.stagec_refine),
+                         stagec_dir_refine=bool(self.stagec_dir_refine),
+                         enable_direction_refinement=bool(self.enable_direction_refinement),
+                         lambda_aniso_conc_mod=bool(self.lambda_aniso_conc_mod),
+                         iso_resolve=bool(self.iso_resolve),
+                         correct_restricted_fraction=bool(correct_restricted_fraction)),
+            populations=_population_census(results, mask),
+            fit_quality=dict(
+                r2_median=float(np.nanmedian(results[..., _C_R2][mask])),
+                rmse_median=float(np.nanmedian(results[..., _C_RMSE][mask]))),
+            channel_names=list(DBSI_Adaptive.output_map_names(model_mode)),
         )
 
         print(f"\n{'='*70}\n")

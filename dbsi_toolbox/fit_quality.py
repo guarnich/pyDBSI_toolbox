@@ -409,8 +409,86 @@ def compute_fiber_validity_map(results, channel_names):
     return (np.isfinite(ad1) & np.isfinite(ff) & (ff > 0)).astype(np.uint8)
 
 
+def format_run_report(report, saved_channels=None):
+    """Render `DBSI_Adaptive.run_report_` as plain text.
+
+    Text, not JSON, deliberately: this file exists to be read by a person who
+    opens a folder of maps months later and needs to know what produced them.
+    The dict is still there on the model if anything wants to parse it.
+    """
+    R = report
+    L = []
+    add = L.append
+    add("=" * 72)
+    add("  pyDBSI run report")
+    add("=" * 72)
+    add("")
+    add(f"  toolbox version : {R.get('toolbox_version', '?')}")
+    add(f"  run (UTC)       : {R.get('run_utc', '?')}")
+    add(f"  package path    : {R.get('package_path', '?')}")
+    git = R.get('git_commit') or ''
+    if git:
+        dirty = "  [UNCOMMITTED CHANGES]" if R.get('git_dirty') else ""
+        add(f"  git             : {R.get('git_branch', '?')} @ {git}{dirty}")
+    else:
+        add("  git             : not a checkout (installed package)")
+
+    def block(title, d, fmt=None):
+        if not d:
+            return
+        add("")
+        add(f"  {title}")
+        add("  " + "-" * (len(title) + 2))
+        for k, v in d.items():
+            if isinstance(v, float):
+                v = f"{v:.5g}"
+            add(f"    {k:<32}{v}")
+
+    p = R.get('protocol', {})
+    block("Protocol", p)
+    block("Noise", R.get('noise'))
+    block("Calibrated hyperparameters", R.get('calibrated'))
+    block("Options", R.get('options'))
+
+    pop = R.get('populations') or {}
+    if pop:
+        add("")
+        add("  Fiber populations per voxel (over the fitted mask)")
+        add("  " + "-" * 49)
+        add(f"    voxels in mask                  {pop['n_mask']:,}")
+        for key, label in (('npop_nan', 'NaN  no fiber compartment'),
+                           ('npop_0',   '0    fiber, no direction resolved'),
+                           ('npop_1',   '1    single fiber'),
+                           ('npop_2',   '2    crossing')):
+            add(f"    {label:<32}{pop[key]:>9,}  ({pop[key + '_pct']:>5.2f}%)")
+        add("    (the three states are NOT interchangeable -- see output_map_names)")
+
+    fq = R.get('fit_quality') or {}
+    if fq:
+        add("")
+        add("  Fit quality (median over the mask)")
+        add("  " + "-" * 34)
+        add(f"    R2                              {fq.get('r2_median', float('nan')):.4f}")
+        add(f"    RMSE (fraction of S0)           {fq.get('rmse_median', float('nan')):.4f}")
+
+    names = R.get('channel_names') or []
+    if names:
+        add("")
+        add(f"  Output channels ({len(names)})")
+        add("  " + "-" * 24)
+        kept = set(saved_channels) if saved_channels is not None else None
+        for i, nm in enumerate(names):
+            note = ""
+            if kept is not None and nm not in kept:
+                note = "   (not written)"
+            add(f"    {i:>2}  {nm}{note}")
+    add("")
+    add("=" * 72)
+    return "\n".join(L) + "\n"
+
+
 def save_output_maps(results, channel_names, affine, output_dir,
-                     skip_redundant=True, validity=True):
+                     skip_redundant=True, validity=True, model=None):
     """
     Save the DBSI output set for one dataset as compressed NIfTI: the channel
     maps plus the fiber-validity indicator. This is the single saving entry
@@ -421,6 +499,14 @@ def save_output_maps(results, channel_names, affine, output_dir,
 
         NN_<channel>.nii.gz    per-channel maps (NN = channel index)
         fiber_valid.nii.gz     uint8 validity mask for the tensor channels
+        run_report.txt         what produced these maps (when `model` is given)
+
+    Pass the fitted `DBSI_Adaptive` as `model` and its `run_report_` is written
+    alongside the maps: toolbox version and git commit, the calibrated
+    hyperparameters, the noise estimate, every option that was in force, the
+    per-voxel population census and the channel list. A folder of NIfTI files
+    with no record of what produced them is not reproducible, and the version
+    cannot be recovered from the maps afterwards.
 
     The FF-weighted aggregate maps are ordinary channels now (21-23:
     axial_/radial_diffusivity_weighted, fiber_fa_weighted), computed by the
@@ -462,4 +548,8 @@ def save_output_maps(results, channel_names, affine, output_dir,
     if validity:
         nib.save(nib.Nifti1Image(compute_fiber_validity_map(results, names), affine),
                  os.path.join(output_dir, 'fiber_valid.nii.gz'))
+    report = getattr(model, 'run_report_', None) if model is not None else None
+    if report:
+        with open(os.path.join(output_dir, 'run_report.txt'), 'w') as fh:
+            fh.write(format_run_report(report, saved_channels=saved))
     return saved

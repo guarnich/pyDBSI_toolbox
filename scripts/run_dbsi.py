@@ -55,7 +55,10 @@ def main():
     parser.add_argument("--dwi", required=True)
     parser.add_argument("--bval", required=True)
     parser.add_argument("--bvec", required=True)
-    parser.add_argument("--mask", required=False)
+    parser.add_argument("--mask", required=True,
+                        help="Brain mask. REQUIRED: it defines both the fitted voxels "
+                             "and the voxels sampled for calibration, so it changes the "
+                             "calibrated lambda/n_iso/gate, not just the field of view.")
     parser.add_argument("--out", required=True)
     parser.add_argument("--skip-calibration", action="store_true")
     parser.add_argument("--n-iso", type=int, default=None)

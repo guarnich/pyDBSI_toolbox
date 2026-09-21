@@ -1589,6 +1589,7 @@ class DBSI_Adaptive:
         self.n_aniso_cols_ = None
         self.diff_pairs_ = None
         self.sure_crosscheck_report_ = None
+        self.n_iso_source_ = None
         self.hemisphere_spacing_deg_ = None
         self.cone_refinement_schedule_ = None
         self.run_report_ = None
@@ -1779,19 +1780,45 @@ class DBSI_Adaptive:
                     d_min=max(self.iso_range[0], 0.1e-3), d_max=iso_d_max,
                     n_bootstrap=n_bootstrap,
                 )
-                if _n_iso_diag['curve_is_flat'] or _n_iso_diag['sample_looks_homogeneous']:
-                    _reason = ("weak separation" if _n_iso_diag['curve_is_flat']
-                              else "insufficient voxel tissue diversity")
-                    print(f"   [WARNING] Bootstrap result unreliable ({_reason}) "
-                          f"for this dataset; falling back to SVD+floor as a "
-                          f"safer default.")
+                # ── Fallback: ONLY when the composite curve is flat. ────────
+                # `sample_looks_homogeneous` (all per-candidate biases < 1pp)
+                # used to veto the bootstrap too. It must not: the criterion
+                # is SAMPLE-SIZE DEPENDENT in the wrong direction. The bias
+                # proxy is a mean over the sampled voxels, so it shrinks as
+                # the sample grows and opposite-signed per-voxel biases
+                # cancel — a LARGER sample from the same brain therefore looks
+                # "more homogeneous", which is backwards. Measured on real
+                # data (5P Protocol 1, 187,658 mask voxels, SNR 30.1): the
+                # bootstrap returned n_iso=6 in all 9 configurations
+                # (500/1000/2000 voxels x 3 seeds) -- perfectly stable -- yet
+                # at 2000 voxels the flag fired on 2 of 3 seeds and replaced
+                # that stable, data-driven 6 with the SVD floor of 10. The
+                # flag fires MORE the more data you give it, and it vetoed a
+                # curve that `curve_is_flat` had already judged informative.
+                # It is now a warning only. See `select_n_iso_bootstrap`'s
+                # docstring: it was tuned on a near-homogeneous SYNTHETIC
+                # sample, where the same threshold means something else.
+                if _n_iso_diag['sample_looks_homogeneous']:
+                    print(f"   [NOTE] Bias is <1 percentage point for every "
+                          f"candidate n_iso. On a large real-data sample this "
+                          f"is expected (the bias proxy averages out) and is "
+                          f"NOT treated as a failure; it vetoed the bootstrap "
+                          f"before v1.3.0.")
+                if _n_iso_diag['curve_is_flat']:
+                    print(f"   [WARNING] Bootstrap result unreliable (weak "
+                          f"separation: the bias-variance curve has no clear "
+                          f"minimum) for this dataset; falling back to "
+                          f"SVD+floor as a safer default.")
                     self.n_iso, _svd_diag = select_n_iso_svd(bvals, snr)
+                    self.n_iso_source_ = 'svd_fallback'
                     print(f"   SVD+floor fallback: n_iso={self.n_iso}")
                 else:
+                    self.n_iso_source_ = 'bootstrap'
                     print(f"   Bootstrap-selected n_iso={self.n_iso}")
 
             elif n_iso_method == 'svd_floor':
                 self.n_iso, _svd_diag = select_n_iso_svd(bvals, snr)
+                self.n_iso_source_ = 'svd_floor'
                 print(f"\n4. Selecting n_iso — SVD + empirical floor: "
                       f"n_iso={self.n_iso} (raw SVD answer: "
                       f"{_svd_diag['n_iso_raw']}, "
@@ -1799,6 +1826,7 @@ class DBSI_Adaptive:
 
             elif n_iso_method == 'fixed':
                 self.n_iso = _DEFAULT_N_ISO_STEPS
+                self.n_iso_source_ = 'fixed'
                 print(f"\n4. n_iso fixed at legacy default: n_iso={self.n_iso}")
 
             else:
@@ -2158,7 +2186,8 @@ class DBSI_Adaptive:
                             calibration_run=bool(run_calibration),
                             calibration_method='data_driven',
                             lambda_aniso_method=str(self.lambda_aniso_method),
-                            n_iso_method=str(n_iso_method)),
+                            n_iso_method=str(n_iso_method),
+                            n_iso_source=str(self.n_iso_source_ or 'user')),
             options=dict(max_fiber_populations=MAX_FIBER_POPULATIONS,
                          fiber_threshold=float(self.fiber_threshold),
                          anisotropy_ratio=float(self.anisotropy_ratio),

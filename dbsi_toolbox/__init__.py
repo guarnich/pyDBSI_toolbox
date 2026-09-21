@@ -54,10 +54,6 @@ autoconfigure_dictionary
     Derive Stage A's hemisphere-direction count (and other diagnostic
     values) from the acquisition protocol.
 
-optimize_hyperparameters
-    Monte Carlo calibration of (lambda_aniso, lambda_iso), evaluated
-    end-to-end through Stage A + Stage B, across 14 physiologically
-    grounded tissue scenarios.
 
 compute_fit_quality
     Compute voxel-wise R² and RMSE goodness-of-fit maps. `DBSI_Adaptive.fit`
@@ -135,7 +131,6 @@ __author__ = "DBSI Toolbox Contributors"
 from .model_Niso_adaptive_ff_thr import DBSI_Adaptive
 from .utils.tools import load_data, estimate_snr_robust
 from .utils.autoconfig import autoconfigure_dictionary
-from .calibration.optimizer import optimize_hyperparameters
 from .fit_quality import (compute_fit_quality, compute_fiber_validity_map,
                           format_run_report, save_output_maps)
 from .transition_confidence import compute_transition_confidence, save_transition_confidence
@@ -145,7 +140,6 @@ __all__ = [
     "load_data",
     "estimate_snr_robust",
     "autoconfigure_dictionary",
-    "optimize_hyperparameters",
     "compute_fit_quality",
     "compute_fiber_validity_map",
     "format_run_report",

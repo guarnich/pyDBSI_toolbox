@@ -174,7 +174,6 @@ from .core.solvers import (
     measure_hemisphere_spacing,
     estimate_AD_RD_mrds,          # NEW — MRDS multi-fiber Stage B
 )
-from .calibration.optimizer import optimize_hyperparameters, evaluate_lambda_pair
 from .calibration.data_driven import (select_lambdas_data_driven,
                                        sample_calibration_voxels,
                                        calibrate_concentration_gate_mc,
@@ -1589,7 +1588,6 @@ class DBSI_Adaptive:
         self.n_shells_ = None
         self.n_aniso_cols_ = None
         self.diff_pairs_ = None
-        self.mc_crosscheck_report_ = None
         self.sure_crosscheck_report_ = None
         self.hemisphere_spacing_deg_ = None
         self.cone_refinement_schedule_ = None
@@ -1597,9 +1595,8 @@ class DBSI_Adaptive:
 
     # ------------------------------------------------------------------
     def fit(self, data, bvals, bvecs, mask, run_calibration=True,
-           calibration_method='data_driven', n_calibration_voxels=500,
+           n_calibration_voxels=500,
            n_iso_method='bootstrap', n_bootstrap=50,
-           run_mc_crosscheck=False, mc_crosscheck_n_mc=200,
            run_sure_crosscheck=False, sure_crosscheck_n_probes=15,
            run_n_iso_sweep_diagnostic=False,
            calibrate_concentration_gate=True,
@@ -1764,8 +1761,7 @@ class DBSI_Adaptive:
 
         y_cal, sigma_cal = None, None
         if self.n_iso is None or (run_calibration and
-                                  (self.lambda_aniso is None or self.lambda_iso is None) and
-                                  calibration_method == 'data_driven'):
+                                  (self.lambda_aniso is None or self.lambda_iso is None)):
             y_cal, sigma_cal = sample_calibration_voxels(
                 data_corr, mask, bvals, n_voxels=n_calibration_voxels, seed=0,
             )
@@ -1823,70 +1819,52 @@ class DBSI_Adaptive:
         # ── Calibration of (lambda_aniso, lambda_iso) ───────────────────────
         if run_calibration and (self.lambda_aniso is None or self.lambda_iso is None):
 
-            if calibration_method == 'data_driven':
-                print(f"\n5. Calibrating (lambda_aniso, lambda_iso) — DATA-DRIVEN "
-                      f"(GCV + discrepancy principle)...")
-                if y_cal is None:
-                    y_cal, sigma_cal = sample_calibration_voxels(
-                        data_corr, mask, bvals, n_voxels=n_calibration_voxels,
-                        seed=0,
-                    )
-                    print(f"   Sampled {len(y_cal)} calibration voxels from the "
-                          f"brain mask (sigma_normalised={sigma_cal:.5f})")
-                self.lambda_aniso, self.lambda_iso, _dd_diag = select_lambdas_data_driven(
-                    bvals, bvecs, fiber_dirs, diff_pairs, iso_grid, y_cal, sigma_cal,
-                    lambda_aniso_method=self.lambda_aniso_method,
+            print(f"\n5. Calibrating (lambda_aniso, lambda_iso) — DATA-DRIVEN "
+                  f"(GCV + discrepancy principle)...")
+            if y_cal is None:
+                y_cal, sigma_cal = sample_calibration_voxels(
+                    data_corr, mask, bvals, n_voxels=n_calibration_voxels,
+                    seed=0,
                 )
-                print(f"   Data-driven result: lambda_aniso={self.lambda_aniso:.4f}, "
-                      f"lambda_iso={self.lambda_iso:.4f}  "
-                      f"[lambda_aniso via {self.lambda_aniso_method}]")
-                _am_diag = _dd_diag.get('lambda_aniso_selection')
-                if _am_diag is not None and _am_diag.get('corner_weak'):
-                    print(f"   [note] {self.lambda_aniso_method} curve has no sharp corner/minimum "
-                          f"for this protocol — selection may be soft (see diag).")
-                if _dd_diag.get('lambda_iso_capped'):
-                    print(f"   [lambda_iso ceiling] GCV wanted lambda_iso="
-                          f"{_dd_diag['lambda_iso_gcv']:.4f}; capped to the "
-                          f"noise-referenced discrepancy ceiling "
-                          f"{_dd_diag['lambda_iso_cap']:.4f} — prevents the low-SNR "
-                          f"isotropic collapse / FF leakage (GCV was railing).")
-                if _dd_diag.get('discrepancy', {}).get('floor_applied'):
-                    _floor_comp = _dd_diag.get('discrepancy', {}).get('floor_component', 'unknown')
-                    print(f"   [WARNING] Safety floor was applied to lambda_aniso "
-                          f"(component: {_floor_comp}; raw discrepancy-principle "
-                          f"answer was below the floor, indicating an "
-                          f"ill-conditioned/near-zero regularization scenario). "
-                          f"Consider increasing n_calibration_voxels and/or "
-                          f"running the Monte Carlo cross-check "
-                          f"(run_mc_crosscheck=True) before trusting this result.")
-                    if _floor_comp == 'aniso_floor_fraction':
-                        print(f"   [CAVEAT] The aniso_floor_fraction default is "
-                              f"UNVALIDATED on this (anchored-isotropic-grid) "
-                              f"pipeline as of 2026-07-16 -- it was fitted on a "
-                              f"different isotropic grid construction and did NOT "
-                              f"fix the FF leakage it targets in a known synthetic "
-                              f"crossing-fiber follow-up check. If FF looks close "
-                              f"to 1.0 with near-zero isotropic fractions, suspect "
-                              f"an isotropic-grid coverage gap (see "
-                              f"`select_lambda_aniso_discrepancy` docstring) rather "
-                              f"than trusting this floor to have fixed things.")
+                print(f"   Sampled {len(y_cal)} calibration voxels from the "
+                      f"brain mask (sigma_normalised={sigma_cal:.5f})")
+            self.lambda_aniso, self.lambda_iso, _dd_diag = select_lambdas_data_driven(
+                bvals, bvecs, fiber_dirs, diff_pairs, iso_grid, y_cal, sigma_cal,
+                lambda_aniso_method=self.lambda_aniso_method,
+            )
+            print(f"   Data-driven result: lambda_aniso={self.lambda_aniso:.4f}, "
+                  f"lambda_iso={self.lambda_iso:.4f}  "
+                  f"[lambda_aniso via {self.lambda_aniso_method}]")
+            _am_diag = _dd_diag.get('lambda_aniso_selection')
+            if _am_diag is not None and _am_diag.get('corner_weak'):
+                print(f"   [note] {self.lambda_aniso_method} curve has no sharp corner/minimum "
+                      f"for this protocol — selection may be soft (see diag).")
+            if _dd_diag.get('lambda_iso_capped'):
+                print(f"   [lambda_iso ceiling] GCV wanted lambda_iso="
+                      f"{_dd_diag['lambda_iso_gcv']:.4f}; capped to the "
+                      f"noise-referenced discrepancy ceiling "
+                      f"{_dd_diag['lambda_iso_cap']:.4f} — prevents the low-SNR "
+                      f"isotropic collapse / FF leakage (GCV was railing).")
+            if _dd_diag.get('discrepancy', {}).get('floor_applied'):
+                _floor_comp = _dd_diag.get('discrepancy', {}).get('floor_component', 'unknown')
+                print(f"   [WARNING] Safety floor was applied to lambda_aniso "
+                      f"(component: {_floor_comp}; raw discrepancy-principle "
+                      f"answer was below the floor, indicating an "
+                      f"ill-conditioned/near-zero regularization scenario). "
+                      f"Consider increasing n_calibration_voxels "
+                      f"before trusting this result.")
+                if _floor_comp == 'aniso_floor_fraction':
+                    print(f"   [CAVEAT] The aniso_floor_fraction default is "
+                          f"UNVALIDATED on this (anchored-isotropic-grid) "
+                          f"pipeline as of 2026-07-16 -- it was fitted on a "
+                          f"different isotropic grid construction and did NOT "
+                          f"fix the FF leakage it targets in a known synthetic "
+                          f"crossing-fiber follow-up check. If FF looks close "
+                          f"to 1.0 with near-zero isotropic fractions, suspect "
+                          f"an isotropic-grid coverage gap (see "
+                          f"`select_lambda_aniso_discrepancy` docstring) rather "
+                          f"than trusting this floor to have fixed things.")
 
-            elif calibration_method == 'monte_carlo':
-                print(f"\n5. Calibrating (lambda_aniso, lambda_iso) — MONTE CARLO "
-                      f"(14 tissue scenarios, full grid search)...")
-                self.lambda_aniso, self.lambda_iso = optimize_hyperparameters(
-                    bvals, bvecs, snr,
-                    n_aniso_cols=n_aniso_cols, n_iso=self.n_iso,
-                    n_dirs=self.n_dirs, n_ad=self.n_ad, n_rd=self.n_rd,
-                    anisotropy_ratio=self.anisotropy_ratio,
-                    ad_range=self.ad_range, rd_range=self.rd_range,
-                )
-
-            else:
-                raise ValueError(
-                    f"calibration_method must be 'data_driven' or 'monte_carlo', "
-                    f"got {calibration_method!r}."
-                )
 
         if self.lambda_aniso is None:
             self.lambda_aniso = _STAGE_A_DEFAULT_LAMBDA_BASE * n_aniso_cols
@@ -1910,22 +1888,6 @@ class DBSI_Adaptive:
         print(f"   NOTE: isotropic/fiber FRACTIONS above are Stage A's raw NNLS "
               f"output regardless of the fiber-population count -- the MRDS extension "
               f"does not revise them (see module docstring).")
-
-        # ── Monte Carlo cross-check (optional, does not change lambda) ─────
-        if run_mc_crosscheck:
-            print(f"\n   Running Monte Carlo cross-check of the selected lambda pair "
-                  f"against 14 tissue scenarios...")
-            _crosscheck_report = evaluate_lambda_pair(
-                bvals, bvecs, snr, self.lambda_aniso, self.lambda_iso,
-                n_mc=mc_crosscheck_n_mc,
-                n_dirs=self.n_dirs, n_ad=self.n_ad, n_rd=self.n_rd,
-                anisotropy_ratio=self.anisotropy_ratio,
-                ad_range=self.ad_range, rd_range=self.rd_range,
-                iso_range=self.iso_range, n_iso=self.n_iso,
-                min_weight_fraction=self.min_weight_fraction,
-                verbose=True,
-            )
-            self.mc_crosscheck_report_ = _crosscheck_report
 
         # ── Monte Carlo SURE cross-check (optional) ─────────────────────────
         if run_sure_crosscheck:
@@ -2194,7 +2156,7 @@ class DBSI_Adaptive:
                             lambda_iso=float(self.lambda_iso),
                             concentration_gate=float(self.min_dominant_concentration),
                             calibration_run=bool(run_calibration),
-                            calibration_method=str(calibration_method),
+                            calibration_method='data_driven',
                             lambda_aniso_method=str(self.lambda_aniso_method),
                             n_iso_method=str(n_iso_method)),
             options=dict(max_fiber_populations=MAX_FIBER_POPULATIONS,

@@ -4,12 +4,14 @@ DBSI Data-Driven Regularization — GCV (lambda_iso) + Discrepancy Principle (la
 
 WHY THIS MODULE EXISTS
 --------------------------
-The Monte Carlo calibration in `calibration/optimizer.py` selects
-(lambda_aniso, lambda_iso) by simulating signals from 14 physiologically
-grounded tissue scenarios (Wang et al. 2011, Ye et al. 2020, Vavasour et
-al. 2022) with hardcoded fraction/diffusivity priors. This is methodologically
-sound as a CROSS-VALIDATION step (does a candidate lambda pair produce
-reasonable fraction/diffusivity recovery across known tissue regimes?),
+The Monte Carlo calibration that used to live in `calibration/optimizer.py`
+selected (lambda_aniso, lambda_iso) by simulating signals from 14
+physiologically grounded tissue scenarios (Wang et al. 2011, Ye et al. 2020,
+Vavasour et al. 2022) with hardcoded fraction/diffusivity priors. (It was
+REMOVED on 2026-09-21 — it never compiled; see that module's docstring.)
+That approach is methodologically sound as a CROSS-VALIDATION step (does a
+candidate lambda pair produce reasonable fraction/diffusivity recovery
+across known tissue regimes?),
 but using it as the SOURCE of lambda has a specific weakness: the chosen
 lambda optimizes performance on literature-derived scenarios, which may
 not match the actual fraction distribution of the protocol/population
@@ -25,10 +27,8 @@ A (depends only on bvals/bvecs, already known), the observed signal y
 (via `sample_calibration_voxels`, drawn directly from the dataset's own
 brain-mask voxels — no tissue model assumed), and the noise sigma
 (already estimated, or computed directly from sampled b0 volumes). No
-tissue-fraction priors are used. `calibration/optimizer.py`'s Monte
-Carlo scenarios remain available as an INDEPENDENT cross-validation
-check (see `calibration/optimizer.py` module docstring after this
-change) rather than as the source of lambda.
+tissue-fraction priors are used. This is now the ONLY calibration path
+in the package: the Monte Carlo alternative was removed on 2026-09-21.
 
 TWO DIFFERENT METHODS FOR TWO DIFFERENT BLOCKS
 ----------------------------------------------------
@@ -103,9 +103,10 @@ without a documented source, and limitations are not silently elided)
   expected to shrink further; this has not yet been confirmed on real
   (non-synthetic) data and should be checked before relying on the
   data-driven selection as the sole source of lambda for a given
-  dataset — hence the recommendation to run the Monte Carlo
-  cross-check (`calibration/optimizer.py`) alongside it, at least until
-  this is validated on the project's actual acquisitions.
+  dataset. The Monte Carlo cross-check that used to be recommended
+  alongside it was removed on 2026-09-21 (it never worked), so this
+  caveat currently has no mitigation other than inspecting the
+  calibrated values against other protocols on the same scanner.
 
 References
 ----------
@@ -1079,9 +1080,9 @@ def sample_calibration_voxels(data, mask, bvals, b0_thr=100.0,
     `select_lambda_iso_gcv` / `select_lambda_aniso_discrepancy` /
     `select_lambdas_data_driven`.
 
-    Unlike the Monte Carlo cross-check in `calibration/optimizer.py`
-    (which simulates signals from literature-derived tissue-fraction
-    priors), this draws signals DIRECTLY from the dataset's own brain-
+    Unlike the (now removed) Monte Carlo cross-check, which simulated
+    signals from literature-derived tissue-fraction priors, this draws
+    signals DIRECTLY from the dataset's own brain-
     mask voxels — no tissue model is assumed. With real datasets
     containing hundreds of thousands of brain voxels, a few hundred
     sampled voxels give a far more representative and far larger
@@ -1196,12 +1197,9 @@ def select_lambdas_data_driven(bvals, bvecs, fiber_dirs, diff_pairs, iso_grid,
     (design matrix + observed signal + noise sigma) with no tissue-
     fraction priors.
 
-    This is intended as a drop-in alternative to `calibration.optimizer.
-    optimize_hyperparameters` (the Monte Carlo scenario-based
-    calibration) for callers who want a data-driven lambda selection.
-    The Monte Carlo scenarios remain available separately as an
-    independent cross-validation check — see `calibration/optimizer.py`
-    module docstring.
+    This was introduced as a drop-in alternative to the Monte Carlo
+    scenario-based calibration, which was removed on 2026-09-21; it is
+    now the only lambda selection in the package.
 
     Parameters
     ----------

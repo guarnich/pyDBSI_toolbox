@@ -15,16 +15,11 @@ CHANGES FROM v2
 - New: `--min-weight-fraction` controls Stage A's direction-selection
   threshold (see dbsi_toolbox.core.solvers.select_dominant_directions).
 - `--n-dirs` still defaults to protocol-derived (autoconfigured) sizing.
-- New: `--calibration-method {data_driven,monte_carlo}` selects how
-  (lambda_aniso, lambda_iso) are determined. `data_driven` (default)
-  uses GCV + the discrepancy principle on a sample of this dataset's
-  own voxels (fast, no tissue-fraction priors). `monte_carlo` falls
-  back to the legacy grid search over 14 literature-derived tissue
-  scenarios. See dbsi_toolbox.calibration module docstring.
-- New: `--mc-crosscheck` runs the Monte Carlo tissue-scenario check
-  against whichever (lambda_aniso, lambda_iso) was selected, WITHOUT
-  changing it — a sanity check, recommended at least once per new
-  protocol/dataset type.
+- Calibration of (lambda_aniso, lambda_iso) is data-driven: GCV + the
+  discrepancy principle on a sample of this dataset's own voxels (fast,
+  no tissue-fraction priors). The legacy Monte Carlo grid search was
+  removed on 2026-09-21 (it never worked on this architecture; see
+  dbsi_toolbox.calibration module docstring).
 
 OUTPUT LAYOUT (changed)
 -----------------------
@@ -102,11 +97,6 @@ def main():
                              "regularization to suppress isotropic->fiber_fraction leakage, "
                              "while sparing concentrated (genuine-fiber, incl. crossing) voxels. "
                              "Pass this to fall back to a single unmodulated Stage A solve.")
-    parser.add_argument("--calibration-method", choices=["data_driven", "monte_carlo"],
-                        dest="calibration_method", default="data_driven",
-                        help="Method to determine (lambda_aniso, lambda_iso). Default: data_driven "
-                             "(GCV + discrepancy principle, no tissue-fraction priors). "
-                             "'monte_carlo' falls back to the legacy 14-scenario grid search.")
     parser.add_argument("--n-calibration-voxels", type=int, dest="n_calibration_voxels", default=500,
                         help="Number of brain-mask voxels sampled for data-driven calibration and "
                              "n_iso selection. Default: 500 (matches DBSI_Adaptive.fit() default; "
@@ -118,11 +108,6 @@ def main():
                              "information limit + empirical floor. 'fixed': legacy n_iso=31.")
     parser.add_argument("--n-bootstrap", type=int, dest="n_bootstrap", default=50,
                         help="Noise replicates per voxel for the bootstrap n_iso method. Default: 50.")
-    parser.add_argument("--mc-crosscheck", action="store_true", dest="run_mc_crosscheck",
-                        help="Run the Monte Carlo tissue-scenario cross-check on the selected "
-                             "lambda pair (does not change it; prints a diagnostic report).")
-    parser.add_argument("--mc-crosscheck-n-mc", type=int, dest="mc_crosscheck_n_mc", default=200,
-                        help="MC samples per scenario for the cross-check report. Default: 200.")
     parser.add_argument("--force-n-iso", type=int, choices=[2, 3], default=None,
                         help="Override automatic isotropic-model selection (2 or 3)")
     parser.add_argument("--disable-direction-refinement", action="store_true",
@@ -173,19 +158,12 @@ def main():
     results, model_mode = model.fit(
         data, bvals, bvecs, mask,
         run_calibration=not args.skip_calibration,
-        calibration_method=args.calibration_method,
         n_calibration_voxels=args.n_calibration_voxels,
         n_iso_method=args.n_iso_method,
         n_bootstrap=args.n_bootstrap,
-        run_mc_crosscheck=args.run_mc_crosscheck,
-        mc_crosscheck_n_mc=args.mc_crosscheck_n_mc,
     )
 
     names = DBSI_Adaptive.output_map_names(model_mode)
-
-    if model.mc_crosscheck_report_ is not None:
-        print(f"\nMonte Carlo cross-check composite loss: "
-              f"{model.mc_crosscheck_report_['composite']:.4f}")
 
     print("\nSaving outputs...")
     saved = save_output_maps(results, names, affine, args.out, model=model)

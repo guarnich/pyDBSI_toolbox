@@ -12,17 +12,14 @@ TWO COMPLEMENTARY PATHS
    `data_driven.py` module docstring for the full rationale and the
    empirical comparison against the Monte Carlo path.
 
-2. MONTE CARLO (cross-check) — `calibration.optimizer`
-   14 physiologically grounded tissue scenarios (Wang et al. 2011, Ye et
-   al. 2020, Vavasour et al. 2022), used to verify that a candidate
-   (lambda_aniso, lambda_iso) pair — typically the data-driven path's
-   output — behaves sensibly across known tissue regimes (e.g.
-   adequately suppresses spurious fiber fraction in grey matter,
-   preserves restricted-fraction sensitivity in lesions). Use
-   `evaluate_lambda_pair` for this (cheaper, single-pair check); the
-   full `optimize_hyperparameters` grid search remains available as a
-   fallback if the data-driven method's assumptions are suspected to
-   fail for a given protocol.
+2. MONTE CARLO — REMOVED 2026-09-21
+   Both Monte Carlo entry points are gone: the grid search
+   (`optimize_hyperparameters`, `calibration_method='monte_carlo'`) and
+   the single-pair cross-check (`evaluate_lambda_pair`,
+   `--mc-crosscheck`). Neither ever worked here — their shared scenario
+   evaluator called `select_dominant_directions` with a pre-`fiber_dirs`
+   argument list and the numba kernel never compiled. `calibration.optimizer`
+   now only holds synthetic-signal generation.
 
 3. MONTE CARLO SURE (cross-check) — `calibration.mc_sure`
    Stein's Unbiased Risk Estimate, evaluated via randomized probes
@@ -42,7 +39,6 @@ Recommended usage pattern
 -----------------------------
     from dbsi_toolbox.calibration import (
         select_lambdas_data_driven, sample_calibration_voxels,
-        evaluate_lambda_pair,
     )
 
     y_voxels, sigma = sample_calibration_voxels(data, mask, bvals)
@@ -55,9 +51,6 @@ Recommended usage pattern
     # sign the calibration voxel sample was too small/homogeneous (see
     # `select_lambda_aniso_discrepancy` docstring). Consider increasing
     # n_calibration_voxels if this triggers often.
-
-    # Cross-check against known tissue scenarios before trusting it:
-    report = evaluate_lambda_pair(bvals, bvecs, snr, lambda_aniso, lambda_iso)
 """
 
 from .data_driven import (
@@ -72,11 +65,7 @@ from .adaptive_n_iso import (
     select_n_iso_data_driven_sweep,
     select_n_iso_bootstrap,
 )
-from .optimizer import (
-    optimize_hyperparameters,
-    evaluate_lambda_pair,
-    generate_synthetic_signal,
-)
+from .optimizer import generate_synthetic_signal
 from .mc_sure import (
     crosscheck_lambda_iso_sure,
     crosscheck_n_iso_sure,
@@ -93,9 +82,7 @@ __all__ = [
     "select_n_iso_with_gcv_crosscheck",
     "select_n_iso_data_driven_sweep",
     "select_n_iso_bootstrap",
-    # Monte Carlo (cross-check)
-    "optimize_hyperparameters",
-    "evaluate_lambda_pair",
+    # Synthetic signal generation (no longer used by the package itself)
     "generate_synthetic_signal",
     # Monte Carlo SURE (cross-check)
     "crosscheck_lambda_iso_sure",

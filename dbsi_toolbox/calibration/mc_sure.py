@@ -71,7 +71,7 @@ neighbourhood of an already-chosen candidate (from GCV, or from a
 candidate n_iso) and report whether that candidate falls within the
 low-risk region — consistent with this project's established pattern
 for `select_n_iso_with_gcv_crosscheck` and the Monte Carlo
-tissue-scenario cross-check (`calibration.optimizer.evaluate_lambda_pair`):
+tissue-scenario cross-check (removed 2026-09-21, see calibration/__init__):
 verification tools, not replacement selectors.
 
 COMPUTATIONAL COST

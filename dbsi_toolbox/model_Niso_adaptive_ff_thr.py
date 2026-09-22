@@ -1597,7 +1597,7 @@ class DBSI_Adaptive:
 
     # ------------------------------------------------------------------
     def fit(self, data, bvals, bvecs, mask, run_calibration=True,
-           n_calibration_voxels=500,
+           n_calibration_voxels=1000,
            n_iso_method='bootstrap', n_bootstrap=50,
            run_sure_crosscheck=False, sure_crosscheck_n_probes=15,
            run_n_iso_sweep_diagnostic=False,
@@ -1761,6 +1761,21 @@ class DBSI_Adaptive:
         data_corr[xs, ys, zs] = corrected
         del masked_sq, valid_mask, corrected
 
+        # ── Calibration sample: 1000 voxels, fixed seed (v1.3.1) ───────────
+        # The default was 500 until v1.3.1. A seed sweep on real data (5P
+        # Protocols 1 and 3, 5 seeds x {500, 1000} voxels = 20 calibrations)
+        # measured how much of the lambda choice is the SAMPLE rather than the
+        # protocol:
+        #   lambda_aniso  identical on 20/20 runs (P1 grid node 25, P3 node 24)
+        #                 -- the calibration sample does not move it at all;
+        #   lambda_iso    at 500 voxels P1 spanned 3 grid nodes (23-25, a 2.03x
+        #                 range) and P3 spanned 2 (19-20); at 1000 voxels P1
+        #                 narrowed to 2 nodes with 4/5 seeds identical.
+        # So 500 is enough for lambda_aniso but not for lambda_iso, and 1000
+        # roughly halves the residual lambda_iso jitter for ~2x the calibration
+        # cost (a few minutes, negligible against the voxel-wise fit). The seed
+        # is fixed at 0 here and at every other sampling site in this method, so
+        # a re-run of the same data reproduces the same lambdas exactly.
         y_cal, sigma_cal = None, None
         if self.n_iso is None or (run_calibration and
                                   (self.lambda_aniso is None or self.lambda_iso is None)):

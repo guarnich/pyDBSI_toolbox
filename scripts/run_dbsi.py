@@ -100,10 +100,12 @@ def main():
                              "regularization to suppress isotropic->fiber_fraction leakage, "
                              "while sparing concentrated (genuine-fiber, incl. crossing) voxels. "
                              "Pass this to fall back to a single unmodulated Stage A solve.")
-    parser.add_argument("--n-calibration-voxels", type=int, dest="n_calibration_voxels", default=500,
+    parser.add_argument("--n-calibration-voxels", type=int, dest="n_calibration_voxels", default=1000,
                         help="Number of brain-mask voxels sampled for data-driven calibration and "
-                             "n_iso selection. Default: 500 (matches DBSI_Adaptive.fit() default; "
-                             "previously inconsistent at 200 here — fixed).")
+                             "n_iso selection. Default: 1000 (matches DBSI_Adaptive.fit() default; "
+                             "raised from 500 in v1.3.1 — a seed sweep showed lambda_aniso is "
+                             "sample-invariant but lambda_iso still jitters by 2-3 grid nodes at "
+                             "500 voxels).")
     parser.add_argument("--n-iso-method", choices=["bootstrap", "svd_floor", "fixed"],
                         dest="n_iso_method", default="bootstrap",
                         help="How to select n_iso when --n-iso is not given. 'bootstrap' (default): "

@@ -90,7 +90,16 @@ from ..core.solvers import nnls_coordinate_descent
 # best-performing fixed value found in project synthetic validation, to
 # leave a small margin for the SVD answer to exceed it on richer
 # protocols without the floor itself forcing an overly large value.
-_DEFAULT_MIN_N_ISO = 10
+_DEFAULT_MIN_N_ISO = 4
+# Era 10. Il valore non veniva da un guasto osservato: era prudenza, per non
+# lasciare lo spettro isotropo troppo grossolano. Misurato il 2026-09-22, non
+# protegge da niente di strutturale — l'ancoraggio alle soglie di comparto
+# garantisce la copertura di RF/HF/WF gia' a n_steps=2 (griglia 8 colonne,
+# 3/3/2). E costava caro: il pavimento non puo' mai concordare con un
+# bootstrap che dice 6, quindi ogni volta che il fallback scattava n_iso
+# saltava di almeno 4. Abbassato a 4 (9 colonne, 3/4/2) per lasciar parlare
+# la SVD, che e' il limite informativo vero del protocollo; aggiungere
+# colonne oltre quello aggiunge mal-condizionamento, non informazione.
 _DEFAULT_MAX_N_ISO = 60   # safety cap on the other end; see select_n_iso_svd docstring
 _DEFAULT_HIRES_N_CANDIDATE = 200
 _DEFAULT_D_MIN = 0.1e-3

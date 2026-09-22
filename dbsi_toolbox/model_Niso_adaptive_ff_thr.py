@@ -1590,6 +1590,7 @@ class DBSI_Adaptive:
         self.diff_pairs_ = None
         self.sure_crosscheck_report_ = None
         self.n_iso_source_ = None
+        self.lambda_edges_ = {}
         self.hemisphere_spacing_deg_ = None
         self.cone_refinement_schedule_ = None
         self.run_report_ = None
@@ -1860,6 +1861,29 @@ class DBSI_Adaptive:
                 bvals, bvecs, fiber_dirs, diff_pairs, iso_grid, y_cal, sigma_cal,
                 lambda_aniso_method=self.lambda_aniso_method,
             )
+            # Su quale estremo della griglia di ricerca e' finito ciascun lambda?
+            # Un lambda al bordo non e' un minimo interno: non si distingue
+            # "l'ottimo e' qui" da "l'ottimo sta oltre la griglia". Va visto,
+            # non dedotto per caso guardando i numeri di 110 soggetti.
+            def _bordo(val, griglia):
+                if griglia is None or len(griglia) == 0:
+                    return 'unknown'
+                g = np.asarray(griglia, dtype=float)
+                if abs(val - g.min()) <= 1e-12 * max(abs(val), 1.0):
+                    return 'lower'
+                if abs(val - g.max()) <= 1e-12 * max(abs(val), 1.0):
+                    return 'upper'
+                return 'no'
+            _g_an = (_dd_diag.get('lambda_aniso_selection') or {}).get('lambda_grid')
+            _g_is = (_dd_diag.get('gcv') or {}).get('lambda_')
+            self.lambda_edges_ = dict(
+                lambda_aniso_at_grid_edge=_bordo(self.lambda_aniso, _g_an),
+                lambda_iso_at_grid_edge=_bordo(self.lambda_iso, _g_is),
+                lambda_iso_capped=bool(_dd_diag.get('lambda_iso_capped', False)))
+            for _k, _v in self.lambda_edges_.items():
+                if _v in ('lower', 'upper'):
+                    print(f"   [NOTE] {_k}={_v}: il lambda scelto sta sull'ESTREMO "
+                          f"della griglia di ricerca, non e' un minimo interno.")
             print(f"   Data-driven result: lambda_aniso={self.lambda_aniso:.4f}, "
                   f"lambda_iso={self.lambda_iso:.4f}  "
                   f"[lambda_aniso via {self.lambda_aniso_method}]")
@@ -2187,7 +2211,10 @@ class DBSI_Adaptive:
                             calibration_method='data_driven',
                             lambda_aniso_method=str(self.lambda_aniso_method),
                             n_iso_method=str(n_iso_method),
-                            n_iso_source=str(self.n_iso_source_ or 'user')),
+                            n_iso_source=str(self.n_iso_source_ or 'user'),
+                            calibration_seed=0,
+                            **{k: (str(v) if isinstance(v, str) else v)
+                               for k, v in (self.lambda_edges_ or {}).items()}),
             options=dict(max_fiber_populations=MAX_FIBER_POPULATIONS,
                          fiber_threshold=float(self.fiber_threshold),
                          anisotropy_ratio=float(self.anisotropy_ratio),

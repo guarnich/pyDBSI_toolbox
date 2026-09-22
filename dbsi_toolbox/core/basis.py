@@ -125,10 +125,19 @@ def generate_fibonacci_sphere(n_points):
 # v2 — EXHAUSTIVE ANISOTROPIC PARAMETER GRID  (AD, RD) PAIRS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def generate_exhaustive_diffusivity_pairs(ad_min=0.5e-3, ad_max=2.2e-3, n_ad=8,
-                                          rd_min=0.05e-3, rd_max=1.2e-3, n_rd=8,
-                                          anisotropy_ratio=1.1):
+def generate_exhaustive_diffusivity_pairs(ad_min=0.5e-3, ad_max=2.2e-3, n_ad=3,
+                                          rd_min=0.05e-3, rd_max=1.2e-3, n_rd=3,
+                                          anisotropy_ratio=2.0):
     """
+    DEFAULTS ALIGNED TO THE MODEL (2026-09-22). They used to be n_ad=8,
+    n_rd=8, anisotropy_ratio=1.1 -- i.e. the 52-pair grid with the
+    near-isotropic ratio-1.83 column that `anisotropy_ratio=2.0` was
+    introduced to remove, because it leaks isotropic signal into
+    fiber_fraction. `DBSI_Adaptive` has always passed its own values, so
+    the model was never affected; but anything calling this function bare
+    silently got the superseded, leaky configuration. Now a bare call
+    reproduces the model: 3x3, ratio 2.0, 5 admissible pairs.
+
     Generate the parametric (AD, RD) grid for the exhaustive anisotropic
     dictionary.
 

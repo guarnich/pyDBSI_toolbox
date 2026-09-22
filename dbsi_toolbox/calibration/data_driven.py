@@ -1072,7 +1072,7 @@ def select_lambda_aniso_gcv_lcurve(AtA, At, y_voxels, n_aniso_cols,
 # ─────────────────────────────────────────────────────────────────────────────
 
 def sample_calibration_voxels(data, mask, bvals, b0_thr=100.0,
-                              n_voxels=200, min_signal_fraction=0.05,
+                              n_voxels=500, min_signal_fraction=0.05,
                               seed=None):
     """
     Sample a representative set of S0-normalised voxel signals from the
@@ -1101,7 +1101,10 @@ def sample_calibration_voxels(data, mask, bvals, b0_thr=100.0,
     b0_thr : float
         B-value threshold below which a volume is treated as b=0.
     n_voxels : int
-        Number of voxels to sample. 150-300 is a reasonable range based
+        Number of voxels to sample. DEFAULT ALIGNED TO THE MODEL
+        (2026-09-22): it was 200 while `DBSI_Adaptive.fit()` passed 500,
+        so a bare call calibrated on a different sample size than the
+        toolbox itself. 150-300 is a reasonable range based
         on the stability analysis in project validation records
         (coefficient of variation in the selected lambda dropped from
         ~51% at 15 voxels to ~14% at 150 voxels in synthetic testing);

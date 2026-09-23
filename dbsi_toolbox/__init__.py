@@ -124,7 +124,7 @@ Design document: toolbox_v2.md (orientation-space vs. parameter-space
     recovery validation of the v2 single-stage approach.
 """
 
-__version__ = "1.3.1"
+__version__ = "1.3.2"
 __author__ = "DBSI Toolbox Contributors"
 
 

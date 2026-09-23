@@ -1851,14 +1851,31 @@ class DBSI_Adaptive:
                     f"'fixed', got {n_iso_method!r}."
                 )
 
-            iso_grid = generate_anchored_isotropic_grid(
-                d_min=max(self.iso_range[0], 0.1e-3), d_max=iso_d_max,
-                n_steps=self.n_iso, thresh_res=THRESH_RES, thresh_wat=THRESH_WAT,
-            )
-        else:
-            iso_grid = generate_isotropic_grid(
-                d_min=self.iso_range[0], d_max=self.iso_range[1], n_steps=self.n_iso
-            )
+        # ── Isotropic basis ─────────────────────────────────────────────────
+        # The grid depends ONLY on n_iso and iso_range — NOT on whether n_iso was
+        # SELECTED or SUPPLIED. Until v1.3.1 this assignment sat inside
+        # `if self.n_iso is None:` above, with a `generate_isotropic_grid`
+        # fallback in its `else`. The trigger was therefore simply *passing
+        # n_iso at all*, for any reason: any caller that pinned the model order
+        # — the cohort "frozen calibration" use case, but equally a one-off
+        # `DBSI_Adaptive(n_iso=6)` — silently got a LINEAR basis instead of the
+        # anchored log-uniform one. With n_iso=6 and the default
+        # iso_range that meant 6 linear columns spanning [0, 3.0e-3] — one
+        # restricted column (the degenerate d=0 one) and NO free-water column —
+        # instead of 11 anchored columns over [0.1e-3, 5.0e-3] split 4/5/2 across
+        # the three compartments. Same hyperparameters, different dictionary, no
+        # warning. Found by a control fit that imposed a session's own calibrated
+        # gate and got the *imposed*-run numbers rather than the free-run ones.
+        #
+        # `generate_isotropic_grid` is the legacy LINEAR constructor and is not
+        # interchangeable with the anchored one (see its docstring): the anchoring
+        # is what keeps a grid point from landing on the wrong side of THRESH_RES
+        # / THRESH_WAT, which once produced an apparent total failure to detect
+        # free water.
+        iso_grid = generate_anchored_isotropic_grid(
+            d_min=max(self.iso_range[0], 0.1e-3), d_max=iso_d_max,
+            n_steps=self.n_iso, thresh_res=THRESH_RES, thresh_wat=THRESH_WAT,
+        )
 
         # ── Calibration of (lambda_aniso, lambda_iso) ───────────────────────
         if run_calibration and (self.lambda_aniso is None or self.lambda_iso is None):

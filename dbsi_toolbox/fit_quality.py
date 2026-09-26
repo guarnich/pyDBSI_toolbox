@@ -463,6 +463,40 @@ def format_run_report(report, saved_channels=None):
             add(f"    {label:<32}{pop[key]:>9,}  ({pop[key + '_pct']:>5.2f}%)")
         add("    (the three states are NOT interchangeable -- see output_map_names)")
 
+    sd = R.get('solver') or {}
+    if sd:
+        add("")
+        add("  Solver diagnostics")
+        add("  " + "-" * 20)
+        cap = sd.get('nnls_max_iter')
+        if cap is not None:
+            add(f"    NNLS iterations (Stage A)       median "
+                f"{sd.get('nnls_iter_median', float('nan')):.0f}  "
+                f"p95 {sd.get('nnls_iter_p95', float('nan')):.0f}  "
+                f"max {sd.get('nnls_iter_max', -1)}  (cap {cap})")
+            nc = sd.get('nnls_not_converged_pct')
+            flag = "   <-- NOT CONVERGED" if (nc or 0) > 0 else ""
+            add(f"    NNLS did not converge           {nc:.3f}% of fitted voxels{flag}")
+        add(f"    tensor bounds (x10^-3 mm^2/s)   AD "
+            f"[{sd.get('tensor_ad_floor', float('nan'))*1e3:.2f}, "
+            f"{sd.get('tensor_ad_ceil', float('nan'))*1e3:.2f}]  RD "
+            f"[{sd.get('tensor_rd_floor', float('nan'))*1e3:.2f}, "
+            f"{sd.get('tensor_rd_ceil', float('nan'))*1e3:.2f}]")
+        for key, label in (('rd_pop1_at_floor_pct', 'RD pop1 on the floor'),
+                           ('rd_pop2_at_floor_pct', 'RD pop2 on the floor'),
+                           ('rd_pop1_at_ceil_pct',  'RD pop1 on the ceiling'),
+                           ('rd_pop2_at_ceil_pct',  'RD pop2 on the ceiling'),
+                           ('ad_pop1_at_floor_pct', 'AD pop1 on the floor'),
+                           ('ad_pop2_at_floor_pct', 'AD pop2 on the floor'),
+                           ('ad_pop1_at_ceil_pct',  'AD pop1 on the ceiling'),
+                           ('ad_pop2_at_ceil_pct',  'AD pop2 on the ceiling')):
+            if key in sd:
+                v = sd[key]
+                mark = "   <-- bound active" if v >= 5.0 else ""
+                add(f"    {label:<32}{v:>6.2f}% of that population{mark}")
+        add("    (a voxel ON a bound is one whose tensor the data did not")
+        add("     determine: report the bound-active fraction, do not average over it)")
+
     fq = R.get('fit_quality') or {}
     if fq:
         add("")

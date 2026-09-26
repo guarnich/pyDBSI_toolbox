@@ -145,6 +145,9 @@ if __name__ == '__main__':
             fn(); print('  [ok]')
         except AssertionError as e:
             falliti += 1; print(f'  [FALLITO] {e}')
+        except Exception as e:                    # es. attributo assente su una versione
+            falliti += 1                          # precedente: e un fallimento, non un crash
+            print(f'  [FALLITO] {type(e).__name__}: {e}')
     print(f'\n{"tutti i test passati" if not falliti else f"{falliti} test FALLITI"}')
     sys.exit(1 if falliti else 0)
 

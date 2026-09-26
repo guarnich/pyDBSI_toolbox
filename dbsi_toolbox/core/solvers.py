@@ -69,8 +69,71 @@ import numpy as np
 from numba import njit
 
 
+# ─── Bounds on the fiber tensor, single source of truth ──────────────────────
+# These were scattered as literals across five sites, and had drifted apart: the
+# AD floor read 0.05e-3 at two sites and 0.20e-3 at a third. 0.05e-3 was not a
+# considered AD floor — it is the PRE-"Leva 1" shared floor, equal to
+# _STAGE_A_RD_MIN, left behind when the RD floor alone was raised from 0.05e-3 to
+# 0.15e-3 (the adjacent comments still read "was 0.05e-3"). It also sat a factor
+# of ten below the Stage A dictionary's own AD range, which starts at 0.5e-3.
+# Reconciled to the explicit physiological value already in use in the local
+# refinement.
+#
+# These are BOUNDS, not measurements. A voxel sitting exactly on one of them is
+# a voxel whose tensor the data could not determine, and on real data that is
+# not rare: ~31% of fiber-valid voxels sit exactly on _TENSOR_RD_FLOOR (49% of
+# crossings), and ~4% of second populations sit exactly on _TENSOR_AD_CEIL.
+# Downstream code should compare against these constants and report the
+# bound-active fraction rather than averaging over it; the run report now does.
+_TENSOR_AD_FLOOR = 0.20e-3
+_TENSOR_AD_CEIL = 3.50e-3
+_TENSOR_RD_FLOOR = 0.15e-3   # "Leva 1": below ~0.1e-3 noise drives RD->0, FA->1
+_TENSOR_RD_CEIL = 3.00e-3
+
+# Iteration cap for the NNLS coordinate descent. Raised from 2000 in v1.3.3.
+#
+# The solver RETURNS its iteration count; until v1.3.2 all twelve call sites
+# discarded it with `w, _ =`, so hitting the cap was undetectable. The Stage A
+# dictionary is ~146 columns with a condition number around 3e5, and at the
+# lambda values this toolbox selects the old cap was reached by ~15% of solves.
+# Iteration counts are NOT monotone in lambda: they peak at intermediate values,
+# which is exactly the regime in use.
+#
+# The cap was chosen by measurement on the real captured dictionary, not by
+# guesswork. The solver is SLOW on a tail, not stalling — raising the cap does
+# reach convergence — and the curve has a clean knee:
+#
+#     cap      not converged      cost vs 2000
+#     2000        14.8%              1.00x
+#     5000         7.5%              1.43x
+#    10000         4.0%              2.06x
+#    20000         0.0%              2.30x
+#    50000         0.0%              2.31x
+#
+# 20000 is the first cap at which nothing fails to converge, and going beyond it
+# buys nothing and costs nothing: the median solve still takes ~186 iterations,
+# so only the tail pays. On ~190k voxels the Stage A stage costs ~5.5 min more.
+# Non-convergence is NOT cosmetic: between the old cap and convergence the
+# weight vector moves by up to ~30% relative. The derived total fiber fraction
+# barely moves (<0.5pp), but w is what carries the DIRECTIONAL information, so
+# which basin holds the mass — and hence n_pop — can flip.
+#
+# The kernels write the per-voxel count to the `nnls_iterations` output channel
+# and the run report summarises it, so the real rate on real data is now
+# observable instead of assumed.
+_NNLS_MAX_ITER = 20000
+
+# Nominal isotropic diffusivities, used only as fallbacks when a compartment
+# carries no weight. Numerically close to some _TENSOR_* bounds by coincidence;
+# they describe a different quantity and must not be merged with them.
+_ISO_NOMINAL_RES = 0.15e-3
+_ISO_NOMINAL_HIN = 1.0e-3
+_ISO_NOMINAL_WAT = 3.0e-3
+
+
 @njit(cache=True, fastmath=True, nogil=True)
-def nnls_coordinate_descent(AtA, Aty, reg_lambda, tol=1e-7, max_iter=2000):
+def nnls_coordinate_descent(AtA, Aty, reg_lambda, tol=1e-7,
+                            max_iter=_NNLS_MAX_ITER):
     """NNLS via Coordinate Descent with Active Set. Unchanged from v1/v2."""
     n = AtA.shape[0]
     x = np.zeros(n, dtype=np.float64)
@@ -702,8 +765,8 @@ def estimate_AD_RD_conditioned(bvals, bvecs, sig_norm, fiber_dir,
     x = (sum_BB * sum_Ay - sum_AB * sum_By) / det
     y = (sum_AA * sum_By - sum_AB * sum_Ay) / det
 
-    RD_est = max(0.15e-3, min(3.0e-3, -x))   # Leva 1: physiological RD floor (was 0.05e-3)
-    AD_est = max(0.05e-3, min(3.5e-3, -x - y))
+    RD_est = max(_TENSOR_RD_FLOOR, min(_TENSOR_RD_CEIL, -x))
+    AD_est = max(_TENSOR_AD_FLOOR, min(_TENSOR_AD_CEIL, -x - y))
     if AD_est < RD_est:
         m = (AD_est + RD_est) / 2.0
         AD_est = m
@@ -871,8 +934,8 @@ def stagec_varpro_single_fiber(sig_norm, bvals, bvecs, fiber_dir,
     for j in range(5):
         av = best_ad + (j - 2) * 0.5 * da
         rv = best_rd + (j - 2) * 0.5 * dr
-        ad_loc[j] = av if av > 0.2e-3 else 0.2e-3
-        rd_loc[j] = rv if rv > 0.15e-3 else 0.15e-3   # Leva 1: physiological RD floor (was 0.02e-3)
+        ad_loc[j] = av if av > _TENSOR_AD_FLOOR else _TENSOR_AD_FLOOR
+        rd_loc[j] = rv if rv > _TENSOR_RD_FLOOR else _TENSOR_RD_FLOOR
     best_res, best_ad, best_rd = _stagec_scan(
         sig_norm, bvals, c2, iso_forward, iso_gram, iso_aty, yty,
         ad_loc, rd_loc, aniso_ratio, best_res, best_ad, best_rd, w_out)
@@ -1407,9 +1470,12 @@ def compute_weighted_centroids(w_iso, iso_grid):
             sum_w_wat += w
             sum_wd_wat += w * adc
 
-    D_res = sum_wd_res / sum_w_res if sum_w_res > 1e-10 else 0.15e-3
-    D_hin = sum_wd_hin / sum_w_hin if sum_w_hin > 1e-10 else 1.0e-3
-    D_wat = sum_wd_wat / sum_w_wat if sum_w_wat > 1e-10 else 3.0e-3
+    # Fallback centroids when a compartment carries no weight. These are
+    # ISOTROPIC nominal diffusivities and only coincide numerically with the
+    # tensor bounds — do not fold them into the _TENSOR_* constants.
+    D_res = sum_wd_res / sum_w_res if sum_w_res > 1e-10 else _ISO_NOMINAL_RES
+    D_hin = sum_wd_hin / sum_w_hin if sum_w_hin > 1e-10 else _ISO_NOMINAL_HIN
+    D_wat = sum_wd_wat / sum_w_wat if sum_w_wat > 1e-10 else _ISO_NOMINAL_WAT
 
     return D_res, D_hin, D_wat
 
@@ -1611,8 +1677,8 @@ def _stageB_single_given_residual(bvals, bvecs, direction, f_fib,
     x = (sum_BB * sum_Ay - sum_AB * sum_By) / det
     y = (sum_AA * sum_By - sum_AB * sum_Ay) / det
 
-    RD = max(0.15e-3, min(3.0e-3, -x))   # Leva 1: physiological RD floor (was 0.05e-3)
-    AD = max(0.05e-3, min(3.5e-3, -x - y))
+    RD = max(_TENSOR_RD_FLOOR, min(_TENSOR_RD_CEIL, -x))
+    AD = max(_TENSOR_AD_FLOOR, min(_TENSOR_AD_CEIL, -x - y))
     if AD < RD:
         m = (AD + RD) / 2.0
         AD = m; RD = m
@@ -1707,8 +1773,11 @@ def estimate_AD_RD_nfiber_joint(bvals, bvecs, sig_norm, directions, fractions,
     Returns
     -------
     AD_out, RD_out : array (n_pop,)
-        Bounded to [0.05e-3, 3.5e-3] (AD) / [0.05e-3, 3.0e-3] (RD),
-        matching `estimate_AD_RD_conditioned`'s single-fiber bounds.
+        Bounded to [_TENSOR_AD_FLOOR, _TENSOR_AD_CEIL] (AD) /
+        [_TENSOR_RD_FLOOR, _TENSOR_RD_CEIL] (RD), the same constants
+        `estimate_AD_RD_conditioned` uses for the single-fiber case. NOTE: the
+        docstring used to state the RD lower bound as 0.05e-3 while the code
+        applied 0.15e-3 — the two had drifted apart.
     """
     N = len(bvals)
     n_pop = directions.shape[0]
@@ -1722,10 +1791,10 @@ def estimate_AD_RD_nfiber_joint(bvals, bvecs, sig_norm, directions, fractions,
     for k in range(n_pop):
         p[2 * k] = AD_init[k]
         p[2 * k + 1] = RD_init[k]
-        lb[2 * k] = 0.05e-3
-        ub[2 * k] = 3.5e-3
-        lb[2 * k + 1] = 0.15e-3   # Leva 1: physiological RD floor (was 0.05e-3)
-        ub[2 * k + 1] = 3.0e-3
+        lb[2 * k] = _TENSOR_AD_FLOOR
+        ub[2 * k] = _TENSOR_AD_CEIL
+        lb[2 * k + 1] = _TENSOR_RD_FLOOR
+        ub[2 * k + 1] = _TENSOR_RD_CEIL
     for i in range(n_par):
         if p[i] < lb[i]:
             p[i] = lb[i]

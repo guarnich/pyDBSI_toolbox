@@ -15,7 +15,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="dbsi-toolbox",
-    version="1.3.2",
+    version="1.3.3",
     author="DBSI Toolbox Contributors",
     author_email="",
     description="Diffusion Basis Spectrum Imaging (DBSI) - Hybrid Two-Stage Architecture with Numba Acceleration",

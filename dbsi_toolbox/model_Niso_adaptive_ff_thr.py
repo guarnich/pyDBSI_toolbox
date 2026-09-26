@@ -289,7 +289,8 @@ _C_FAW = 23
 _C_CONC = 24          # dominant_basin_concentration (diagnostic)
 _C_R2 = 25            # fit_r2   -- goodness of fit of the reconstructed signal
 _C_RMSE = 26          # fit_rmse -- residual RMSE, as a fraction of S0
-_N_CHANNELS = 27
+_C_NNLS_IT = 27       # nnls_iterations -- Stage A solver iterations (diagnostic)
+_N_CHANNELS = 28
 
 # MRDS multi-fiber Stage B defaults (see core.solvers.estimate_AD_RD_mrds).
 _MRDS_INIT_N_ITER = 3        # short, deliberately non-converged alternating warm start
@@ -737,7 +738,13 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                 val += At[r, c] * sig_norm[c]
             Aty[r] = val
 
-        w, _ = nnls_coordinate_descent(AtA_reg, Aty, 0.0)
+        # The solver's iteration count is NOT discarded: written out below as
+        # `nnls_iterations`. Hitting _NNLS_MAX_ITER means Stage A did not
+        # converge in this voxel, which until v1.3.2 was undetectable — every
+        # call site dropped the counter. Written here, before any early exit, so
+        # the diagnostic exists even for voxels that leave the loop early.
+        w, _nnls_it = nnls_coordinate_descent(AtA_reg, Aty, 0.0)
+        out[x, y, z, _C_NNLS_IT] = _nnls_it
 
         # Plan A: per-voxel concentration-modulated lambda_aniso (on by default;
         # skipped when conc_mod_enabled is False).
@@ -1006,7 +1013,13 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                 val += At[r, c] * sig_norm[c]
             Aty[r] = val
 
-        w, _ = nnls_coordinate_descent(AtA_reg, Aty, 0.0)
+        # The solver's iteration count is NOT discarded: written out below as
+        # `nnls_iterations`. Hitting _NNLS_MAX_ITER means Stage A did not
+        # converge in this voxel, which until v1.3.2 was undetectable — every
+        # call site dropped the counter. Written here, before any early exit, so
+        # the diagnostic exists even for voxels that leave the loop early.
+        w, _nnls_it = nnls_coordinate_descent(AtA_reg, Aty, 0.0)
+        out[x, y, z, _C_NNLS_IT] = _nnls_it
 
         # Plan A: per-voxel concentration-modulated lambda_aniso (on by default;
         # skipped when conc_mod_enabled is False).
@@ -1354,6 +1367,59 @@ def _package_provenance():
         info['git_commit'] = info['git_branch'] = ''
         info['git_dirty'] = False
     return info
+
+
+def _solver_diagnostics(results, mask):
+    """Did the solver converge, and how often did it stop on a bound?
+
+    Both questions used to be unanswerable from the outputs. Non-convergence
+    was invisible because every NNLS call site discarded the iteration counter;
+    bound activity was invisible because a clamped value is indistinguishable
+    from an estimated one. Neither is rare on real data, and a voxel sitting
+    exactly on a bound is a voxel whose tensor the data did not determine — so
+    averaging over it reports the bound, not the tissue.
+
+    Percentages are over the voxels where the relevant quantity exists: the
+    fitted mask for the solver counters, and the voxels where that population
+    has a tensor for the bound counters.
+    """
+    from .core.solvers import (_TENSOR_AD_FLOOR, _TENSOR_AD_CEIL,
+                               _TENSOR_RD_FLOOR, _TENSOR_RD_CEIL,
+                               _NNLS_MAX_ITER)
+    out = {}
+    it = results[..., _C_NNLS_IT][mask]
+    it = it[np.isfinite(it)]
+    if it.size:
+        out.update(nnls_max_iter=int(_NNLS_MAX_ITER),
+                   nnls_iter_median=float(np.median(it)),
+                   nnls_iter_p95=float(np.percentile(it, 95)),
+                   nnls_iter_max=int(it.max()),
+                   nnls_not_converged_pct=round(
+                       100.0 * float(np.mean(it >= _NNLS_MAX_ITER - 1)), 3))
+
+    # A bound is "active" when the value sits on it to within a relative 1e-6:
+    # these are exact assignments, not near misses, so the test is tight.
+    def _on(ch, bound):
+        v = results[..., ch][mask]
+        v = v[np.isfinite(v)]
+        if v.size == 0:
+            return None
+        return round(100.0 * float(np.mean(np.abs(v - bound) <= 1e-6 * bound)), 2)
+
+    for nome, ch, bound in (('rd_pop1_at_floor_pct', _C_RD1, _TENSOR_RD_FLOOR),
+                            ('rd_pop2_at_floor_pct', _C_RD2, _TENSOR_RD_FLOOR),
+                            ('rd_pop1_at_ceil_pct', _C_RD1, _TENSOR_RD_CEIL),
+                            ('rd_pop2_at_ceil_pct', _C_RD2, _TENSOR_RD_CEIL),
+                            ('ad_pop1_at_floor_pct', _C_AD1, _TENSOR_AD_FLOOR),
+                            ('ad_pop2_at_floor_pct', _C_AD2, _TENSOR_AD_FLOOR),
+                            ('ad_pop1_at_ceil_pct', _C_AD1, _TENSOR_AD_CEIL),
+                            ('ad_pop2_at_ceil_pct', _C_AD2, _TENSOR_AD_CEIL)):
+        val = _on(ch, bound)
+        if val is not None:
+            out[nome] = val
+    out.update(tensor_ad_floor=_TENSOR_AD_FLOOR, tensor_ad_ceil=_TENSOR_AD_CEIL,
+               tensor_rd_floor=_TENSOR_RD_FLOOR, tensor_rd_ceil=_TENSOR_RD_CEIL)
+    return out
 
 
 def _population_census(results, mask):
@@ -2245,6 +2311,15 @@ class DBSI_Adaptive:
                             n_iso_method=str(n_iso_method),
                             n_iso_source=str(self.n_iso_source_ or 'user'),
                             calibration_seed=0,
+                            # Without this the report shows a gate value but not
+                            # whether it was CALIBRATED or IMPOSED — the very
+                            # distinction a fixed-calibration cohort run rests on.
+                            concentration_gate_calibrated=bool(
+                                run_calibration and calibrate_concentration_gate),
+                            concentration_gate_percentile=float(
+                                concentration_gate_percentile),
+                            n_calibration_voxels=int(n_calibration_voxels),
+                            n_bootstrap=int(n_bootstrap),
                             **{k: (str(v) if isinstance(v, str) else v)
                                for k, v in (self.lambda_edges_ or {}).items()}),
             options=dict(max_fiber_populations=MAX_FIBER_POPULATIONS,
@@ -2257,6 +2332,7 @@ class DBSI_Adaptive:
                          iso_resolve=bool(self.iso_resolve),
                          correct_restricted_fraction=bool(correct_restricted_fraction)),
             populations=_population_census(results, mask),
+            solver=_solver_diagnostics(results, mask),
             fit_quality=dict(
                 r2_median=float(np.nanmedian(results[..., _C_R2][mask])),
                 rmse_median=float(np.nanmedian(results[..., _C_RMSE][mask]))),
@@ -2366,6 +2442,7 @@ class DBSI_Adaptive:
             'dominant_basin_concentration',
             'fit_r2',
             'fit_rmse',
+            'nnls_iterations',
         ]
         base = base_3iso if model_mode == 3 else base_2iso
         return base + fiber_block

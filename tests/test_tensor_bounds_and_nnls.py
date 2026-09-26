@@ -34,7 +34,7 @@ QUI = Path(__file__).resolve().parent.parent
 
 def test_versione():
     v = tuple(int(x) for x in dbsi_toolbox.__version__.split('.')[:3])
-    assert v >= (1, 3, 3), f'attesa >= 1.3.3, trovata {dbsi_toolbox.__version__}'
+    assert v >= (1, 3, 4), f'attesa >= 1.3.4, trovata {dbsi_toolbox.__version__}'
     print(f'  dbsi_toolbox {dbsi_toolbox.__version__}')
 
 
@@ -149,13 +149,86 @@ def test_il_report_mostra_tutto():
     print('  il report dichiara i bound, la convergenza, e se il gate era imposto')
 
 
+def test_risoluzione_del_raffinamento_stagec():
+    """Stage C non deve restituire (AD, RD) su un reticolo a mezzo passo.
+
+    Fino alla v1.3.3 il "local refine" era UN SOLO scan 5x5 a mezzo passo della
+    griglia grossa, quindi il risultato cadeva sempre su quel reticolo: misurato
+    sui dati veri, il 100.0% dei voxel mono-fibra, con ZERO valori intermedi.
+    La quantizzazione arrivava fino ai riassunti: la mediana della RD di un
+    cervello scattava su un valore di reticolo, ed e' per questo che la CoV
+    cross-protocollo della RD leggeva 0.00% su cinque protocolli — la griglia,
+    non la misura.
+    """
+    assert S._STAGEC_N_REFINE >= 3, S._STAGEC_N_REFINE
+    rng = np.random.default_rng(0)
+    bv = np.array([0.] * 4 + sum([[float(b)] * 12 for b in (500, 1000, 1500, 2000)], []))
+    u = lambda: (lambda v: v / np.linalg.norm(v))(rng.normal(size=3))
+    bc = np.vstack([[0., 0., 1.] if b < 50 else u() for b in bv])
+    fdir = np.array([0., 0., 1.])
+    iso_d = np.array([0.15e-3, 0.5e-3, 1.0e-3, 2.0e-3, 3.0e-3, 5.0e-3])
+    iso_f = np.exp(-np.outer(bv, iso_d)); iso_g = iso_f.T @ iso_f
+    ADg = np.linspace(0.6e-3, 2.6e-3, 14); RDg = np.linspace(0.15e-3, 1.1e-3, 12)
+    dr = RDg[1] - RDg[0]
+
+    def synth(ff, ad, rd, snr, seed):
+        r = np.random.default_rng(seed); s = np.zeros(len(bv))
+        for i, b in enumerate(bv):
+            c = float(np.dot(bc[i], fdir))
+            s[i] = (ff * np.exp(-b * (rd + (ad - rd) * c * c))
+                    + 0.20 * np.exp(-b * 1.0e-3) + 0.10 * np.exp(-b * 3.0e-3)
+                    + 0.10 * np.exp(-b * 0.15e-3))
+        return np.sqrt((s + r.normal(0, 1 / snr, len(bv))) ** 2
+                       + r.normal(0, 1 / snr, len(bv)) ** 2)
+
+    # RD vere su una scala molto piu' fine del mezzo passo (0.043e-3)
+    got = []
+    for k in range(30):
+        y = synth(0.55, 1.7e-3, 0.30e-3 + k * 0.008e-3, 60, k)
+        w = np.zeros(1 + len(iso_d))
+        _, rd = S.stagec_varpro_single_fiber(y, bv, bc, fdir, iso_f, iso_g,
+                                             ADg, RDg, 2.0, w)
+        got.append(rd)
+    got = np.asarray(got)
+
+    su_mezzo = np.abs((got - RDg[0]) / (dr / 2) - np.round((got - RDg[0]) / (dr / 2))) < 1e-6
+    assert su_mezzo.mean() < 0.60, (
+        f'{100*su_mezzo.mean():.0f}% dei valori sta ancora sul reticolo a mezzo '
+        f'passo: il raffinamento non sta iterando')
+    atteso = dr / 2 ** S._STAGEC_N_REFINE
+    su_fine = np.abs((got - RDg[0]) / atteso - np.round((got - RDg[0]) / atteso)) < 1e-6
+    assert su_fine.mean() > 0.95, f'{100*su_fine.mean():.0f}% sul reticolo fine atteso'
+    distinti = len(np.unique(np.round(got, 13)))
+    assert distinti >= 15, f'solo {distinti} valori distinti su {len(got)} casi'
+    print(f'  sul reticolo a mezzo passo {100*su_mezzo.mean():.0f}% (era 100%), '
+          f'valori distinti {distinti}/{len(got)}, risoluzione {atteso*1e3:.4f} (x1e-3)')
+
+
+def test_un_solo_raffinamento_riproduce_il_vecchio():
+    """Con _STAGEC_N_REFINE = 1 gli offset coincidono con quelli pre-1.3.4.
+
+    Non e' una verifica numerica ma un'identita' algebrica, e vale la pena
+    scriverla perche' e' la proprieta' che rende bisecabile una regressione:
+    il vecchio codice calcolava `(j-2) * 0.5 * da`, il nuovo calcola
+    `(j-2) * da'` con `da' = da * 0.5`. La moltiplicazione per 0.5 e' esatta in
+    IEEE754 (potenza di due), quindi i due sono bit per bit identici.
+    """
+    da = 0.15384615384615385e-3
+    vecchio = [(j - 2) * 0.5 * da for j in range(5)]
+    nuovo = [(j - 2) * (da * 0.5) for j in range(5)]
+    assert vecchio == nuovo, list(zip(vecchio, nuovo))
+    print('  offset identici bit per bit con N_REFINE = 1')
+
+
 if __name__ == '__main__':
     falliti = 0
     for fn in (test_versione, test_bound_hanno_una_sola_definizione,
                test_pavimento_ad_riconciliato, test_tetto_nnls_alzato,
                test_nessun_punto_di_chiamata_scarta_il_contatore_nei_kernel,
                test_contratto_dei_canali, test_diagnostica_del_solver,
-               test_il_report_mostra_tutto):
+               test_il_report_mostra_tutto,
+               test_risoluzione_del_raffinamento_stagec,
+               test_un_solo_raffinamento_riproduce_il_vecchio):
         print(f'\n=== {fn.__name__} ===')
         try:
             fn(); print('  [ok]')

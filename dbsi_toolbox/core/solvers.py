@@ -123,6 +123,11 @@ _TENSOR_RD_CEIL = 3.00e-3
 # observable instead of assumed.
 _NNLS_MAX_ITER = 20000
 
+# Number of successive bisections in Stage C's local (AD, RD) refinement.
+# 1 reproduces the pre-v1.3.4 behaviour exactly (see the refinement block for why
+# that was not enough). 3 brings the resolution to 1/8 of the coarse grid step.
+_STAGEC_N_REFINE = 3
+
 # Nominal isotropic diffusivities, used only as fallbacks when a compartment
 # carries no weight. Numerically close to some _TENSOR_* bounds by coincidence;
 # they describe a different quantity and must not be merged with them.
@@ -926,19 +931,46 @@ def stagec_varpro_single_fiber(sig_norm, bvals, bvecs, fiber_dir,
         sig_norm, bvals, c2, iso_forward, iso_gram, iso_aty, yty,
         ad_grid, rd_grid, aniso_ratio, best_res, best_ad, best_rd, w_out)
 
-    # Local refine: 5x5 at half the coarse spacing around the best node.
+    # Local refine: _STAGEC_N_REFINE successive 5x5 bisections around the best node.
+    #
+    # Until v1.3.3 this was a SINGLE 5x5 pass at half the coarse spacing, so the
+    # returned (AD, RD) could only ever land on a lattice of half the coarse step.
+    # Measured on real data: 100.0% of single-fiber voxels sat exactly on that
+    # lattice with ZERO intermediate values -- AD quantised to 0.077e-3, RD to
+    # 0.043e-3. The quantisation propagates to whole-brain summaries: the median RD
+    # snaps to a lattice value, which is why the cross-protocol CoV of RD read
+    # 0.00% across five protocols. That zero was the grid, not the measurement, and
+    # reporting it as reproducibility would have been a false claim.
+    #
+    # Iterating the bisection is much cheaper than densifying the coarse grid for
+    # the same resolution: each pass is one more 5x5 scan (25 evaluations) and
+    # halves the step, whereas reaching 1/8 of the coarse step by densification
+    # would cost (14*8) x (12*8) = 10752 evaluations in place of 14x12 = 168.
+    # Three passes cost ~+26% of this routine and give ~1/8 of the coarse step.
+    #
+    # `_STAGEC_N_REFINE = 1` reproduces the old behaviour bit for bit, because the
+    # first pass halves the coarse step exactly as before — useful for bisecting a
+    # regression against v1.3.3.
+    #
+    # NOTE, and it matters: this does NOT address the floor. A voxel whose optimum
+    # lies below _TENSOR_RD_FLOOR still lands exactly on it, because every downward
+    # candidate clamps. ~31% of fiber-valid voxels are in that state. Resolution and
+    # identifiability are different problems; this fixes only the first.
     da = (ad_grid[1] - ad_grid[0]) if ad_grid.shape[0] > 1 else 0.1e-3
     dr = (rd_grid[1] - rd_grid[0]) if rd_grid.shape[0] > 1 else 0.1e-3
     ad_loc = np.empty(5)
     rd_loc = np.empty(5)
-    for j in range(5):
-        av = best_ad + (j - 2) * 0.5 * da
-        rv = best_rd + (j - 2) * 0.5 * dr
-        ad_loc[j] = av if av > _TENSOR_AD_FLOOR else _TENSOR_AD_FLOOR
-        rd_loc[j] = rv if rv > _TENSOR_RD_FLOOR else _TENSOR_RD_FLOOR
-    best_res, best_ad, best_rd = _stagec_scan(
-        sig_norm, bvals, c2, iso_forward, iso_gram, iso_aty, yty,
-        ad_loc, rd_loc, aniso_ratio, best_res, best_ad, best_rd, w_out)
+    for _ in range(_STAGEC_N_REFINE):
+        da *= 0.5
+        dr *= 0.5
+        for j in range(5):
+            av = best_ad + (j - 2) * da
+            rv = best_rd + (j - 2) * dr
+            ad_loc[j] = av if av > _TENSOR_AD_FLOOR else _TENSOR_AD_FLOOR
+            rd_loc[j] = rv if rv > _TENSOR_RD_FLOOR else _TENSOR_RD_FLOOR
+        best_res, best_ad, best_rd = _stagec_scan(
+            sig_norm, bvals, c2, iso_forward, iso_gram, iso_aty, yty,
+            ad_loc, rd_loc, aniso_ratio, best_res, best_ad, best_rd, w_out)
 
     return best_ad, best_rd
 

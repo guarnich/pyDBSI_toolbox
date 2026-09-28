@@ -122,6 +122,7 @@ Morozov VA (1966). On the solution of functional equations by the
 import numpy as np
 from ..core.basis import build_isotropic_dictionary
 from ..core.solvers import nnls_coordinate_descent, compute_regularization_matrix
+from ..utils.tools import _chi_median_factor
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1173,8 +1174,17 @@ def sample_calibration_voxels(data, mask, bvals, b0_thr=100.0,
     # consistent with the temporal method in estimate_snr_robust, but
     # expressed in the normalised-signal space used here.
     if len(b0_idx) >= 2:
+        # De-biased exactly as `estimate_snr_robust` (v1.3.5): the median of the
+        # per-voxel sample standard deviation is sigma * sqrt(median(chi2_k)/k),
+        # k = n_b0 - 1, i.e. x0.6745 at the 2-b0 minimum. Until v1.3.4 the raw
+        # median was returned, so sigma_cal was 32.5% too small AND disagreed
+        # with `estimate_snr_robust`'s own sigma (which was 44.6% too small) by
+        # 22% -- two noise estimates for the same acquisition, neither checked
+        # against the other. Both now agree; `tests/test_snr_sigma_bias.py`
+        # asserts it.
         b0_norm = raw_signals[:, b0_idx] / sampled_s0[:, None]
-        sigma_normalised = float(np.median(np.std(b0_norm, axis=1, ddof=1)))
+        sigma_normalised = (float(np.median(np.std(b0_norm, axis=1, ddof=1)))
+                            / _chi_median_factor(len(b0_idx)))
     else:
         # Fallback: residual spread around the per-voxel mean signal as
         # a rough proxy when too few b0 volumes are available for a

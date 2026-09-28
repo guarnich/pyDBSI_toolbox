@@ -183,6 +183,11 @@ from .calibration.adaptive_n_iso import select_n_iso_svd, select_n_iso_bootstrap
 from .calibration.mc_sure import crosscheck_lambda_iso_sure, crosscheck_n_iso_sure
 
 from .utils.tools import estimate_snr_robust
+from .utils import tools as _tools   # letto a RUNTIME, non per valore:
+#   `_SNR_LEGACY_BIASED` e' un interruttore che il chiamante puo' commutare
+#   (la batteria sintetica lo fa). Importarlo per valore lo congelerebbe
+#   all'import e il run report dichiarerebbe lo stimatore SBAGLIATO mentre
+#   gira l'altro -- la stessa classe di bug del ramo della griglia.
 from .utils.autoconfig import autoconfigure_dictionary
 
 
@@ -2300,7 +2305,16 @@ class DBSI_Adaptive:
                           n_volumes=int(len(bvals)), model_mode=int(model_mode),
                           n_dirs=int(self.n_dirs),
                           hemisphere_spacing_deg=self.hemisphere_spacing_deg_),
-            noise=dict(snr=float(snr), sigma_raw=float(sigma)),
+            # `sigma_estimator` says WHICH estimator produced these two
+            # numbers. Before v1.3.5 the estimator was biased (SNR x1.82,
+            # sigma x0.55 on a 2-b0 acquisition), so a report without this
+            # field cannot be compared with one that has it. See the header
+            # of utils/tools.py.
+            noise=dict(snr=float(snr), sigma_raw=float(sigma),
+                       n_b0=int(np.sum(np.asarray(bvals) < 50)),
+                       sigma_estimator=('legacy_biased'
+                                        if _tools._SNR_LEGACY_BIASED else
+                                        'chi_debiased_median')),
             calibrated=dict(n_iso=int(self.n_iso),
                             lambda_aniso=float(self.lambda_aniso),
                             lambda_iso=float(self.lambda_iso),

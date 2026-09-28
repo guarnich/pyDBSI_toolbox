@@ -1,6 +1,64 @@
 import os
 import numpy as np
 import nibabel as nib
+from scipy.stats import chi2
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NOISE ESTIMATION — bias of the pre-v1.3.5 estimator
+# ─────────────────────────────────────────────────────────────────────────────
+# `estimate_snr_robust` returned an SNR biased HIGH by x1.82 and a sigma biased
+# LOW by x0.55 on a 2-b0 acquisition (the minimum this toolbox accepts, and what
+# the Verona P3 protocol provides). Two independent defects, each measured by
+# Monte Carlo against a known sigma (tests/test_snr_sigma_bias.py):
+#
+#  (1) MEDIAN OF A RATIO. The old code took the median over voxels of the
+#      per-voxel ratio mean/std. With nb0 samples the per-voxel std is
+#      sigma*sqrt(chi2_k / k), k = nb0-1, so the median of the RATIO is not the
+#      ratio of the medians. At nb0=2, std = sigma*|z| and median(1/|z|) =
+#      1/0.6745, so SNR came out x1.483 too high. The bias shrinks with nb0
+#      (x1.051 at 8, x1.012 at 32) but never vanishes at nb0=2.
+#
+#  (2) THE "ITERATIVE RICIAN CORRECTION" WAS A CONSTANT. The loop
+#          snr <- m / sqrt(s^2 - m^2/(2 snr^2))
+#      has a closed-form fixed point: u = m^2/(s^2 - m^2/(2u)) gives
+#      u = (3/2) m^2/s^2, i.e. snr = sqrt(3/2) * (m/s) = 1.2247 * (m/s).
+#      So the 20 iterations only ever multiplied the estimate by 1.2247 — at
+#      EVERY SNR and EVERY nb0. It is not a Rician correction, and the comment
+#      about "how many iterations to converge" described convergence to that
+#      constant. Measured: x1.2247 at nb0 = 2, 4, 8 and 32 alike.
+#
+#      Combined at nb0=2: SNR x1.817, sigma x0.554.
+#
+# WHY IT MATTERS BEYOND THE REPORTED NUMBER. sigma is not cosmetic:
+#   - the Rician correction subtracts a noise floor 2*sigma^2, so at x0.554 it
+#     removed only ~31% of the floor it should have;
+#   - `lambda_iso_discrepancy_cap` and the pass-1 lambda_aniso target N*sigma^2;
+#   - `select_n_iso_svd` thresholds the singular values at 1/snr;
+#   - `select_n_iso_bootstrap` injects noise at sigma.
+#
+# THE REPLACEMENT is robust AND unbiased: take the MEDIAN of the per-voxel
+# standard deviations (robust to motion/outlier voxels, unlike pooling the
+# variances) and divide by the known median of the chi distribution with
+# k = nb0-1 degrees of freedom, sqrt(median(chi2_k)/k) — 0.6745 at nb0=2. SNR is
+# then the ratio of two medians, not the median of a ratio. Verified x1.001
+# against a known sigma at nb0 = 2, 4, 8 and 32.
+#
+# `_SNR_LEGACY_BIASED = True` restores the old estimator bit for bit, so a
+# regression can be bisected against <= v1.3.4 by flipping one constant. It is
+# NOT a supported configuration: it is provably biased.
+_SNR_LEGACY_BIASED = False
+
+
+def _chi_median_factor(n_samples):
+    """E[median] scale of a k-dof sample standard deviation, k = n_samples - 1.
+
+    std_hat = sigma * sqrt(chi2_k / k), so median(std_hat) = sigma * factor with
+    factor = sqrt(median(chi2_k) / k). 0.6745 at n_samples=2, -> 1 as k -> inf.
+    """
+    k = int(n_samples) - 1
+    if k < 1:
+        raise ValueError("at least 2 samples are needed to estimate sigma")
+    return float(np.sqrt(chi2.ppf(0.5, k) / k))
 
 def print_protocol_summary(bvals):
     rounded_bvals = np.round(bvals, -2)
@@ -79,12 +137,9 @@ def estimate_snr_robust(data, bvals, mask, verbose=True):
             f"feeds the Rician correction and the concentration-gate calibration, "
             f"so an unreliable sigma propagates into every downstream stage."
         )
-    if verbose:
-        print("  Method: TEMPORAL (Voxel-wise STD + Iterative Correction)")
     b0_data = data[..., b0_idx]
     mean_b0 = np.mean(b0_data, axis=-1)
     std_b0 = np.std(b0_data, axis=-1, ddof=1)
-    std_b0[std_b0 == 0] = 1e-10
     valid_mask = mask
     if np.sum(valid_mask) == 0:
         # Fino alla v1.2.0 qui si ritornava (SNR=20, sigma=1) inventati.
@@ -94,25 +149,61 @@ def estimate_snr_robust(data, bvals, mask, verbose=True):
         )
     mean_masked = mean_b0[valid_mask]
     std_masked = std_b0[valid_mask]
-    snr_apparent = mean_masked / std_masked
-    snr_corrected = snr_apparent.copy()
-    # Iteratively correct for Rician bias in the noise estimate, which is significant at low SNR.
-    # 5 iterations is insufficient for convergence at typical in-vivo SNR
-    # (e.g. SNR=30 requires ~14 iterations to converge to delta<0.01).
-    # 20 iterations ensures convergence across the full physiological range
-    # (SNR 10-100) with negligible additional cost.
-    for i in range(20):
-        snr_old = snr_corrected.copy()
-        bias_term = mean_masked**2 / (2 * snr_corrected**2 + 1e-10)
-        var_corrected = std_masked**2 - bias_term
-        var_corrected[var_corrected < 0] = 1e-10
-        snr_corrected = mean_masked / np.sqrt(var_corrected)
-        diff = np.mean(np.abs(snr_corrected - snr_old))
-        if diff < 0.01:
-            break
-    final_snr = np.nanmedian(snr_corrected)
-    final_sigma = np.nanmedian(mean_masked / snr_corrected)
+
+    # ── Legacy (biased) path, kept only to bisect against <= v1.3.4 ─────────
+    def _legacy():
+        s = std_masked.copy()
+        s[s == 0] = 1e-10
+        snr_c = (mean_masked / s).copy()
+        for _ in range(20):
+            snr_old = snr_c.copy()
+            bias_term = mean_masked**2 / (2 * snr_c**2 + 1e-10)
+            var_corrected = s**2 - bias_term
+            var_corrected[var_corrected < 0] = 1e-10
+            snr_c = mean_masked / np.sqrt(var_corrected)
+            if np.mean(np.abs(snr_c - snr_old)) < 0.01:
+                break
+        return (float(np.nanmedian(snr_c)),
+                float(np.nanmedian(mean_masked / snr_c)))
+
+    if _SNR_LEGACY_BIASED:
+        if verbose:
+            print("  Method: TEMPORAL (LEGACY, BIASED -- bisection only)")
+        final_snr, final_sigma = _legacy()
+        if verbose:
+            print(f"  Estimated SNR: {final_snr:.2f}")
+            print(f"  Estimated Noise Sigma: {final_sigma:.4f}")
+        return float(final_snr), float(final_sigma)
+
+    # ── Unbiased path (default from v1.3.5) ────────────────────────────────
+    # sigma from the MEDIAN of the per-voxel standard deviations, de-biased by
+    # the known chi median factor for k = n_b0 - 1 degrees of freedom; SNR as a
+    # ratio of two medians. See the module header for the two defects this
+    # replaces and the Monte Carlo that measured them.
     if verbose:
+        print(f"  Method: TEMPORAL (median per-voxel sigma, chi-debiased, "
+              f"k={n_b0 - 1})")
+    factor = _chi_median_factor(n_b0)
+    sigma_biased = float(np.nanmedian(std_masked))
+    final_sigma = sigma_biased / factor
+    signal_level = float(np.nanmedian(mean_masked))
+    if final_sigma <= 0 or not np.isfinite(final_sigma):
+        raise ValueError(
+            "Noise sigma estimated as zero or non-finite from the b=0 volumes. "
+            "This usually means the b=0 volumes are duplicates of one another "
+            "(identical voxel values), in which case they carry no information "
+            "about the noise level and SNR cannot be estimated from the data."
+        )
+    final_snr = signal_level / final_sigma
+
+    if verbose:
+        print(f"  chi median de-bias factor: {factor:.4f} "
+              f"(raw median sigma {sigma_biased:.4f})")
         print(f"  Estimated SNR: {final_snr:.2f}")
         print(f"  Estimated Noise Sigma: {final_sigma:.4f}")
+        _lsnr, _lsig = _legacy()
+        print(f"  [<=v1.3.4 would have reported SNR {_lsnr:.2f} "
+              f"(x{_lsnr / final_snr:.3f}) and sigma {_lsig:.4f} "
+              f"(x{_lsig / final_sigma:.3f}) -- biased, see tools.py header]")
+
     return float(final_snr), float(final_sigma)

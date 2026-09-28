@@ -447,6 +447,7 @@ def format_run_report(report, saved_channels=None):
     p = R.get('protocol', {})
     block("Protocol", p)
     block("Noise", R.get('noise'))
+    block("Rician clamp", R.get('rician_clamp'))
     block("Fit-quality reference", R.get('fit_quality_reference'))
     block("Calibrated hyperparameters", R.get('calibrated'))
     block("Options", R.get('options'))

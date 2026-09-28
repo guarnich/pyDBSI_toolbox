@@ -1668,6 +1668,7 @@ class DBSI_Adaptive:
         self.diff_pairs_ = None
         self.sure_crosscheck_report_ = None
         self.n_iso_source_ = None
+        self.rician_clamp_ = None
         self.lambda_edges_ = {}
         self.hemisphere_spacing_deg_ = None
         self.cone_refinement_schedule_ = None
@@ -1720,6 +1721,7 @@ class DBSI_Adaptive:
         self.n_iso_columns_ = None
         self.n_iso_columns_res_ = None
         self.n_iso_columns_wat_ = None
+        self.rician_clamp_ = None
 
         print("\n" + "="*70)
         print("  DBSI ADAPTIVE PIPELINE — v3 + MRDS Multi-Fiber Extension")
@@ -1865,7 +1867,50 @@ class DBSI_Adaptive:
                              np.sqrt(np.maximum(masked_sq - noise_floor, 0.0)),
                              0.0).astype(np.float32)
         data_corr[xs, ys, zs] = corrected
-        del masked_sq, valid_mask, corrected
+
+        # ── Quante misure la correzione AZZERA, e in quanti voxel ───────────
+        # `S^2 - 2 sigma^2` e' non distorto per A^2 ma puo' essere NEGATIVO, e qui
+        # viene troncato a ESATTAMENTE 0. Non e' cosmetico: Stage D legge la
+        # frazione restricted dal plateau ad alto b, e i valori troncati sono
+        # proprio i punti ad alto b dei voxel a segnale basso. Una NNLS non puo'
+        # riprodurre uno zero esatto se non azzerando i pesi, quindi il fit viene
+        # tirato verso le colonne a decadimento rapido -> RF distorta VERSO IL
+        # BASSO esattamente dove il segnale e' debole, e senza nessun segnale
+        # d'allarme.
+        #
+        # La v1.3.5, correggendo sigma (che era x0.55 a 2 volumi b=0 e x0.78 a 9),
+        # ha reso la correzione piu' forte e quindi ha RADDOPPIATO i troncamenti.
+        # Misurato su segnale sintetico con decadimento tipico e 9 volumi b=0:
+        #     SNR vero   troncate con sigma vecchio   con sigma 1.3.5
+        #        37.2              0.40%                   0.91%
+        #        26.3              2.44%                   4.53%
+        #        20.0              5.36%                   9.26%
+        #        11.7             13.50%                  20.72%
+        # La correzione di sigma e' giusta; il difetto e' il TRONCAMENTO, ed era
+        # la' da sempre. Qui viene almeno reso osservabile: senza questo conteggio
+        # non c'era modo di sapere quanti voxel ne sono toccati.
+        _n_clamp = int(np.sum(~valid_mask))
+        _tot_meas = int(masked_sq.size)
+        _per_vox = np.sum(~valid_mask, axis=1)
+        self.rician_clamp_ = dict(
+            fraction_of_measurements=round(_n_clamp / max(_tot_meas, 1), 6),
+            fraction_of_voxels_any=round(float(np.mean(_per_vox > 0)), 6),
+            fraction_of_voxels_over_10pct=round(
+                float(np.mean(_per_vox > 0.10 * masked_sq.shape[1])), 6),
+            max_clamped_in_one_voxel=int(_per_vox.max()) if _per_vox.size else 0,
+            n_volumes=int(masked_sq.shape[1]),
+        )
+        print(f"   Rician clamp: {100*self.rician_clamp_['fraction_of_measurements']:.2f}% "
+              f"of measurements truncated to exactly 0 "
+              f"({100*self.rician_clamp_['fraction_of_voxels_any']:.1f}% of voxels "
+              f"affected, {100*self.rician_clamp_['fraction_of_voxels_over_10pct']:.1f}% "
+              f"with >10% of their volumes truncated)")
+        if self.rician_clamp_['fraction_of_voxels_over_10pct'] > 0.05:
+            print(f"   [WARNING] more than 5% of voxels have >10% of their measurements "
+                  f"truncated to zero. Stage D reads the restricted fraction from the "
+                  f"high-b plateau, which is where the truncation bites, so RF is "
+                  f"biased DOWN in those voxels. Consider excluding them.")
+        del masked_sq, valid_mask, corrected, _per_vox
 
         # ── Calibration sample: 1000 voxels, fixed seed (v1.3.1) ───────────
         # The default was 500 until v1.3.1. A seed sweep on real data (5P
@@ -2413,6 +2458,10 @@ class DBSI_Adaptive:
             fit_quality_reference=dict(r2_reference='raw_signal',
                                        fractions_fitted_on='rician_corrected',
                                        monofiber_tensor_fitted_on='raw'),
+            # Quanto la correzione Rician ha TRONCATO. Vedi il blocco della
+            # correzione: distorce la RF verso il basso dove morde, e la 1.3.5
+            # l'ha raddoppiato correggendo sigma.
+            rician_clamp=dict(getattr(self, 'rician_clamp_', {}) or {}),
             noise=dict(snr=float(snr), sigma_raw=float(sigma),
                        n_b0=int(np.sum(np.asarray(bvals) < 50)),
                        sigma_estimator=('legacy_biased'

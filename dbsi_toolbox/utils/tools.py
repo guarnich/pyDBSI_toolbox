@@ -29,6 +29,26 @@ from scipy.stats import chi2
 #
 #      Combined at nb0=2: SNR x1.817, sigma x0.554.
 #
+#  HOW BIG THE BIAS IS DEPENDS ON nb0, AND 2 IS THE FLOOR, NOT THE TYPICAL CASE.
+#  Do not quote x1.82 as "the" bias: the Verona P3 cohort acquires NINE b=0
+#  volumes (measured, n_b0=9 on all 178 subjects), where defect (1) has almost
+#  vanished and essentially only the sqrt(3/2) remains:
+#
+#      nb0     chi factor    sigma x
+#        2       0.6745       1.816    <- the toolbox MINIMUM
+#        4       0.8881       1.379
+#        9       0.9581       1.278    <- the real acquisition
+#       16       0.9777       1.253
+#
+#  Also worth knowing when correcting numbers already produced: sigma can be
+#  corrected EXACTLY from an old report, because the legacy fixed point makes
+#  m_v/snr_v = s_v/sqrt(1.5) identically, so sigma_legacy = median(s_v)/sqrt(1.5)
+#  and sigma_true = sigma_legacy * sqrt(1.5)/c(nb0) -- verified to 5 decimals and
+#  independent of how heterogeneous the signal is across the mask. The SNR cannot:
+#  it is a median of a RATIO, which does not decompose, and the measured factor at
+#  nb0=9 moves between 1.268 and 1.295 with tissue heterogeneity. An old SNR must
+#  be RECOMPUTED, not rescaled.
+#
 # WHY IT MATTERS BEYOND THE REPORTED NUMBER. sigma is not cosmetic:
 #   - the Rician correction subtracts a noise floor 2*sigma^2, so at x0.554 it
 #     removed only ~31% of the floor it should have;

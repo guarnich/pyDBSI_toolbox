@@ -80,8 +80,20 @@ def _griglia_usata(**kw_costruttore):
         for n, f in {**orig_grid, **orig_kern}.items():
             setattr(M, n, f)
 
-    assert len(visto) == 1, f'attesa 1 chiamata alla griglia, viste {visto}'
-    return visto[0]
+    # ATTENZIONE A COSA SI ASSERISCE QUI. Fino alla 1.3.5 questo test pretendeva
+    # UNA sola chiamata al costruttore della griglia. Non era l'invariante: era
+    # un dettaglio d'implementazione, ed e' cambiato legittimamente nella 1.3.6,
+    # dove il modello costruisce una griglia di RIFERIMENTO ricca (per sottrarre
+    # la fibra prima del bootstrap di n_iso) oltre a quella del fit. L'invariante
+    # da proteggere e' un altro, e non dipende dal numero di chiamate:
+    #   NESSUNA chiamata deve finire sul costruttore LINEARE.
+    # Il conteggio resta stampato, cosi' un cambio di architettura si vede.
+    assert visto, 'nessuna griglia isotropa costruita: il fit non e\' arrivato li\''
+    lineari = [v for v in visto if v[0] == 'generate_isotropic_grid']
+    assert not lineari, (
+        f'costruttore LINEARE usato (era il bug di v1.3.1): {lineari}')
+    # quella che conta per il fit e' l'ULTIMA: il riferimento viene prima.
+    return visto[-1], visto
 
 
 FROZEN = dict(lambda_aniso=8.376776400682925,
@@ -99,9 +111,11 @@ def test_griglia_ancorata_sempre():
     }
     esiti = {}
     for etichetta, kw in casi.items():
-        nome, ncol = _griglia_usata(**kw)
+        (nome, ncol), tutte = _griglia_usata(**kw)
         esiti[etichetta] = (nome, ncol)
-        print(f'  {etichetta:58s} -> {nome} ({ncol} colonne)')
+        extra = (f'   [+{len(tutte)-1} griglia/e di riferimento: '
+                 f'{[c for _, c in tutte[:-1]]}]' if len(tutte) > 1 else '')
+        print(f'  {etichetta:58s} -> {nome} ({ncol} colonne){extra}')
     cattivi = {k: v for k, v in esiti.items()
                if v[0] != 'generate_anchored_isotropic_grid'}
     assert not cattivi, (

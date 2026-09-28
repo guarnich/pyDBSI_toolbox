@@ -10,7 +10,13 @@ protocollo P3):
     sigma x 0.55   (troppo basso)
 
 per due difetti indipendenti, e questo file li misura entrambi contro un sigma
-NOTO invece di fidarsi dell'algebra:
+NOTO invece di fidarsi dell'algebra.
+
+ATTENZIONE A COME SI CITA IL NUMERO: x1.82 vale a **2** volumi b=0, che e' il
+minimo accettato, non il caso tipico. La coorte Verona P3 ne acquisisce **9**
+(misurato su 178 soggetti), dove il difetto 1 e' quasi svanito e il fattore
+scende a **x1.28**. I test girano a 2, 4 e 8 volumi proprio per questo.
+
 
   1. mediana di un rapporto. La std per voxel su k = nb0-1 gradi di liberta'
      e' sigma*sqrt(chi2_k/k); la mediana del RAPPORTO non e' il rapporto delle

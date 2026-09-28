@@ -1198,6 +1198,71 @@ def sample_calibration_voxels(data, mask, bvals, b0_thr=100.0,
 # COMBINED CONVENIENCE WRAPPER
 # ─────────────────────────────────────────────────────────────────────────────
 
+def fiber_subtracted_residual(bvals, bvecs, fiber_dirs, diff_pairs, iso_grid,
+                              y_voxels, sigma,
+                              lambda_aniso_bracket=(1e-6, 1e4)):
+    """What the ISOTROPIC block must actually explain: the signal with the
+    anisotropic contribution removed by a preliminary joint NNLS.
+
+    WHY THIS EXISTS AS A SEPARATE FUNCTION (v1.3.6)
+    -----------------------------------------------------------------------
+    Fitting an isotropic-only dictionary to a real voxel signal is a
+    MIS-SPECIFIED problem: on fibre-containing voxels the signal is dominated by
+    the anisotropic component, which the iso block structurally cannot
+    represent, and that model mismatch — not the noise — dominates whatever
+    criterion is being evaluated. `select_lambdas_data_driven` already knew this
+    for lambda_iso and did the subtraction inline. The n_iso bootstrap did NOT:
+    it fitted iso-only dictionaries to full signals, and the consequence was
+    measurable — on a phantom with a true restricted fraction of 0.10 and a
+    fibre at FF 0.55, the iso-only reference fit returned a restricted fraction
+    of **0.000**, so the bias term was computed against a degenerate reference
+    and the selection ran away to the largest candidate.
+
+    THE CIRCULARITY, AND HOW IT IS BROKEN. The subtraction needs an iso grid,
+    and the iso grid is what n_iso selects. The circle is broken by doing the
+    subtraction on a FIXED, rich iso grid (the caller's `iso_grid`, in practice
+    the bootstrap's reference grid): the fibre part it removes does not depend
+    on which candidate is being scored, so every candidate is then scored on the
+    same residual.
+
+    The preliminary lambdas are the same "pass 1" pair the main path uses, and
+    the main path's own validation applies: the resulting residual was shown
+    insensitive to the preliminary lambda_aniso across a >30x range.
+
+    Returns
+    -------
+    y_iso_resid : ndarray, same shape as `np.atleast_2d(y_voxels)`
+    diag : dict
+        {'lambda_iso_prelim', 'lambda_aniso_prelim', 'n_aniso_cols'}
+    """
+    from ..core.basis import build_design_matrix_exhaustive
+
+    y2d = np.atleast_2d(np.asarray(y_voxels, dtype=np.float64))
+    n_aniso_cols = len(fiber_dirs) * len(diff_pairs)
+
+    A = build_design_matrix_exhaustive(bvals, bvecs, fiber_dirs, diff_pairs, iso_grid)
+    AtA = A.T @ A
+    At = A.T
+    A_aniso = A[:, :n_aniso_cols]
+    max_eig_aniso = float(np.linalg.eigvalsh(AtA[:n_aniso_cols, :n_aniso_cols])[-1])
+
+    lam_iso_1, _ = select_lambda_iso_gcv(bvals, iso_grid, y2d)
+    lam_aniso_1, _ = select_lambda_aniso_discrepancy(
+        AtA, At, y2d, n_aniso_cols, sigma, lam_iso_1,
+        lambda_lo=lambda_aniso_bracket[0], lambda_hi=lambda_aniso_bracket[1],
+        n_dirs=len(fiber_dirs), max_eig_aniso=max_eig_aniso,
+    )
+    AtA_reg = compute_regularization_matrix(AtA, n_aniso_cols, lam_aniso_1, lam_iso_1)
+
+    y_resid = np.empty_like(y2d)
+    for v in range(y2d.shape[0]):
+        w, _ = nnls_coordinate_descent(AtA_reg, At @ y2d[v], 0.0)
+        y_resid[v] = y2d[v] - A_aniso @ w[:n_aniso_cols]
+    return y_resid, dict(lambda_iso_prelim=float(lam_iso_1),
+                         lambda_aniso_prelim=float(lam_aniso_1),
+                         n_aniso_cols=int(n_aniso_cols))
+
+
 def select_lambdas_data_driven(bvals, bvecs, fiber_dirs, diff_pairs, iso_grid,
                                 y_voxels, sigma,
                                 lambda_iso_grid=None,

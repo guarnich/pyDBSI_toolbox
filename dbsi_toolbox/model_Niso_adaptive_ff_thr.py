@@ -174,7 +174,8 @@ from .core.solvers import (
     measure_hemisphere_spacing,
     estimate_AD_RD_mrds,          # NEW — MRDS multi-fiber Stage B
 )
-from .calibration.data_driven import (select_lambdas_data_driven,
+from .calibration.data_driven import (fiber_subtracted_residual,
+                                      select_lambdas_data_driven,
                                        sample_calibration_voxels,
                                        calibrate_concentration_gate_mc,
                                        build_rf_response_table,
@@ -196,6 +197,12 @@ from .utils.autoconfig import autoconfigure_dictionary
 # ─────────────────────────────────────────────────────────────────────────────
 
 FIBER_THRESHOLD = 0.15      # dimensionless — minimum FF for AD/RD estimation
+
+# Passi della griglia isotropa di RIFERIMENTO usata (a) per sottrarre la fibra
+# prima del bootstrap di n_iso e (b) come riferimento del bias dentro il
+# bootstrap. Deve essere piu' ricca di ogni candidato, altrimenti il bias di
+# un candidato fine sarebbe zero per costruzione.
+_N_ISO_REF_STEPS = 48
 
 THRESH_RES = 0.3e-3          # mm^2/s — restricted / hindered boundary
 THRESH_WAT = 3.0e-3          # mm^2/s — hindered  / free-water boundary
@@ -1671,7 +1678,6 @@ class DBSI_Adaptive:
            n_calibration_voxels=1000,
            n_iso_method='bootstrap', n_bootstrap=50,
            run_sure_crosscheck=False, sure_crosscheck_n_probes=15,
-           run_n_iso_sweep_diagnostic=False,
            calibrate_concentration_gate=True,
            concentration_gate_percentile=_CONCENTRATION_GATE_PERCENTILE,
            correct_restricted_fraction=False):
@@ -1862,11 +1868,43 @@ class DBSI_Adaptive:
             if n_iso_method == 'bootstrap':
                 print(f"\n4. Selecting n_iso — BOOTSTRAP bias-variance "
                       f"({n_bootstrap} replicates/voxel)...")
-                self.n_iso, _n_iso_diag = select_n_iso_bootstrap(
-                    bvals, y_cal, snr, sigma_cal,
+                # Il bootstrap valuta un problema ISOTROPO, quindi va nutrito
+                # con cio' che il blocco isotropo deve davvero spiegare: il
+                # segnale con la FIBRA SOTTRATTA. Fino alla 1.3.5 riceveva il
+                # segnale pieno, e su voxel con fibra il dizionario isotropo la
+                # assorbiva: RF di riferimento 0.000 su un fantoccio con RF vera
+                # 0.10, e selezione in fuga verso il candidato piu' grande.
+                # La sottrazione usa una griglia isotropa FISSA e ricca, quindi
+                # non dipende da quale candidato si sta valutando -- e' cosi' che
+                # si rompe la circolarita' (serve una griglia per scegliere
+                # n_iso, e n_iso sceglie la griglia).
+                _ref_grid_pre = generate_anchored_isotropic_grid(
                     d_min=max(self.iso_range[0], 0.1e-3), d_max=iso_d_max,
-                    n_bootstrap=n_bootstrap,
+                    n_steps=_N_ISO_REF_STEPS,
+                    thresh_res=THRESH_RES, thresh_wat=THRESH_WAT,
                 )
+                print(f"   Subtracting the fibre component first "
+                      f"({len(_ref_grid_pre)}-column reference iso grid) — the "
+                      f"bootstrap scores an isotropic problem, so it must see "
+                      f"the isotropic residual.")
+                y_cal_iso, _resid_diag = fiber_subtracted_residual(
+                    bvals, bvecs, fiber_dirs, diff_pairs, _ref_grid_pre,
+                    y_cal, sigma_cal,
+                )
+                self.n_iso, _n_iso_diag = select_n_iso_bootstrap(
+                    bvals, y_cal_iso, snr, sigma_cal,
+                    d_min=max(self.iso_range[0], 0.1e-3), d_max=iso_d_max,
+                    n_bootstrap=n_bootstrap, n_ref_steps=_N_ISO_REF_STEPS,
+                )
+                _n_iso_diag['fiber_subtraction'] = _resid_diag
+                # Rifiuto esplicito: meglio il ripiego SVD che un n_iso scelto
+                # contro un riferimento degenere.
+                if self.n_iso is None:
+                    print(f"   [WARNING] the bootstrap refused to select "
+                          f"(degenerate reference). Falling back to SVD+floor.")
+                    self.n_iso, _svd_diag = select_n_iso_svd(bvals, snr)
+                    self.n_iso_source_ = 'svd_fallback_degenerate_reference'
+                    print(f"   SVD+floor fallback: n_iso={self.n_iso}")
                 # ── Fallback: ONLY when the composite curve is flat. ────────
                 # `sample_looks_homogeneous` (all per-candidate biases < 1pp)
                 # used to veto the bootstrap too. It must not: the criterion
@@ -1885,7 +1923,9 @@ class DBSI_Adaptive:
                 # It is now a warning only. See `select_n_iso_bootstrap`'s
                 # docstring: it was tuned on a near-homogeneous SYNTHETIC
                 # sample, where the same threshold means something else.
-                if _n_iso_diag['sample_looks_homogeneous']:
+                if self.n_iso_source_ == 'svd_fallback_degenerate_reference':
+                    pass                      # gia' deciso e dichiarato sopra
+                elif _n_iso_diag['sample_looks_homogeneous']:
                     print(f"   [NOTE] Bias is <1 percentage point for every "
                           f"candidate n_iso. On a large real-data sample this "
                           f"is expected (the bias proxy averages out) and is "
@@ -1947,6 +1987,18 @@ class DBSI_Adaptive:
             d_min=max(self.iso_range[0], 0.1e-3), d_max=iso_d_max,
             n_steps=self.n_iso, thresh_res=THRESH_RES, thresh_wat=THRESH_WAT,
         )
+        # `n_iso` IS NOT THE NUMBER OF ISOTROPIC COMPONENTS. The anchored
+        # constructor returns MORE points than n_steps (it pins a column on each
+        # compartment threshold and fills oversized geometric gaps), and the
+        # realised length is not even monotone in n_iso: with the production
+        # range, n_iso=6 gives 11 columns while n_iso=8 gives 10, and the
+        # restricted column count drops from 4 to 3. A reader who sees
+        # "n_iso: 6" in the run report will understand six isotropic
+        # components; it is eleven. Store the realised length so the report can
+        # state the model order that was actually used.
+        self.n_iso_columns_ = int(len(iso_grid))
+        self.n_iso_columns_res_ = int(np.sum(iso_grid <= THRESH_RES))
+        self.n_iso_columns_wat_ = int(np.sum(iso_grid > THRESH_WAT))
 
         # ── Calibration of (lambda_aniso, lambda_iso) ───────────────────────
         if run_calibration and (self.lambda_aniso is None or self.lambda_iso is None):
@@ -2288,6 +2340,18 @@ class DBSI_Adaptive:
         # imports this module's channel constants -- the deferred import is
         # what keeps that one-directional.
         from .fit_quality import compute_fit_quality
+        # NOTE ON WHAT R2 IS MEASURED AGAINST, because it is not obvious and was
+        # not declared until v1.3.6: `data` here is the RAW signal, while the
+        # compartment fractions come from Stage D fitted on the RICIAN-CORRECTED
+        # signal and the mono-fibre tensor from Stage C fitted on the raw one. So
+        # R2 is neither a pure fit residual nor a pure prediction error: it
+        # answers "how well does the final model explain what was measured",
+        # which is the question a reader actually wants, but it carries a
+        # systematic penalty at high b, where the raw signal sits above the true
+        # decay by the Rician noise floor. The choice is deliberate and is now
+        # recorded in the run report as `r2_reference`; it is NOT interchangeable
+        # with an R2 computed against data_corr, so the two must never be
+        # compared across runs without checking that field.
         results[..., _C_R2], results[..., _C_RMSE] = compute_fit_quality(
             data, bvals, bvecs, mask, results, model_mode,
             fiber_threshold=self.fiber_threshold, verbose=True,
@@ -2310,12 +2374,26 @@ class DBSI_Adaptive:
             # sigma x0.55 on a 2-b0 acquisition), so a report without this
             # field cannot be compared with one that has it. See the header
             # of utils/tools.py.
+            # `r2_reference` dice contro quale segnale e' calcolato R2. Prima
+            # della 1.3.6 non era dichiarato, quindi due R2 non erano
+            # confrontabili senza leggere il codice.
+            fit_quality_reference=dict(r2_reference='raw_signal',
+                                       fractions_fitted_on='rician_corrected',
+                                       monofiber_tensor_fitted_on='raw'),
             noise=dict(snr=float(snr), sigma_raw=float(sigma),
                        n_b0=int(np.sum(np.asarray(bvals) < 50)),
                        sigma_estimator=('legacy_biased'
                                         if _tools._SNR_LEGACY_BIASED else
                                         'chi_debiased_median')),
             calibrated=dict(n_iso=int(self.n_iso),
+                            # La dimensione VERA del blocco isotropo. n_iso e'
+                            # il parametro chiesto, non l'ordine del modello:
+                            # vedi il commento accanto a n_iso_columns_.
+                            n_iso_columns=int(getattr(self, 'n_iso_columns_', -1)),
+                            n_iso_columns_restricted=int(
+                                getattr(self, 'n_iso_columns_res_', -1)),
+                            n_iso_columns_water=int(
+                                getattr(self, 'n_iso_columns_wat_', -1)),
                             lambda_aniso=float(self.lambda_aniso),
                             lambda_iso=float(self.lambda_iso),
                             concentration_gate=float(self.min_dominant_concentration),

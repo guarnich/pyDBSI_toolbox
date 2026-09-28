@@ -1692,6 +1692,35 @@ class DBSI_Adaptive:
         model_mode : int
             2 or 3.
         """
+        # ── Attributi di RUN: azzerati QUI, non in __init__ ─────────────────
+        # Erano inizializzati SOLO in `__init__`, quindi un secondo `fit()` sullo
+        # STESSO oggetto vedeva i valori del primo. Per la maggior parte non
+        # importava (vengono riscritti a ogni fit), ma `n_iso_source_` e
+        # `sure_crosscheck_report_` si scrivono solo su ALCUNI percorsi: con
+        # n_iso passato (calibrazione congelata) `n_iso_source_` restava quello
+        # del fit precedente, e il run report dichiarava una provenienza
+        # sbagliata. La v1.3.6 ha reso la cosa consequenziale introducendo un
+        # ramo che LEGGE `n_iso_source_` per sapere se il ripiego era già
+        # scattato: su un oggetto riusato quel ramo scattava a torto, saltando il
+        # controllo `curve_is_flat` e lasciando la provenienza mislabellata.
+        # Nessun notebook riusa l'oggetto — ognuno costruisce un DBSI_Adaptive
+        # per fit — ma è esattamente la classe "il comportamento dipende da come
+        # lo invochi" che ha prodotto il bug della griglia isotropa.
+        self.model_mode_ = None
+        self.b_max_ = None
+        self.n_shells_ = None
+        self.n_aniso_cols_ = None
+        self.diff_pairs_ = None
+        self.sure_crosscheck_report_ = None
+        self.n_iso_source_ = None
+        self.lambda_edges_ = {}
+        self.hemisphere_spacing_deg_ = None
+        self.cone_refinement_schedule_ = None
+        self.run_report_ = None
+        self.n_iso_columns_ = None
+        self.n_iso_columns_res_ = None
+        self.n_iso_columns_wat_ = None
+
         print("\n" + "="*70)
         print("  DBSI ADAPTIVE PIPELINE — v3 + MRDS Multi-Fiber Extension")
         print("="*70)
@@ -1899,7 +1928,8 @@ class DBSI_Adaptive:
                 _n_iso_diag['fiber_subtraction'] = _resid_diag
                 # Rifiuto esplicito: meglio il ripiego SVD che un n_iso scelto
                 # contro un riferimento degenere.
-                if self.n_iso is None:
+                _rifiutato = (self.n_iso is None)
+                if _rifiutato:
                     print(f"   [WARNING] the bootstrap refused to select "
                           f"(degenerate reference). Falling back to SVD+floor.")
                     self.n_iso, _svd_diag = select_n_iso_svd(bvals, snr)
@@ -1923,7 +1953,10 @@ class DBSI_Adaptive:
                 # It is now a warning only. See `select_n_iso_bootstrap`'s
                 # docstring: it was tuned on a near-homogeneous SYNTHETIC
                 # sample, where the same threshold means something else.
-                if self.n_iso_source_ == 'svd_fallback_degenerate_reference':
+                # Variabile LOCALE, non l'attributo: l'attributo sopravvive fra
+                # due fit sullo stesso oggetto (vedi l'azzeramento in testa a
+                # fit()), quindi leggerlo qui faceva scattare questo ramo a torto.
+                if _rifiutato:
                     pass                      # gia' deciso e dichiarato sopra
                 elif _n_iso_diag['sample_looks_homogeneous']:
                     print(f"   [NOTE] Bias is <1 percentage point for every "

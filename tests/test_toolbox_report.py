@@ -54,8 +54,7 @@ def _fit_e_salva():
     mask = np.ones(data.shape[:3], bool)
     m = DBSI_Adaptive(**FROZEN)
     with contextlib.redirect_stdout(io.StringIO()):
-        res, mode = m.fit(data, bvals, bvecs, mask, run_calibration=False,
-                          correct_restricted_fraction=False)
+        res, mode = m.fit(data, bvals, bvecs, mask, run_calibration=False)
     out = tempfile.mkdtemp(prefix='dbsi_report_')
     with contextlib.redirect_stdout(io.StringIO()):
         saved = save_output_maps(res, DBSI_Adaptive.output_map_names(mode),

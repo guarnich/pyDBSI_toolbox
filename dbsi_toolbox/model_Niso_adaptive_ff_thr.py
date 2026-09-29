@@ -177,9 +177,7 @@ from .core.solvers import (
 from .calibration.data_driven import (fiber_subtracted_residual,
                                       select_lambdas_data_driven,
                                        sample_calibration_voxels,
-                                       calibrate_concentration_gate_mc,
-                                       build_rf_response_table,
-                                       apply_rf_correction)
+                                       calibrate_concentration_gate_mc)
 from .calibration.adaptive_n_iso import select_n_iso_svd, select_n_iso_bootstrap
 from .calibration.mc_sure import crosscheck_lambda_iso_sure, crosscheck_n_iso_sure
 
@@ -576,17 +574,6 @@ _ISO_RESOLVE_D_2ISO = (0.15e-3, 1.5e-3)            # RF, NRF centroids (single-s
 # ~0.39) reproduces the hand-validated 0.35 behaviour, now data-driven.
 _CONCENTRATION_GATE_PERCENTILE = 90.0
 _CONCENTRATION_GATE_N_MC = 400
-
-# Data-driven restricted-fraction bias correction (MC response function, see
-# calibration.data_driven.build_rf_response_table). Grid of true (FF, RF) over
-# which the per-dataset RF_est response is measured (nuisance marginalised) and
-# then inverted per voxel to correct the systematic restricted<->hindered leak.
-_RF_CORRECTION_FF_LEVELS = (0.0, 0.2, 0.4, 0.6)
-_RF_CORRECTION_RF_LEVELS = (0.0, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50)
-_RF_CORRECTION_REPS = 40
-# Below this recovered-RF knee the response is in its dead-zone (restricted
-# signal unrecoverable); used only to warn how many voxels are unresolved.
-_RF_DEADZONE_EST = 0.02
 
 
 def _default_direction_peak_k(n_dirs):
@@ -1787,7 +1774,6 @@ class DBSI_Adaptive:
            run_sure_crosscheck=False, sure_crosscheck_n_probes=15,
            calibrate_concentration_gate=False,
            concentration_gate_percentile=_CONCENTRATION_GATE_PERCENTILE,
-           correct_restricted_fraction=False,
            _calibration_only=False, _lambda_aniso_grid=None, _lambda_iso_grid=None):
         """
         Fit the v3 hybrid two-stage adaptive DBSI model (+ MRDS
@@ -2383,8 +2369,8 @@ class DBSI_Adaptive:
             thresh_res=float(THRESH_RES), thresh_wat=float(THRESH_WAT),
         )
 
-        # Both MC-null calibrations below (concentration gate + RF response)
-        # simulate unit-S0 signals, so they need sigma in NORMALISED (S/S0)
+        # The MC-null calibration below (concentration gate) simulates
+        # unit-S0 signals, so it needs sigma in NORMALISED (S/S0)
         # units — NOT the raw-signal sigma from estimate_snr_robust (which is on
         # the S0 scale, ~thousands on real data). Passing the raw sigma makes the
         # unit-amplitude MC pure noise, saturating the null concentration to ~1.0
@@ -2393,7 +2379,7 @@ class DBSI_Adaptive:
         # n_iso calibration ran; sample it here if the caller supplied everything
         # explicitly so it is never None below.
         if sigma_cal is None and run_calibration and (
-                calibrate_concentration_gate or correct_restricted_fraction):
+                calibrate_concentration_gate):
             _yc_tmp, sigma_cal = sample_calibration_voxels(
                 data_corr, mask, bvals, n_voxels=n_calibration_voxels, seed=0)
             del _yc_tmp
@@ -2422,23 +2408,6 @@ class DBSI_Adaptive:
             self.min_dominant_concentration_default_ = self.min_dominant_concentration
             self.min_dominant_concentration = _gate_mc
             self.concentration_gate_diag_ = _gate_diag
-
-        # ── Data-driven restricted-fraction response function (MC) ──────────
-        # Build the per-dataset RF_est(FF_true, RF_true) transfer table now (same
-        # lambdas/dictionary/sigma as the fit) so the systematic restricted<->
-        # hindered leak can be inverted per voxel after fitting. Applied later.
-        self.rf_response_table_ = None
-        if run_calibration and correct_restricted_fraction:
-            _ff_rows, _rf_lv, _rf_grid = build_rf_response_table(
-                bvals, bvecs, At, AtA_reg, n_aniso_cols, iso_grid, THRESH_RES,
-                sigma_cal, ff_levels=_RF_CORRECTION_FF_LEVELS,
-                rf_levels=_RF_CORRECTION_RF_LEVELS, reps=_RF_CORRECTION_REPS,
-                b0_thr=100.0, seed=0,
-            )
-            self.rf_response_table_ = (_ff_rows, _rf_lv, _rf_grid)
-            print(f"   RF response function (data-driven bias correction): "
-                  f"FF rows {np.round(_ff_rows, 2).tolist()}, RF_true grid "
-                  f"{list(_RF_CORRECTION_RF_LEVELS)} -> table built.")
 
         # ── Solo calibrazione: ci si ferma qui, prima del fit voxel per voxel ──
         if _calibration_only:
@@ -2545,37 +2514,6 @@ class DBSI_Adaptive:
             _iso_resolve_pass(data_corr, coords, bvals, bvecs, b0_thr, _iso_d,
                               use_3iso, results)
             print(f"   Stage D completed: {time.time() - _t0d:.1f}s")
-
-        # ── Data-driven restricted-fraction bias correction (IN-PLACE) ──────
-        # Invert the per-dataset RF response function to undo the systematic
-        # restricted<->hindered under-recovery. The corrected value replaces the
-        # raw restricted_fraction (channel 1) as the best available estimate;
-        # the same delta is restored from the non-restricted band (HF in 3-ISO,
-        # NRF in 2-ISO) so FF + RF + NRF stays consistent.
-        if self.rf_response_table_ is not None:
-            _ff_rows, _rf_lv, _rf_grid = self.rf_response_table_
-            _m = mask & ~np.isnan(results[..., _C_RF]) & ~np.isnan(results[..., _C_FF])
-            if np.any(_m):
-                rf_raw = results[..., _C_RF][_m].astype(np.float64)
-                ff_raw = results[..., _C_FF][_m].astype(np.float64)
-                rf_corr = apply_rf_correction(rf_raw, ff_raw, _ff_rows, _rf_lv, _rf_grid)
-                delta = rf_corr - rf_raw
-                _rf_slice = results[..., _C_RF]; _rf_slice[_m] = rf_corr.astype(np.float32)
-                _nrf_ch = _C_HF if use_3iso else _C_NRF
-                _nrf_slice = results[..., _nrf_ch]
-                _nrf_slice[_m] = np.clip(_nrf_slice[_m].astype(np.float64) - delta,
-                                         0.0, 1.0).astype(np.float32)
-                n_corr = int(_m.sum())
-                n_dead = int(np.sum(rf_raw < _RF_DEADZONE_EST))
-                print(f"   RF bias correction (data-driven) applied to {n_corr:,} voxels: "
-                      f"mean restricted_fraction {float(rf_raw.mean()):.3f} -> "
-                      f"{float(rf_corr.mean()):.3f}.")
-                if n_dead > 0:
-                    print(f"   [WARNING] {n_dead:,} voxels "
-                          f"({100.0 * n_dead / max(n_corr, 1):.0f}%) have raw RF < "
-                          f"{_RF_DEADZONE_EST:.2f} (response dead-zone): their restricted "
-                          f"signal is below the b-max detection limit, so the corrected "
-                          f"value is a lower bound, not a reliable point estimate.")
 
         # ── Derived channels (pop-1 fraction + FF-weighted tensor) ──────────
         # Last, because every stage above may still revise the fractions.
@@ -2709,8 +2647,7 @@ class DBSI_Adaptive:
                          stagec_dir_refine=bool(self.stagec_dir_refine),
                          enable_direction_refinement=bool(self.enable_direction_refinement),
                          lambda_aniso_conc_mod=bool(self.lambda_aniso_conc_mod),
-                         iso_resolve=bool(self.iso_resolve),
-                         correct_restricted_fraction=bool(correct_restricted_fraction)),
+                         iso_resolve=bool(self.iso_resolve)),
             populations=_population_census(results, mask),
             solver=_solver_diagnostics(results, mask),
             fit_quality=dict(
@@ -2764,7 +2701,6 @@ class DBSI_Adaptive:
                      n_calibration_voxels=n_calibration_voxels,
                      n_iso_method=n_iso_method,
                      calibrate_concentration_gate=calibrate_concentration_gate,
-                     correct_restricted_fraction=False,
                      _calibration_only=True,
                      _lambda_aniso_grid=lambda_aniso_grid,
                      _lambda_iso_grid=lambda_iso_grid)

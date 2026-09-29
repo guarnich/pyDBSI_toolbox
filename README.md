@@ -228,11 +228,11 @@ is in `voxel_journey_report`.
 6. **Derived channels**: the population-1 fraction, the FF-weighted fiber
    tensor, and the R²/RMSE fit-quality maps.
 
-The restricted-fraction bias correction (`correct_restricted_fraction`) is
-**off** by default. It was built for the Stage-A-only pipeline and is
-superseded by Stages C and D, which fix the RF under-recovery at the source —
-applying it on top now double-corrects and makes RF 2.45× worse. See the
-docstring of `build_rf_response_table`.
+The restricted-fraction bias correction (a Monte Carlo response table
+inverted per voxel) was **removed in 1.6.0**. It was built for the
+Stage-A-only pipeline; Stages C and D fix the RF under-recovery at the
+source, and applying it on top double-corrected (RF 2.45× worse on 320
+synthetic voxels: mean RF 0.149 → 0.274, healthy WM 0.076 → 0.272).
 
 ### Protocol calibration
 

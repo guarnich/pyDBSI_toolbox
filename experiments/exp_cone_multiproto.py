@@ -52,7 +52,7 @@ def fit(data, mask, idx, bvals, bvecs, gt, dir_refine):
     m = DBSI_Adaptive(stagec_dir_refine=dir_refine)
     with contextlib.redirect_stdout(io.StringIO()):
         res, mode = m.fit(data, bvals, bvecs, mask, run_calibration=True,
-                          n_calibration_voxels=200, correct_restricted_fraction=False)
+                          n_calibration_voxels=200)
     names = DBSI_Adaptive.output_map_names(mode); I={n_:i for i,n_ in enumerate(names)}
     g = lambda nm: np.array([res[i,j,k,I[nm]] for (i,j,k) in idx])
     d = np.stack([g('dir1_x'),g('dir1_y'),g('dir1_z')],1)

@@ -72,8 +72,7 @@ def _griglia_usata(**kw_costruttore):
             m.fit(data, bvals, bvecs, mask, run_calibration=True,
                   n_calibration_voxels=40,
                   calibrate_concentration_gate=('min_dominant_concentration'
-                                                not in kw_costruttore),
-                  correct_restricted_fraction=False)
+                                                not in kw_costruttore))
     except _Sentinella:
         pass
     finally:

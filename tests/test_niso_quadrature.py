@@ -72,8 +72,7 @@ def _fino_alla_griglia(kw_costruttore, **kw_fit):
     m = DBSI_Adaptive(**kw_costruttore)
     congelato = 'min_dominant_concentration' in kw_costruttore
     kw = dict(run_calibration=not congelato, n_calibration_voxels=40,
-              calibrate_concentration_gate=not congelato,
-              correct_restricted_fraction=False)
+              calibrate_concentration_gate=not congelato)
     kw.update(kw_fit)
     try:
         for n, f in orig_sel.items():

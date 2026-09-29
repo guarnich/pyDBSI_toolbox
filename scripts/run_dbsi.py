@@ -127,13 +127,6 @@ def main():
                         default=1.0,
                         help="Desired final angular precision (degrees) for direction refinement. "
                              "Default: 1.0. Ignored if --disable-direction-refinement is set.")
-    parser.add_argument("--compute-transition-confidence", action="store_true",
-                        dest="compute_transition_confidence",
-                        help="Compute RES/HIN and HIN/WAT transition-zone confidence maps "
-                             "(does not correct fractions, only flags proximity to a known "
-                             "low-confidence zone — see transition_confidence.py module "
-                             "docstring; NOT YET validated on real data).")
-
     args = parser.parse_args()
     os.makedirs(args.out, exist_ok=True)
 
@@ -178,16 +171,6 @@ def main():
     print(f"  run report -> {args.out}/run_report.txt")
     print(f"  Skipped {len(skipped)} channels (invalid in {model_mode}-ISO mode "
           f"or exact duplicates): {', '.join(skipped)}")
-
-    if args.compute_transition_confidence:
-        print("\nComputing transition-zone confidence maps...")
-        print("NOTE: these flag proximity to a known systematic bias zone near the")
-        print("compartment thresholds (see project methodological supplement); they")
-        print("do not correct fractions and have not yet been validated on real data.")
-        from dbsi_toolbox.transition_confidence import compute_transition_confidence, save_transition_confidence
-        conf_res, conf_wat = compute_transition_confidence(results, model_mode)
-        save_transition_confidence(conf_res, conf_wat, affine, args.out)
-        print("Transition-confidence maps saved.")
 
     print("\nDone!")
 

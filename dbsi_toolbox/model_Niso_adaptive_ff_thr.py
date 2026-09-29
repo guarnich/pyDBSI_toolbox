@@ -267,7 +267,7 @@ MAX_FIBER_POPULATIONS = 2
 
 # ── OUTPUT CHANNEL LAYOUT ────────────────────────────────────────────────────
 # Single source of truth for the channel indices: the njit kernels, the class,
-# `output_map_names`, `fit_quality` and `transition_confidence` all index
+# `output_map_names` and `fit_quality` both index
 # through these names, so the layout is defined in exactly one place.
 #
 # NaN/0 CONVENTION, by block:

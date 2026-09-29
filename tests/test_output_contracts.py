@@ -17,13 +17,26 @@ Due contratti di output che erano rotti in silenzio (v1.3.7).
    quella frazione. E' esattamente il bug di diluizione che quella funzione
    esiste per prevenire, reintrodotto sui canali pop2.
 
-2. LA RAMPA DI CONFIDENZA ERA INVERTITA. `_confidence_from_distance` restituiva
-   confidenza MASSIMA esattamente dove il bias e' peggiore (sulla soglia) e ZERO
-   ai bordi della zona dove non ce n'e'. Misurato sulla zona RES ([0.10, 0.50]e-3,
-   soglia 0.30e-3): 0.10 -> 0.000, 0.30 -> 1.000, 0.50 -> 0.000, fuori zona
-   -> 1.000. Era anche DISCONTINUA al bordo (1.0 fuori, 0.0 appena dentro).
-   Nessuno la chiama nella pipeline, quindi nessun risultato prodotto ne e'
-   toccato, ma e' esportata in `__all__`.
+2. `transition_confidence` E' STATO RIMOSSO in v1.3.8, e questo test pretende
+   che resti rimosso. Aveva due problemi, e il secondo e' quello che decide:
+
+   (a) la rampa era INVERTITA -- confidenza MASSIMA esattamente dove il bias e'
+       peggiore (sulla soglia) e ZERO ai bordi della zona dove non ce n'e'.
+       Misurato sulla zona RES ([0.10, 0.50]e-3, soglia 0.30e-3): 0.10 -> 0.000,
+       0.30 -> 1.000, 0.50 -> 0.000, fuori zona -> 1.000. Anche DISCONTINUA al
+       bordo. Corretta in v1.3.7.
+
+   (b) ma la sua PREMESSA non sopravvive a Stage D. Stage D fissa i centroidi
+       isotropi a (0.15, 1.0, 3.0)e-3, quindi `mean_iso_adc` e' algebricamente
+       determinato dalle frazioni e il "centroide ricostruito" non porta
+       informazione su dove stesse la massa spettrale. Il recupero assumeva
+       D_wat = 3.05e-3 contro il 3.00e-3 di Stage D, e lo scarto finiva tutto in
+       D_hin amplificato da 1/hf: verificato a 6e-15,
+           D_hin = 1.0e-3 - 0.05e-3 * (wf/hf).
+       Allineando l'ipotesi al valore vero, D_hin diventa ESATTAMENTE 1.0e-3 in
+       ogni voxel e le due mappe diventano COSTANTI. Cioe': sbagliata varia per
+       il motivo sbagliato, giusta non dice niente. Correggerla l'avrebbe fatta
+       sembrare affidabile senza renderla informativa -- peggio che rimuoverla.
 
     python tests/test_output_contracts.py
 """
@@ -33,10 +46,6 @@ import numpy as np
 
 from dbsi_toolbox import DBSI_Adaptive
 from dbsi_toolbox.fit_quality import compute_fiber_validity_map as VALID
-from dbsi_toolbox.transition_confidence import (
-    _confidence_from_distance as CF, _RES_ZONE_LOW, _RES_ZONE_HIGH,
-    THRESH_RES, _RES_ZONE_PEAK_BIAS, _WAT_ZONE_LOW, _WAT_ZONE_HIGH,
-    THRESH_WAT, _WAT_ZONE_PEAK_BIAS)
 
 
 def _mappe(n=4):
@@ -80,49 +89,60 @@ def test_validita_rifiuta_argomento_ignoto():
                          "restituire silenziosamente una maschera")
 
 
-def test_confidenza_non_invertita():
-    """0 sulla soglia (bias massimo), 1 al bordo della zona (nessun bias)."""
-    print("\n=== test_confidenza_non_invertita ===")
-    ok = True
-    for nome, zl, zh, th, pb in (
-            ('RES', _RES_ZONE_LOW, _RES_ZONE_HIGH, THRESH_RES, _RES_ZONE_PEAK_BIAS),
-            ('WAT', _WAT_ZONE_LOW, _WAT_ZONE_HIGH, THRESH_WAT, _WAT_ZONE_PEAK_BIAS)):
-        c_soglia = float(CF(np.array([th]), zl, zh, th, pb)[0])
-        c_lo = float(CF(np.array([zl]), zl, zh, th, pb)[0])
-        c_hi = float(CF(np.array([zh]), zl, zh, th, pb)[0])
-        print(f"  zona {nome}: soglia {c_soglia:.3f}   bordo basso {c_lo:.3f}   "
-              f"bordo alto {c_hi:.3f}")
-        if not (c_soglia < 0.01 and c_lo > 0.99 and c_hi > 0.99):
-            ok = False
-    assert ok, ('la rampa e INVERTITA: deve dare 0 sulla soglia (bias massimo) e '
-                '1 ai bordi della zona (nessun bias)')
+def test_transition_confidence_resta_rimosso():
+    """Il modulo non deve tornare: la sua premessa non sopravvive a Stage D."""
+    print("\n=== test_transition_confidence_resta_rimosso ===")
+    import dbsi_toolbox
+    from pathlib import Path
+    pkg = Path(dbsi_toolbox.__file__).parent
+
+    f = pkg / 'transition_confidence.py'
+    print(f"  il file esiste ancora? {'SI' if f.exists() else 'no'}")
+    assert not f.exists(), (
+        'transition_confidence.py e tornato. Se lo si vuole davvero, prima va '
+        'risolto il problema che lo ha fatto rimuovere: dopo Stage D il centroide '
+        '"ricostruito" e una funzione deterministica di wf/hf, e allineando '
+        "l'ipotesi D_wat al valore vero di Stage D le mappe diventano costanti.")
+
+    resti = [n for n in getattr(dbsi_toolbox, '__all__', []) if 'transition' in n]
+    print(f"  export residui in __all__: {resti or 'nessuno'}")
+    assert not resti, f'export non rimossi: {resti}'
+
+    for nome in ('compute_transition_confidence', 'save_transition_confidence'):
+        assert not hasattr(dbsi_toolbox, nome), f'{nome} e ancora importabile'
     print("  [ok]")
 
 
-def test_confidenza_monotona_e_continua():
-    print("\n=== test_confidenza_monotona_e_continua ===")
-    zl, zh, th, pb = _RES_ZONE_LOW, _RES_ZONE_HIGH, THRESH_RES, _RES_ZONE_PEAK_BIAS
-    # monotona: scendendo verso la soglia da sotto, la confidenza scende
-    d = np.linspace(zl, th, 25)
-    c = CF(d, zl, zh, th, pb)
-    assert np.all(np.diff(c) <= 1e-12), f'non monotona sotto soglia: {np.round(c,3)}'
-    d2 = np.linspace(th, zh, 25)
-    c2 = CF(d2, zl, zh, th, pb)
-    assert np.all(np.diff(c2) >= -1e-12), f'non monotona sopra soglia: {np.round(c2,3)}'
-    print(f"  monotona su entrambi i lati della soglia")
-    # continua al bordo: dentro e fuori devono coincidere
-    dentro = float(CF(np.array([zl]), zl, zh, th, pb)[0])
-    fuori = float(CF(np.array([zl - 1e-9]), zl, zh, th, pb)[0])
-    print(f"  al bordo: dentro {dentro:.4f}   fuori {fuori:.4f}")
-    assert abs(dentro - fuori) < 1e-6, (
-        f'DISCONTINUA al bordo della zona ({dentro:.3f} dentro contro {fuori:.3f} '
-        'fuori): un salto la dove il bias e nullo non ha senso fisico')
+def test_stage_d_fissa_i_centroidi():
+    """La ragione della rimozione, come misura: Stage D pinna i centroidi.
+
+    Se un giorno Stage D smettesse di usare centroidi fissi, la premessa di
+    `transition_confidence` tornerebbe valida e la rimozione andrebbe rivista.
+    Questo test rende quel collegamento visibile invece di lasciarlo in un
+    messaggio di commit.
+    """
+    print("\n=== test_stage_d_fissa_i_centroidi ===")
+    from dbsi_toolbox.model_Niso_adaptive_ff_thr import (
+        _ISO_RESOLVE_D_3ISO as SD, _ISO_RESOLVE_D_2ISO as SD2)
+    print(f"  3-ISO: {[f'{d*1e3:.2f}e-3' for d in SD]}")
+    print(f"  2-ISO: {[f'{d*1e3:.2f}e-3' for d in SD2]}")
+    assert len(SD) == 3 and len(SD2) == 2
+    # sono COSTANTI del modulo, non stimate dai dati: e questo il punto
+    assert all(isinstance(d, float) for d in SD), (
+        'i centroidi di Stage D non sono piu costanti: la premessa di '
+        'transition_confidence potrebbe essere tornata valida, rivedere la '
+        'rimozione')
+    # e il centroide dell'acqua sta ESATTAMENTE su THRESH_WAT
+    from dbsi_toolbox.model_Niso_adaptive_ff_thr import THRESH_WAT
+    print(f"  centroide acqua {SD[2]*1e3:.2f}e-3 contro THRESH_WAT "
+          f"{THRESH_WAT*1e3:.2f}e-3 -> coincidono: {abs(SD[2]-THRESH_WAT) < 1e-12}")
     print("  [ok]")
 
 
 if __name__ == '__main__':
     for f in (test_due_domini_di_validita, test_validita_rifiuta_argomento_ignoto,
-              test_confidenza_non_invertita, test_confidenza_monotona_e_continua):
+              test_transition_confidence_resta_rimosso,
+              test_stage_d_fissa_i_centroidi):
         try:
             f()
         except AssertionError as e:

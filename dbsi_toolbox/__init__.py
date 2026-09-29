@@ -63,17 +63,16 @@ compute_fit_quality
     detected fiber populations from their stored directions and tensors —
     see `fit_quality.py` module docstring.
 
-compute_transition_confidence
-    Compute voxel-wise confidence maps for the RES/HIN and HIN/WAT
-    compartment boundaries, based on the systematic, n_iso-independent
-    bias zones quantified in the project methodological supplement
-    "isotropic_compartment_supplement.docx". Does NOT correct fractions
-    — only flags proximity to a known low-confidence zone. NOT YET
-    VALIDATED ON REAL DATA (see `transition_confidence.py` module
-    docstring caveats).
-
-save_transition_confidence
-    Save the two transition-confidence maps as compressed NIfTI files.
+(RIMOSSO IN v1.3.8) compute_transition_confidence / save_transition_confidence
+    Mappavano la "confidenza" dei confini RES/HIN e HIN/WAT dalla distanza del
+    centroide ricostruito dalla soglia. Rimosse perche' la loro premessa non
+    sopravvive a Stage D: Stage D fissa i centroidi isotropi a
+    (0.15, 1.0, 3.0)e-3, quindi `mean_iso_adc` e' algebricamente determinato
+    dalle frazioni e il "centroide ricostruito" non porta informazione su dove
+    stesse la massa spettrale. Dimostrato: allineando l'ipotesi D_wat del
+    recupero (3.05e-3) al valore vero di Stage D (3.00e-3), D_hin diventa
+    ESATTAMENTE 1.0e-3 in ogni voxel e le due mappe diventano costanti. Cioe':
+    sbagliata varia per il motivo sbagliato, giusta non dice niente.
 
 Output Channels (27 — see DBSI_Adaptive.output_map_names for the full
 contract, and the `_C_*` constants in model_Niso_adaptive_ff_thr.py for
@@ -124,7 +123,7 @@ Design document: toolbox_v2.md (orientation-space vs. parameter-space
     recovery validation of the v2 single-stage approach.
 """
 
-__version__ = "1.3.7"
+__version__ = "1.3.8"
 __author__ = "DBSI Toolbox Contributors"
 
 
@@ -133,7 +132,6 @@ from .utils.tools import load_data, estimate_snr_robust
 from .utils.autoconfig import autoconfigure_dictionary
 from .fit_quality import (compute_fit_quality, compute_fiber_validity_map,
                           format_run_report, save_output_maps)
-from .transition_confidence import compute_transition_confidence, save_transition_confidence
 
 __all__ = [
     "DBSI_Adaptive",
@@ -144,6 +142,4 @@ __all__ = [
     "compute_fiber_validity_map",
     "format_run_report",
     "save_output_maps",
-    "compute_transition_confidence",
-    "save_transition_confidence",
 ]

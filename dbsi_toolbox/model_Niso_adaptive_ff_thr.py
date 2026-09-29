@@ -2601,9 +2601,13 @@ class DBSI_Adaptive:
         # recorded in the run report as `r2_reference`; it is NOT interchangeable
         # with an R2 computed against data_corr, so the two must never be
         # compared across runs without checking that field.
+        # Centroidi della ricostruzione = quelli con cui sono state stimate le
+        # frazioni riportate: Stage D se attivo, altrimenti lo spettro di Stage A.
+        _fq_centroids = 'stage_d' if self.iso_resolve else 'recovered'
         results[..., _C_R2], results[..., _C_RMSE] = compute_fit_quality(
             data, bvals, bvecs, mask, results, model_mode,
             fiber_threshold=self.fiber_threshold, verbose=True,
+            iso_centroids=_fq_centroids,
         )
 
         # ── Run report: what produced these maps ────────────────────────────
@@ -2628,7 +2632,9 @@ class DBSI_Adaptive:
             # confrontabili senza leggere il codice.
             fit_quality_reference=dict(r2_reference='raw_signal',
                                        fractions_fitted_on='rician_corrected',
-                                       monofiber_tensor_fitted_on='raw'),
+                                       monofiber_tensor_fitted_on='raw',
+                                       iso_centroids=('stage_d_fixed' if self.iso_resolve
+                                                      else 'recovered_from_mean_iso_adc')),
             # Quanto la correzione Rician ha TRONCATO. Vedi il blocco della
             # correzione: distorce la RF verso il basso dove morde, e la 1.3.5
             # l'ha raddoppiato correggendo sigma.

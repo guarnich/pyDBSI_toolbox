@@ -77,7 +77,21 @@ from .model_Niso_adaptive_ff_thr import (          # noqa: E402
     _C_FF1 as _CH_FF1, _C_AD1 as _CH_AD, _C_RD1 as _CH_RD, _C_DIR1 as _CH_DIR1,
     _C_FF2 as _CH_FF2, _C_AD2 as _CH_AD2, _C_RD2 as _CH_RD2,
     _C_DIR2 as _CH_DIR2,
+    _ISO_RESOLVE_D_3ISO, _ISO_RESOLVE_D_2ISO,
 )
+
+# QUALI CENTROIDI ISOTROPI usa la ricostruzione (v1.5.2). Le frazioni riportate
+# vengono da Stage D, che le stima con centroidi FISSI (_ISO_RESOLVE_D_3ISO /
+# _2ISO). Fino alla 1.5.1 la ricostruzione usava invece 0.15e-3, 3.05e-3 e un
+# D_hindered ricavato da `mean_iso_adc` -- canale che Stage D non sovrascrive,
+# perche' viene dallo spettro di Stage A. R2 e RMSE misuravano quindi un modello
+# mai fittato: frazioni di Stage D, centroidi di un altro. Il peso maggiore
+# cadeva sui voxel senza fibra (tutto il segnale e' isotropo): nel 07 erano a
+# 1.31 sigma contro 1.00 dei voxel con fibra, e sul fantoccio del notebook 09
+# questa sola incoerenza valeva 0.25 sigma. 'recovered' resta per
+# iso_resolve=False, dove le frazioni vengono dallo spettro di Stage A e centroidi
+# fissi non esistono.
+ISO_CENTROID_MODES = ('stage_d', 'recovered')
 
 
 @njit(cache=True, fastmath=True)
@@ -131,7 +145,8 @@ def _recover_iso_adcs_3iso(rf, hf, wf, adc_iso):
 @njit(parallel=True, cache=True)   # NOT fastmath: this kernel relies on np.isnan
 def _quality_kernel_multipop(data, coords, bvals, bvecs, params,     # to detect absent
                              b0_thr, fiber_threshold, model_mode,     # populations, and
-                             out_r2, out_rmse):                       # fastmath assumes no NaNs
+                             out_r2, out_rmse,                        # fastmath assumes no NaNs
+                             fixed_centroids, cD0, cD1, cD2):
     n_voxels = coords.shape[0]
     N = len(bvals)
 
@@ -180,7 +195,16 @@ def _quality_kernel_multipop(data, coords, bvals, bvecs, params,     # to detect
         if s0 < 1e-6:
             continue
 
-        if model_mode == 3:
+        if fixed_centroids:
+            # i centroidi con cui Stage D ha stimato le frazioni
+            if model_mode == 3:
+                D_res, D_hin, D_wat = cD0, cD1, cD2
+                D_nonrf = 0.0
+            else:
+                D_res, D_nonrf = cD0, cD1
+                D_hin = 0.0
+                D_wat = 0.0
+        elif model_mode == 3:
             D_res, D_hin, D_wat = _recover_iso_adcs_3iso(rf, hf, wf, adc_iso)
             D_nonrf = 0.0
         else:
@@ -207,9 +231,15 @@ def _quality_kernel_multipop(data, coords, bvals, bvecs, params,     # to detect
         d2y = params[x, y, z, _CH_DIR2 + 1]
         d2z = params[x, y, z, _CH_DIR2 + 2]
 
-        has_fiber = ff_tot_v > fiber_threshold
-        use1 = has_fiber and (ff1 > 1e-6) and (not np.isnan(ad1)) and (not np.isnan(d1x))
-        use2 = has_fiber and (ff2 > 1e-6) and (not np.isnan(ad2)) and (not np.isnan(d2x))
+        # Una popolazione entra nella ricostruzione se il MODELLO l'ha stimata
+        # (tensore e direzione presenti), non se la FF finale supera di nuovo la
+        # soglia. Fino alla 1.5.1 qui c'era `ff_tot > fiber_threshold`: ma la
+        # presenza della fibra la decide Stage A, e Stage D la fitta comunque;
+        # se Stage D portava la FF sotto soglia, la ricostruzione OMETTEVA una
+        # fibra fittata, gonfiando il residuo -- e rendendolo dipendente dalla
+        # soglia anche per voxel la cui fibra c'era a ogni soglia.
+        use1 = (ff1 > 1e-6) and (not np.isnan(ad1)) and (not np.isnan(d1x))
+        use2 = (ff2 > 1e-6) and (not np.isnan(ad2)) and (not np.isnan(d2x))
 
         s_mean = 0.0
         for i in range(N):
@@ -256,7 +286,7 @@ def _quality_kernel_multipop(data, coords, bvals, bvecs, params,     # to detect
 # ─────────────────────────────────────────────────────────────────────────────
 
 def compute_fit_quality(data, bvals, bvecs, mask, results, model_mode,
-                        fiber_threshold=0.15, verbose=True):
+                        fiber_threshold=0.15, verbose=True, iso_centroids='stage_d'):
     """
     Compute voxel-wise R² and RMSE goodness-of-fit maps from v3 DBSI
     parameter maps.
@@ -278,8 +308,20 @@ def compute_fit_quality(data, bvals, bvecs, mask, results, model_mode,
     model_mode : int
         2 or 3.
     fiber_threshold : float
-        Same value used during fitting. Default: 0.15.
+        Kept for backward compatibility and printed, but NO LONGER USED since
+        1.5.2: a fiber population enters the reconstruction when the model
+        estimated it (tensor and direction present), not when the final FF
+        clears the threshold again -- Stage D can lower the FF of a detected
+        fiber below it, and the reconstruction used to drop that fiber.
     verbose : bool
+    iso_centroids : 'stage_d' | 'recovered' | tuple
+        Isotropic centroids of the reconstruction. 'stage_d' (default since
+        1.5.2): the FIXED centroids Stage D fitted the fractions with -- the
+        right choice whenever the maps come from a fit with iso_resolve=True
+        (the default). 'recovered': the pre-1.5.2 reconstruction (0.15e-3,
+        3.05e-3 and D_hindered derived from mean_iso_adc), meaningful only for
+        iso_resolve=False, where the fractions come from Stage A's spectrum.
+        A tuple gives explicit centroids (3 for 3-ISO, 2 for 2-ISO).
 
     Returns
     -------
@@ -309,6 +351,23 @@ def compute_fit_quality(data, bvals, bvecs, mask, results, model_mode,
 
     b0_thr = 100.0
 
+    if isinstance(iso_centroids, str):
+        if iso_centroids not in ISO_CENTROID_MODES:
+            raise ValueError(f"iso_centroids must be one of {ISO_CENTROID_MODES} or a "
+                             f"tuple, got {iso_centroids!r}")
+        fixed = iso_centroids == 'stage_d'
+        cents = (_ISO_RESOLVE_D_3ISO if int(model_mode) == 3 else _ISO_RESOLVE_D_2ISO)
+    else:
+        cents = tuple(float(c) for c in iso_centroids)
+        if len(cents) != (3 if int(model_mode) == 3 else 2):
+            raise ValueError(f"{len(cents)} centroids for a {model_mode}-ISO model")
+        fixed = True
+    cents = tuple(cents) + (0.0,) * (3 - len(cents))
+    if verbose:
+        print(f"  Isotropic centroids: "
+              + (f"FIXED {[round(c * 1e3, 4) for c in cents if c]} x1e-3 (Stage D)"
+                 if fixed else "recovered from mean_iso_adc (Stage A spectrum)"))
+
     shape3d = data.shape[:3]
     r2_map = np.full(shape3d, np.nan, dtype=np.float32)
     rmse_map = np.full(shape3d, np.nan, dtype=np.float32)
@@ -335,7 +394,8 @@ def compute_fit_quality(data, bvals, bvecs, mask, results, model_mode,
             _quality_kernel_multipop(
                 data_f32, coords[start:end],
                 bvals, bvecs, results_f32, b0_thr, fiber_threshold,
-                int(model_mode), r2_map, rmse_map
+                int(model_mode), r2_map, rmse_map,
+                bool(fixed), float(cents[0]), float(cents[1]), float(cents[2])
             )
             pbar.update(end - start)
 

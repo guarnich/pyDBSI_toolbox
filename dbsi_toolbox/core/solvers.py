@@ -288,15 +288,32 @@ def build_direction_neighbor_graph(fiber_dirs, k=6):
     -------
     neighbor_idx : ndarray (n_dirs, k_eff), int64
         Row d holds the indices of direction d's k_eff nearest
-        neighbours (by raw dot product, consistent with
-        `measure_hemisphere_spacing`'s convention -- the hemisphere
-        generator already resolves the +/- direction sign ambiguity, so
-        no abs() is needed here). k_eff = min(k, n_dirs - 1) to stay
-        well-defined for very small dictionaries.
+        neighbours by AXIAL distance (|dot|). k_eff = min(k, n_dirs - 1) to
+        stay well-defined for very small dictionaries.
+
+    AXIAL, NOT RAW DOT (fixed in v1.5.1). This used to rank neighbours by the
+    raw dot product, on the claim that "the hemisphere generator already
+    resolves the +/- direction sign ambiguity". It does not, near the equator:
+    two nodes at z~0 with azimuths theta and theta+180 deg are the SAME axis
+    (v ~ -w), yet their raw dot is ~ -1, so each was invisible to the other.
+    The rest of the selection was already axial (basin assignment and NMS use
+    |dot|), so a fiber lying near the equatorial plane had its weight split
+    across the boundary into a second local maximum. Measured with the real
+    Stage A (P3-like protocol, frozen lambdas, SNR 26, single fiber):
+
+        elevation from equator     0      10      20     (deg)
+        dominant basin, raw dot    0.55   0.61    0.70   (axial: 0.97-1.00)
+        false crossings, n_dirs 62 0.00   0.01    0.07   (axial: 0.00)
+        false crossings, n_dirs 39 0.00   0.09    0.28   (axial: 0.00)
+
+    and in 90-degree crossings with one fiber near the equator the FF split
+    between the two populations moved from 0.53 to 0.61. In an axial
+    acquisition the equator is the axial plane: left-right and
+    anterior-posterior fibers (corpus callosum, cingulum, ...) live there.
     """
     n = len(fiber_dirs)
     k_eff = max(1, min(k, n - 1))
-    dots = fiber_dirs @ fiber_dirs.T
+    dots = np.abs(fiber_dirs @ fiber_dirs.T)
     np.fill_diagonal(dots, -2.0)
     neighbor_idx = np.argsort(-dots, axis=1)[:, :k_eff].astype(np.int64)
     return np.ascontiguousarray(neighbor_idx)
@@ -1465,7 +1482,11 @@ def measure_hemisphere_spacing(fiber_dirs):
         Mean nearest-neighbour angular spacing across all directions.
     """
     n = len(fiber_dirs)
-    dots = fiber_dirs @ fiber_dirs.T
+    # AXIAL distance (|dot|), as in `build_direction_neighbor_graph`: near the
+    # equator a node's true nearest neighbour can be the reflection of a node on
+    # the far side of the hemisphere. Raw dot overestimated the spacing there
+    # (and hence the level-1 cone) until v1.5.1.
+    dots = np.abs(fiber_dirs @ fiber_dirs.T)
     np.fill_diagonal(dots, -2.0)  # exclude self-match
     nearest_cos = np.clip(np.max(dots, axis=1), -1.0, 1.0)
     nearest_angle = np.arccos(nearest_cos)

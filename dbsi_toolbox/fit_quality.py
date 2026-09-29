@@ -375,7 +375,7 @@ def compute_fit_quality(data, bvals, bvecs, mask, results, model_mode,
 # the output layout itself.
 
 
-def compute_fiber_validity_map(results, channel_names):
+def compute_fiber_validity_map(results, channel_names, population='pop1'):
     """
     Voxel-level validity indicator for the fiber-tensor output channels: 1
     where a real fiber tensor was estimated, 0 elsewhere.
@@ -394,19 +394,56 @@ def compute_fiber_validity_map(results, channel_names):
     alongside the channel maps so the correction is available to anyone who
     picks the maps up later.
 
+    WHICH CHANNELS EACH TERM COVERS, because one mask does NOT serve them all
+    -----------------------------------------------------------------------
+    The output channels have THREE distinct validity domains, and applying the
+    wrong one reintroduces exactly the dilution bug this function exists to
+    prevent:
+
+      `population='pop1'` (the default, written as `fiber_valid.nii.gz`)
+          covers the population-1 block (7-13) and the FF-weighted aggregates
+          (21-23). Those are NaN wherever no fibre was estimated.
+
+      `population='pop2'` (written as `fiber_valid_pop2.nii.gz`)
+          covers the population-2 block (14-20). Those are NaN wherever
+          `n_pop < 2`, which on real data is roughly HALF of the fibre voxels
+          (the crossing fraction is ~52%). Masking the pop-2 maps with the
+          pop-1 term therefore declares ~48% of fibre voxels "valid" where the
+          value is NaN; after a resampler turns NaN into 0 and the normalised
+          convolution divides by that validity, the pop-2 maps come out
+          depressed by that fraction. Before v1.3.7 only one mask was written
+          and its docstring said "the fiber-tensor output channels" without
+          qualification, so this was easy to get wrong.
+
+      channels 0-6, 24-27 need no validity term: they are written for every
+          fitted voxel (`dominant_basin_concentration` included -- it is
+          computed before the fiber_threshold branch).
+
     Parameters
     ----------
     results : ndarray (X, Y, Z, C)
     channel_names : sequence of str
+    population : {'pop1', 'pop2'}
+        Which validity domain to return. See above.
 
     Returns
     -------
     ndarray (X, Y, Z), uint8
     """
     names = list(channel_names)
-    ad1 = results[..., names.index('axial_diffusivity_pop1')]
-    ff = results[..., names.index('fiber_fraction')]
-    return (np.isfinite(ad1) & np.isfinite(ff) & (ff > 0)).astype(np.uint8)
+    if population == 'pop1':
+        ad = results[..., names.index('axial_diffusivity_pop1')]
+        ff = results[..., names.index('fiber_fraction')]
+        return (np.isfinite(ad) & np.isfinite(ff) & (ff > 0)).astype(np.uint8)
+    if population == 'pop2':
+        # Population 2 is written ONLY in the `n_pop >= 2` branch, so its own
+        # finiteness IS the domain; the total fiber_fraction is still required,
+        # because a Stage D re-solve that zeroes the fibre compartment leaves a
+        # tensor describing a compartment with no mass.
+        ad2 = results[..., names.index('axial_diffusivity_pop2')]
+        ff = results[..., names.index('fiber_fraction')]
+        return (np.isfinite(ad2) & np.isfinite(ff) & (ff > 0)).astype(np.uint8)
+    raise ValueError(f"population must be 'pop1' or 'pop2', got {population!r}")
 
 
 def format_run_report(report, saved_channels=None):
@@ -534,7 +571,10 @@ def save_output_maps(results, channel_names, affine, output_dir,
     Layout written under `output_dir`::
 
         NN_<channel>.nii.gz    per-channel maps (NN = channel index)
-        fiber_valid.nii.gz     uint8 validity mask for the tensor channels
+        fiber_valid.nii.gz      uint8 validity mask for the pop-1 block + the
+                                FF-weighted aggregates
+        fiber_valid_pop2.nii.gz uint8 validity mask for the pop-2 block, which
+                                has a DIFFERENT domain (NaN where n_pop < 2)
         run_report.txt         what produced these maps (when `model` is given)
 
     Pass the fitted `DBSI_Adaptive` as `model` and its `run_report_` is written
@@ -582,8 +622,17 @@ def save_output_maps(results, channel_names, affine, output_dir,
                  os.path.join(output_dir, f'{i:02d}_{nm}.nii.gz'))
         saved.append(nm)
     if validity:
-        nib.save(nib.Nifti1Image(compute_fiber_validity_map(results, names), affine),
-                 os.path.join(output_dir, 'fiber_valid.nii.gz'))
+        # DUE maschere, non una: i blocchi pop1 e pop2 hanno domini di validita'
+        # diversi (pop2 e' NaN dove n_pop < 2, cioe' su ~48% dei voxel di fibra).
+        # Usare quella di pop1 sulle mappe pop2 le deprime di quella frazione
+        # dopo una riproiezione -- il bug che questa validita' esiste per evitare.
+        nib.save(nib.Nifti1Image(
+            compute_fiber_validity_map(results, names, 'pop1'), affine),
+            os.path.join(output_dir, 'fiber_valid.nii.gz'))
+        if 'axial_diffusivity_pop2' in names:
+            nib.save(nib.Nifti1Image(
+                compute_fiber_validity_map(results, names, 'pop2'), affine),
+                os.path.join(output_dir, 'fiber_valid_pop2.nii.gz'))
     report = getattr(model, 'run_report_', None) if model is not None else None
     if report:
         with open(os.path.join(output_dir, 'run_report.txt'), 'w') as fh:

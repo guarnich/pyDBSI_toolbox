@@ -143,8 +143,23 @@ def _confidence_from_distance(d, zone_low, zone_high, threshold, peak_bias,
     # at the zone edge. Values are clipped to keep confidence in [0,1]
     # even though the true peak bias may not be exactly at the threshold
     # in the measured curves.
-    frac_below = (d[below] - zone_low) / half_width_below if half_width_below > 0 else 1.0
-    frac_above = (zone_high - d[above]) / half_width_above if half_width_above > 0 else 1.0
+    #
+    # SIGN FIXED IN v1.3.7. The two expressions were the wrong way round, so
+    # the function returned MAXIMUM confidence exactly where the bias is worst
+    # and ZERO at the zone edges where there is none. Measured on the RES zone
+    # ([0.10, 0.50]e-3, threshold 0.30e-3):
+    #       d=0.10 (zone edge, no bias)   -> 0.000
+    #       d=0.30 (threshold, peak bias) -> 1.000
+    #       d=0.50 (zone edge, no bias)   -> 0.000
+    #       d=0.05 / 0.60 (outside zone)  -> 1.000
+    # It was also DISCONTINUOUS at the zone boundary (1.0 outside, 0.0 just
+    # inside). The corrected form measures distance FROM the threshold, which
+    # both flips the ramp and makes it continuous with the out-of-zone value of
+    # 1.0 at the zone edge. Nothing in the pipeline calls this function, so no
+    # produced result is affected — but it is exported in `__all__`, so anyone
+    # who used it got a map that flagged the trustworthy voxels.
+    frac_below = (threshold - d[below]) / half_width_below if half_width_below > 0 else 1.0
+    frac_above = (d[above] - threshold) / half_width_above if half_width_above > 0 else 1.0
 
     confidence[below] = np.clip(frac_below, 0.0, 1.0)
     confidence[above] = np.clip(frac_above, 0.0, 1.0)

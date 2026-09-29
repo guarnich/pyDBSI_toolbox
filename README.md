@@ -221,8 +221,14 @@ docstring of `build_rf_response_table`.
 
 ### Key Parameters
 
-* `n_iso`: number of isotropic basis functions (default: `None` —
-  selected per dataset by the bootstrap bias/variance method; typically 6–10).
+* `n_iso`: density of the anchored isotropic grid (default: `None` →
+  fixed at **6** by grid convergence, `fit(n_iso_method='quadrature')`).
+  It is a discretisation parameter, not a model order: Stage D recomputes the
+  reported fractions on three fixed centroids, and n_iso=6 already sits within
+  tolerance of the converged tensor. It is not the column count — n_iso=6
+  gives 11 columns (4 restricted / 5 hindered / 2 water), reported as
+  `n_iso_columns` in `run_report.txt`. Per-dataset selection
+  (`n_iso_method='bootstrap'`) was the default before 1.3.9.
 * `lambda_aniso`, `lambda_iso`: Stage A regularization strengths
   (default: auto-calibrated; evaluated end-to-end through Stage A + B).
 * `n_dirs`: Number of fiber directions on the hemisphere for Stage A

@@ -106,11 +106,14 @@ def main():
                              "raised from 500 in v1.3.1 — a seed sweep showed lambda_aniso is "
                              "sample-invariant but lambda_iso still jitters by 2-3 grid nodes at "
                              "500 voxels).")
-    parser.add_argument("--n-iso-method", choices=["bootstrap", "svd_floor", "fixed"],
-                        dest="n_iso_method", default="bootstrap",
-                        help="How to select n_iso when --n-iso is not given. 'bootstrap' (default): "
-                             "bias-variance minimisation on real sampled voxels. 'svd_floor': SVD "
-                             "information limit + empirical floor. 'fixed': legacy n_iso=31.")
+    parser.add_argument("--n-iso-method", choices=["quadrature", "bootstrap", "svd_floor", "fixed"],
+                        dest="n_iso_method", default="quadrature",
+                        help="How to set n_iso when --n-iso is not given. 'quadrature' (default "
+                             "since 1.3.9): fixed at 6 by grid convergence -- n_iso is a "
+                             "discretisation parameter, not a model order. 'bootstrap': "
+                             "bias-variance selection per dataset (pre-1.3.9 default). "
+                             "'svd_floor': SVD information limit + empirical floor. "
+                             "'fixed': legacy n_iso=31.")
     parser.add_argument("--n-bootstrap", type=int, dest="n_bootstrap", default=50,
                         help="Noise replicates per voxel for the bootstrap n_iso method. Default: 50.")
     parser.add_argument("--force-n-iso", type=int, choices=[2, 3], default=None,

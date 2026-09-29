@@ -254,6 +254,30 @@ _DEFAULT_ISO_MIN = 0.0
 _DEFAULT_ISO_MAX = 3.0e-3
 _DEFAULT_N_ISO_STEPS = 31    # Legacy fixed default — see select_n_iso_svd.
 
+# n_iso DI QUADRATURA (default dalla 1.3.9, `n_iso_method='quadrature'`).
+# n_iso non e' un ordine di modello: Stage D ricalcola le frazioni riportate su
+# 3 centroidi FISSI, quindi la griglia le tocca solo per via indiretta (via il
+# tensore di Stage C). Si fissa per convergenza, non si seleziona per soggetto.
+# Misurato su dati veri (Codes_fixed_20260923/06_convergenza_niso, 3000 voxel,
+# lambda congelati, n_iso 4..40). Riferimento = media delle due densita' piu' fini
+# con <=5% di NNLS non convergenti (n_iso 12 e 16); scarto peggiore su tutte le
+# quantita', in unita' di tolleranza dichiarata (FA 0.01, AD 0.03e-3, frazioni 0.01):
+#     n_iso  colonne  rapporto max fra atomi  scarto peggiore  NNLS non conv.
+#       4       9           1.92               1.11 (FA)         0%
+#       6      11           1.67               0.49 (HF)         0%
+#       8      10           1.75               1.12 (FA)         0%
+#      10      12           1.54               0.28 (FA)         0%
+#      12      14           1.43               riferimento      0.8%
+#      40      42           1.11               0.67 (HF)        40%
+# Le frazioni restano entro 0.6 tolleranze a OGNI densita'. Il tensore segue il
+# rapporto massimo fra atomi adiacenti, non n_iso (Spearman AD -0.96, FA -0.84),
+# ed e' per questo che 8 va peggio di 6. Si sceglie 6 perche': entro tolleranza,
+# 0% NNLS non convergenti (crescono con le colonne: 40% a n_iso=40), il piu'
+# veloce, ed e' la griglia su cui sono stati calibrati i lambda congelati di
+# coorte -- la penalita' L2 su lambda_iso non e' invariante per cambio di griglia.
+# NON 4: e' cio' che il ripiego SVD restituisce sempre, e fallisce su FA.
+_QUADRATURE_N_ISO = 6
+
 _ISO_GRID_D_MAX_EXTENDED = 5.0e-3
 
 # Maximum number of fiber populations Stage A/B reports per voxel. FIXED at 2,
@@ -1541,7 +1565,9 @@ class DBSI_Adaptive:
     Parameters
     ----------
     n_iso : int or None
-        Number of isotropic ADC basis points. Defaults to 31 if None.
+        Density of the anchored isotropic ADC grid (NOT the number of
+        columns: n_iso=6 gives 11). If None, set by `fit(n_iso_method=...)`;
+        the default method 'quadrature' fixes it at 6.
     lambda_aniso : float or None
         Stage A regularisation strength for the anisotropic block
         (auto-calibrated if None).
@@ -1677,7 +1703,7 @@ class DBSI_Adaptive:
     # ------------------------------------------------------------------
     def fit(self, data, bvals, bvecs, mask, run_calibration=True,
            n_calibration_voxels=1000,
-           n_iso_method='bootstrap', n_bootstrap=50,
+           n_iso_method='quadrature', n_bootstrap=50,
            run_sure_crosscheck=False, sure_crosscheck_n_probes=15,
            calibrate_concentration_gate=True,
            concentration_gate_percentile=_CONCENTRATION_GATE_PERCENTILE,
@@ -1685,6 +1711,12 @@ class DBSI_Adaptive:
         """
         Fit the v3 hybrid two-stage adaptive DBSI model (+ MRDS
         multi-fiber extension) to 4D diffusion MRI data.
+
+        n_iso_method : {'quadrature', 'bootstrap', 'svd_floor', 'fixed'}
+            Used only when the constructor's n_iso is None. 'quadrature'
+            (default since 1.3.9) fixes n_iso=6 by grid convergence — see
+            `_QUADRATURE_N_ISO`. 'bootstrap' and 'svd_floor' select it per
+            dataset (pre-1.3.9 behaviour); 'fixed' is the legacy n_iso=31.
 
         Returns
         -------
@@ -1927,9 +1959,18 @@ class DBSI_Adaptive:
         # cost (a few minutes, negligible against the voxel-wise fit). The seed
         # is fixed at 0 here and at every other sampling site in this method, so
         # a re-run of the same data reproduces the same lambdas exactly.
+        if n_iso_method not in ('quadrature', 'bootstrap', 'svd_floor', 'fixed'):
+            raise ValueError(
+                f"n_iso_method must be 'quadrature', 'bootstrap', 'svd_floor', "
+                f"or 'fixed', got {n_iso_method!r}."
+            )
+        # Per n_iso il campione serve solo al bootstrap: 'svd_floor' guarda solo
+        # bvals e SNR, 'quadrature' e 'fixed' sono costanti. Se serve piu' avanti
+        # (lambda, SURE) viene campionato li', con lo stesso seme.
+        _seleziona_n_iso = (self.n_iso is None and n_iso_method == 'bootstrap')
         y_cal, sigma_cal = None, None
-        if self.n_iso is None or (run_calibration and
-                                  (self.lambda_aniso is None or self.lambda_iso is None)):
+        if _seleziona_n_iso or (run_calibration and
+                                (self.lambda_aniso is None or self.lambda_iso is None)):
             y_cal, sigma_cal = sample_calibration_voxels(
                 data_corr, mask, bvals, n_voxels=n_calibration_voxels, seed=0,
             )
@@ -1939,7 +1980,13 @@ class DBSI_Adaptive:
         iso_d_max = max(self.iso_range[1], _ISO_GRID_D_MAX_EXTENDED)
 
         if self.n_iso is None:
-            if n_iso_method == 'bootstrap':
+            if n_iso_method == 'quadrature':
+                self.n_iso = _QUADRATURE_N_ISO
+                self.n_iso_source_ = 'quadrature'
+                print(f"\n4. n_iso fixed by grid convergence (quadrature, not a "
+                      f"per-subject selection): n_iso={self.n_iso}")
+
+            elif n_iso_method == 'bootstrap':
                 print(f"\n4. Selecting n_iso — BOOTSTRAP bias-variance "
                       f"({n_bootstrap} replicates/voxel)...")
                 # Il bootstrap valuta un problema ISOTROPO, quindi va nutrito
@@ -2035,10 +2082,7 @@ class DBSI_Adaptive:
                 print(f"\n4. n_iso fixed at legacy default: n_iso={self.n_iso}")
 
             else:
-                raise ValueError(
-                    f"n_iso_method must be 'bootstrap', 'svd_floor', or "
-                    f"'fixed', got {n_iso_method!r}."
-                )
+                raise AssertionError('unreachable: n_iso_method validated above')
 
         # ── Isotropic basis ─────────────────────────────────────────────────
         # The grid depends ONLY on n_iso and iso_range — NOT on whether n_iso was

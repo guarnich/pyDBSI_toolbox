@@ -123,7 +123,7 @@ Design document: toolbox_v2.md (orientation-space vs. parameter-space
     recovery validation of the v2 single-stage approach.
 """
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 __author__ = "DBSI Toolbox Contributors"
 
 
@@ -133,7 +133,9 @@ from .utils.autoconfig import autoconfigure_dictionary
 from .fit_quality import (compute_fit_quality, compute_fiber_validity_map,
                           format_run_report, save_output_maps, find_run_report)
 from .toolbox_report import save_toolbox_report, plot_design_matrix
-from .calibration.protocol import protocol_fingerprint, fingerprint_mismatches
+from .calibration.protocol import (protocol_fingerprint, fingerprint_mismatches,
+                                   calibrate_protocol, save_protocol_calibration,
+                                   load_protocol_calibration)
 
 __all__ = [
     "DBSI_Adaptive",
@@ -149,4 +151,7 @@ __all__ = [
     "plot_design_matrix",
     "protocol_fingerprint",
     "fingerprint_mismatches",
+    "calibrate_protocol",
+    "save_protocol_calibration",
+    "load_protocol_calibration",
 ]

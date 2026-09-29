@@ -234,6 +234,45 @@ superseded by Stages C and D, which fix the RF under-recovery at the source —
 applying it on top now double-corrects and makes RF 2.45× worse. See the
 docstring of `build_rf_response_table`.
 
+### Protocol calibration
+
+Hyperparameters calibrated per acquisition follow that acquisition's noise
+(on 40 acquisitions of one protocol, Spearman with SNR -0.56 for
+`lambda_aniso` and -0.74 for `lambda_iso`): in a group comparison the pipeline
+would manufacture differences. For a cohort, calibrate **once per protocol**:
+
+```python
+from dbsi_toolbox import (DBSI_Adaptive, calibrate_protocol,
+                          save_protocol_calibration)
+
+# 1. one record per acquisition of a (group-balanced) sample; no voxel-wise fit
+records = [DBSI_Adaptive().calibrate(data, bvals, bvecs, mask) for ... in sample]
+
+# 2. one set of hyperparameters for the protocol
+cal = calibrate_protocol(records, name='P3', ids=subject_ids)   # rule='geomean'
+save_protocol_calibration(cal, 'P3_calibration.json')           # returns sha256
+
+# 3. every acquisition of that protocol
+model = DBSI_Adaptive.from_calibration('P3_calibration.json')
+results, mode = model.fit(data, bvals, bvecs, mask)
+```
+
+`from_calibration` imposes `lambda_aniso`, `lambda_iso`, `n_iso`, the gate and
+the dictionary options (the lambdas only mean something on the dictionary they
+were calibrated on), refuses data whose protocol fingerprint differs
+(`strict=True`), and refuses to override a calibrated parameter. The run report
+states `calibration_source: protocol` with the file's sha256, and a copy of the
+JSON lands in `toolbox_report/`. From the command line:
+`run_dbsi.py ... --protocol-calibration P3_calibration.json`.
+
+Two aggregation rules: `'geomean'` minimises the mean of the log GCV curves
+(each acquisition's curve is scale-invariant, so a noisier acquisition does not
+outvote a cleaner one), `'median_index'` is the grid index closest on average
+to the individual optima, ties broken on the worst case. The record always
+reports the other rule's answer, the bootstrap stability over acquisitions and
+how far each acquisition sits from its own optimum. `lambda_iso` is also capped
+by the acquisitions' discrepancy ceilings (`lambda_iso_cap_rule`).
+
 ### Key Parameters
 
 * `n_iso`: density of the anchored isotropic grid (default: `None` →
@@ -252,6 +291,8 @@ docstring of `build_rf_response_table`.
   record with the full GCV curves and the protocol fingerprint
   (`protocol_fingerprint`: volume, b=0 and per-shell counts, never the exact
   gradient vectors), to be aggregated across acquisitions.
+  The aggregation and its use are in the toolbox too (see *Protocol
+  calibration* below).
 * `min_dominant_concentration`: angular-concentration gate (default **0.0**,
   i.e. off since 1.4.0). Available on request, as is
   `fit(calibrate_concentration_gate=True)` for the Monte Carlo null.

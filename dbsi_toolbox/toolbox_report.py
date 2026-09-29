@@ -10,6 +10,8 @@ toolbox_report/ — cosa ha prodotto le mappe, in una cartella sola.
                              (AD, RD) e griglia isotropa che la generano
     dictionary_columns.csv   una riga per colonna: blocco, direzione, AD/RD o
                              D isotropa, comparto
+    protocol_calibration.json  (solo con `from_calibration`) copia della
+                             calibrazione di protocollo usata
 
 Perche' anche il dizionario: fino alla 1.3.9 il run report diceva quante colonne
 c'erano ma non QUALI. La matrice dipende dal protocollo (b-values, direzioni),
@@ -203,6 +205,16 @@ def save_toolbox_report(model, output_dir, saved_channels=None):
         ver = (report or {}).get('toolbox_version', '')
         plot_design_matrix(D, f, title_extra=f'pyDBSI {ver}' if ver else '')
         written.append(f)
+    # La calibrazione di protocollo usata, COPIATA: il run report ne cita lo
+    # sha256, ma il file originale puo' essere spostato o riscritto.
+    pc = getattr(model, 'protocol_calibration_', None)
+    if pc and pc.get('content'):
+        import json
+        f = os.path.join(rep_dir, 'protocol_calibration.json')
+        with open(f, 'w', encoding='utf-8') as fh:
+            json.dump(pc['content'], fh, indent=2, ensure_ascii=False)
+        written.append(f)
+
     mancano = [n for n, v in (('run_report_', report), ('dictionary_', D)) if not v]
     if mancano:
         print(f"   [WARNING] toolbox_report incompleto: il modello non ha "

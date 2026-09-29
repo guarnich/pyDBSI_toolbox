@@ -1721,6 +1721,64 @@ class DBSI_Adaptive:
         self.cone_refinement_schedule_ = None
         self.run_report_ = None
         self.dictionary_ = None
+        # Impostato da `from_calibration`: NON e' un attributo di run, quindi non
+        # si azzera in fit() -- descrive come e' stato costruito il modello.
+        self.protocol_calibration_ = None
+
+    # ------------------------------------------------------------------
+    @classmethod
+    def from_calibration(cls, calibration, strict=True, **overrides):
+        """Modello con gli iperparametri di una calibrazione di PROTOCOLLO.
+
+        `calibration` e' il percorso del JSON scritto da
+        `save_protocol_calibration`, oppure il dict di `calibrate_protocol` /
+        `load_protocol_calibration`. Impone lambda_aniso, lambda_iso, n_iso, il
+        gate e le opzioni da cui dipende il dizionario (n_dirs, griglie di
+        Stage A, anisotropy_ratio, fiber_threshold, iso_range): i lambda hanno
+        senso solo sul dizionario su cui sono stati calibrati.
+
+        In `fit()` l'impronta dei bvals viene confrontata con quella del
+        protocollo: se differisce, `strict=True` rifiuta di fittare. Il run
+        report registra nome, sha256 e impronta della calibrazione, e il JSON
+        viene copiato in toolbox_report/.
+
+        `overrides` sono altri argomenti del costruttore (p.es. flag di Stage
+        C); ridefinire un parametro calibrato solleva ValueError.
+        """
+        from .calibration.protocol import load_protocol_calibration
+        import os
+        if isinstance(calibration, (str, os.PathLike)):
+            cal = load_protocol_calibration(calibration)
+        else:
+            cal = dict(calibration)
+            if cal.get('kind') != 'pydbsi_protocol_calibration':
+                raise ValueError('non e una calibrazione di protocollo')
+        h, mo = cal['hyperparameters'], cal['model']
+        fissati = dict(lambda_aniso=float(h['lambda_aniso']),
+                       lambda_iso=float(h['lambda_iso']), n_iso=int(h['n_iso']),
+                       min_dominant_concentration=float(h['concentration_gate']),
+                       lambda_aniso_method=str(h['lambda_aniso_method']),
+                       n_dirs=int(mo['n_dirs']), n_ad=int(mo['n_ad']), n_rd=int(mo['n_rd']),
+                       anisotropy_ratio=float(mo['anisotropy_ratio']),
+                       fiber_threshold=float(mo['fiber_threshold']),
+                       iso_range=tuple(float(x) for x in mo['iso_range']))
+        conflitti = sorted(set(overrides) & set(fissati))
+        if conflitti:
+            raise ValueError(f'{conflitti} sono fissati dalla calibrazione di protocollo: '
+                             f'ridefinirli romperebbe la riproducibilita. Se serve un '
+                             f'valore diverso, serve una calibrazione diversa.')
+        m = cls(**fissati, **overrides)
+        src = cal.get('_source') or {}
+        m.protocol_calibration_ = dict(
+            name=cal.get('name'), sha256=src.get('sha256'), path=src.get('path'),
+            created_utc=cal.get('created_utc'),
+            toolbox_version=cal.get('toolbox_version'),
+            n_acquisitions=cal.get('aggregation', {}).get('n_acquisitions'),
+            rule=cal.get('aggregation', {}).get('rule'),
+            lambda_iso_cap_rule=cal.get('aggregation', {}).get('lambda_iso_cap_rule'),
+            protocol=cal['protocol'], strict=bool(strict),
+            content={k: v for k, v in cal.items() if k != '_source'})
+        return m
 
     # ------------------------------------------------------------------
     def fit(self, data, bvals, bvecs, mask, run_calibration=True,
@@ -1790,6 +1848,26 @@ class DBSI_Adaptive:
         norms = np.linalg.norm(bvecs, axis=1, keepdims=True)
         norms[norms == 0] = 1.0
         bvecs = bvecs / norms
+
+        # ── Calibrazione di protocollo: questi dati hanno QUEL protocollo? ─────
+        self.protocol_fingerprint_match_ = None
+        if self.protocol_calibration_ is not None:
+            from .calibration.protocol import protocol_fingerprint, fingerprint_mismatches
+            _pc = self.protocol_calibration_
+            _mm = fingerprint_mismatches(_pc['protocol'], protocol_fingerprint(bvals))
+            self.protocol_fingerprint_match_ = not _mm
+            if _mm:
+                _msg = (f"impronta del protocollo diversa da quella della calibrazione "
+                        f"{_pc.get('name')!r}: " + '; '.join(
+                            f"{k}: calibrazione {a} / dati {b}" for k, a, b in _mm))
+                if _pc.get('strict', True):
+                    raise ValueError(_msg + ". Questi iperparametri non valgono per "
+                                     "questa acquisizione (from_calibration(strict=False) "
+                                     "per forzare, e il run report lo dichiara).")
+                print(f"\n  [WARNING] {_msg} -- strict=False, si procede.")
+            if calibrate_concentration_gate:
+                raise ValueError("calibrate_concentration_gate=True con una calibrazione "
+                                 "di protocollo: il gate e' fissato dal protocollo.")
 
         # ── Isotropic model selection ──────────────────────────────────────
         b_max, n_shells, use_3iso, reason = analyse_protocol(bvals)
@@ -2555,6 +2633,15 @@ class DBSI_Adaptive:
             # correzione: distorce la RF verso il basso dove morde, e la 1.3.5
             # l'ha raddoppiato correggendo sigma.
             rician_clamp=dict(getattr(self, 'rician_clamp_', {}) or {}),
+            protocol_calibration=({} if not self.protocol_calibration_ else dict(
+                name=self.protocol_calibration_.get('name'),
+                sha256=self.protocol_calibration_.get('sha256') or 'not saved to file',
+                created_utc=self.protocol_calibration_.get('created_utc'),
+                calibrated_with=self.protocol_calibration_.get('toolbox_version'),
+                n_acquisitions=self.protocol_calibration_.get('n_acquisitions'),
+                rule=self.protocol_calibration_.get('rule'),
+                lambda_iso_cap_rule=self.protocol_calibration_.get('lambda_iso_cap_rule'),
+                fingerprint_match=bool(self.protocol_fingerprint_match_))),
             # Il dizionario di Stage A: A = [A_aniso | A_iso]. La matrice stessa e
             # la sua immagine stanno in toolbox_report/ accanto a questo file.
             dictionary=dict(
@@ -2588,7 +2675,15 @@ class DBSI_Adaptive:
                             calibration_method='data_driven',
                             lambda_aniso_method=str(self.lambda_aniso_method),
                             n_iso_method=str(n_iso_method),
-                            n_iso_source=str(self.n_iso_source_ or 'user'),
+                            n_iso_source=str(self.n_iso_source_ or (
+                                'protocol' if self.protocol_calibration_ else 'user')),
+                            # Da dove vengono lambda e gate: una calibrazione di
+                            # PROTOCOLLO (from_calibration), questa acquisizione
+                            # (calibrata qui), o valori passati a mano.
+                            calibration_source=(
+                                'protocol' if self.protocol_calibration_ else
+                                'acquisition' if self.calibration_curves_ is not None
+                                else 'user'),
                             calibration_seed=0,
                             # Without this the report shows a gate value but not
                             # whether it was CALIBRATED or IMPOSED — the very

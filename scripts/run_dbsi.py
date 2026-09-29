@@ -62,6 +62,12 @@ def main():
                              "calibrated lambda/n_iso/gate, not just the field of view.")
     parser.add_argument("--out", required=True)
     parser.add_argument("--skip-calibration", action="store_true")
+    parser.add_argument("--protocol-calibration", dest="protocol_calibration", default=None,
+                        help="JSON of a PROTOCOL calibration (calibrate_protocol + "
+                             "save_protocol_calibration). Imposes lambda_aniso, lambda_iso, "
+                             "n_iso, the gate and the dictionary options, and refuses data "
+                             "whose protocol fingerprint differs. Incompatible with --n-iso, "
+                             "--lambda-aniso, --lambda-iso, --n-dirs.")
     parser.add_argument("--n-iso", type=int, default=None)
     parser.add_argument("--lambda-aniso", type=float, dest="lambda_aniso", default=None,
                         help="Stage A regularization strength for the anisotropic detection block.")
@@ -132,6 +138,11 @@ def main():
                         help="Desired final angular precision (degrees) for direction refinement. "
                              "Default: 1.0. Ignored if --disable-direction-refinement is set.")
     args = parser.parse_args()
+    if args.protocol_calibration:
+        _fissati = [k for k in ('n_iso', 'lambda_aniso', 'lambda_iso', 'n_dirs')
+                    if getattr(args, k) is not None]
+        if _fissati:
+            parser.error(f"--protocol-calibration fissa gia {_fissati}: non passarli")
     os.makedirs(args.out, exist_ok=True)
 
     print("\nDBSI PIPELINE - Adaptive Version (v3, hybrid two-stage)\n")
@@ -140,22 +151,35 @@ def main():
         args.dwi, args.bval, args.bvec, args.mask, verbose=True
     )
 
-    model = DBSI_Adaptive(
-        n_iso=args.n_iso,
-        lambda_aniso=args.lambda_aniso,
-        lambda_iso=args.lambda_iso,
-        n_dirs=args.n_dirs,
-        n_ad=args.n_ad,
-        n_rd=args.n_rd,
-        anisotropy_ratio=args.anisotropy_ratio,
-        min_weight_fraction=args.min_weight_fraction,
-        force_n_iso=args.force_n_iso,
-        enable_direction_refinement=not args.disable_direction_refinement,
-        target_angular_resolution_deg=args.target_angular_resolution_deg,
-        lambda_aniso_conc_mod=not args.disable_conc_modulation,
-        stagec_refine=not args.disable_stagec,
-        iso_resolve=not args.disable_iso_resolve,
-    )
+    if args.protocol_calibration:
+        model = DBSI_Adaptive.from_calibration(
+            args.protocol_calibration,
+            min_weight_fraction=args.min_weight_fraction,
+            force_n_iso=args.force_n_iso,
+            enable_direction_refinement=not args.disable_direction_refinement,
+            target_angular_resolution_deg=args.target_angular_resolution_deg,
+            lambda_aniso_conc_mod=not args.disable_conc_modulation,
+            stagec_refine=not args.disable_stagec,
+            iso_resolve=not args.disable_iso_resolve,
+        )
+        print(f"Protocol calibration: {args.protocol_calibration}")
+    else:
+        model = DBSI_Adaptive(
+            n_iso=args.n_iso,
+            lambda_aniso=args.lambda_aniso,
+            lambda_iso=args.lambda_iso,
+            n_dirs=args.n_dirs,
+            n_ad=args.n_ad,
+            n_rd=args.n_rd,
+            anisotropy_ratio=args.anisotropy_ratio,
+            min_weight_fraction=args.min_weight_fraction,
+            force_n_iso=args.force_n_iso,
+            enable_direction_refinement=not args.disable_direction_refinement,
+            target_angular_resolution_deg=args.target_angular_resolution_deg,
+            lambda_aniso_conc_mod=not args.disable_conc_modulation,
+            stagec_refine=not args.disable_stagec,
+            iso_resolve=not args.disable_iso_resolve,
+        )
 
     results, model_mode = model.fit(
         data, bvals, bvecs, mask,

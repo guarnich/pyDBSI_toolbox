@@ -485,6 +485,7 @@ def format_run_report(report, saved_channels=None):
     block("Protocol", p)
     block("Noise", R.get('noise'))
     block("Rician clamp", R.get('rician_clamp'))
+    block("Protocol calibration", R.get('protocol_calibration'))
     block("Dictionary (Stage A, A = [A_aniso | A_iso])", R.get('dictionary'))
     block("Fit-quality reference", R.get('fit_quality_reference'))
     block("Calibrated hyperparameters", R.get('calibrated'))

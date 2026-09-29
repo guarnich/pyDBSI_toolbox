@@ -90,10 +90,20 @@ own fraction, tensor and direction:
   these for a single per-voxel fiber number; `fiber_fa_weighted` is the FA
   OF the weighted tensor, not the mean of the two FAs.
 
-Every run also writes `run_report.txt` into the output directory when the
-fitted model is passed to `save_output_maps`. A folder of NIfTI files with no
-record of what produced them is not reproducible, and the toolbox version
-cannot be recovered from the maps afterwards.
+Every run also writes a `toolbox_report/` folder into the output directory
+when the fitted model is passed to `save_output_maps`:
+
+| file | content |
+|---|---|
+| `run_report.txt` | version, git commit, hyperparameters, noise, options, population census, dictionary size |
+| `design_matrix.png` | image of the Stage A dictionary A = [A_aniso \| A_iso], rows sorted by b-value |
+| `design_matrix.npz` | A itself plus the b-values, directions, (AD, RD) pairs and isotropic grid that generate it |
+| `dictionary_columns.csv` | one row per column of A: block, direction, AD/RD or isotropic D, compartment |
+
+A folder of NIfTI files with no record of what produced them is not
+reproducible, and neither the toolbox version nor the dictionary can be
+recovered from the maps afterwards. Up to v1.3.9 `run_report.txt` sat next to
+the maps; `find_run_report(output_dir)` reads either layout.
 
 **Diagnostics (24-26)**
 
@@ -134,9 +144,9 @@ model = DBSI_Adaptive()
 results, model_mode = model.fit(data, bvals, bvecs, mask, run_calibration=True)
 
 names = DBSI_Adaptive.output_map_names(model_mode)
-# Passing the model writes run_report.txt next to the maps: version, git
-# commit, calibrated hyperparameters, noise estimate, every option in force,
-# the per-voxel population census and the channel list.
+# Passing the model writes toolbox_report/ next to the maps: run_report.txt
+# (version, git commit, hyperparameters, noise, options, population census,
+# channel list) and the dictionary A as image, .npz and column table.
 save_output_maps(results, names, affine, 'results/', model=model)
 ```
 
@@ -227,7 +237,7 @@ docstring of `build_rf_response_table`.
   reported fractions on three fixed centroids, and n_iso=6 already sits within
   tolerance of the converged tensor. It is not the column count — n_iso=6
   gives 11 columns (4 restricted / 5 hindered / 2 water), reported as
-  `n_iso_columns` in `run_report.txt`. Per-dataset selection
+  `n_iso_columns` in `toolbox_report/run_report.txt`. Per-dataset selection
   (`n_iso_method='bootstrap'`) was the default before 1.3.9.
 * `lambda_aniso`, `lambda_iso`: Stage A regularization strengths
   (default: auto-calibrated; evaluated end-to-end through Stage A + B).

@@ -485,6 +485,7 @@ def format_run_report(report, saved_channels=None):
     block("Protocol", p)
     block("Noise", R.get('noise'))
     block("Rician clamp", R.get('rician_clamp'))
+    block("Dictionary (Stage A, A = [A_aniso | A_iso])", R.get('dictionary'))
     block("Fit-quality reference", R.get('fit_quality_reference'))
     block("Calibrated hyperparameters", R.get('calibrated'))
     block("Options", R.get('options'))
@@ -575,10 +576,19 @@ def save_output_maps(results, channel_names, affine, output_dir,
                                 FF-weighted aggregates
         fiber_valid_pop2.nii.gz uint8 validity mask for the pop-2 block, which
                                 has a DIFFERENT domain (NaN where n_pop < 2)
-        run_report.txt         what produced these maps (when `model` is given)
+        toolbox_report/        what produced these maps (when `model` is given):
+            run_report.txt           see below
+            design_matrix.png        image of the dictionary A = [A_aniso | A_iso]
+            design_matrix.npz        A itself and what generates it
+            dictionary_columns.csv   one row per column of A
+                                (see `dbsi_toolbox.toolbox_report`)
+
+    Until v1.3.9 run_report.txt sat next to the maps; it now lives in
+    toolbox_report/ together with the dictionary. Code that looks for it
+    should use `find_run_report(output_dir)`, which checks both places.
 
     Pass the fitted `DBSI_Adaptive` as `model` and its `run_report_` is written
-    alongside the maps: toolbox version and git commit, the calibrated
+    to toolbox_report/: toolbox version and git commit, the calibrated
     hyperparameters, the noise estimate, every option that was in force, the
     per-voxel population census and the channel list. A folder of NIfTI files
     with no record of what produced them is not reproducible, and the version
@@ -633,8 +643,22 @@ def save_output_maps(results, channel_names, affine, output_dir,
             nib.save(nib.Nifti1Image(
                 compute_fiber_validity_map(results, names, 'pop2'), affine),
                 os.path.join(output_dir, 'fiber_valid_pop2.nii.gz'))
-    report = getattr(model, 'run_report_', None) if model is not None else None
-    if report:
-        with open(os.path.join(output_dir, 'run_report.txt'), 'w') as fh:
-            fh.write(format_run_report(report, saved_channels=saved))
+    if model is not None:
+        from .toolbox_report import save_toolbox_report
+        save_toolbox_report(model, output_dir, saved_channels=saved)
     return saved
+
+
+def find_run_report(output_dir):
+    """Path of the run report for a folder of maps, or None.
+
+    v1.3.10+ writes it to `<output_dir>/toolbox_report/run_report.txt`; earlier
+    versions wrote `<output_dir>/run_report.txt`. Both are accepted, newest
+    layout first, so the same code reads old and new outputs.
+    """
+    import os
+    for p in (os.path.join(output_dir, 'toolbox_report', 'run_report.txt'),
+              os.path.join(output_dir, 'run_report.txt')):
+        if os.path.isfile(p):
+            return p
+    return None

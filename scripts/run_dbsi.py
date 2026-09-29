@@ -32,8 +32,9 @@ inline loop private to this script. Consequences:
 - `nonrestricted_fraction` is not written in 3-ISO mode, where it is
   hindered + water by construction;
 - `fiber_valid.nii.gz`, the validity mask for the fiber-tensor channels,
-  and `run_report.txt`, recording what produced the maps, are written as
-  part of the normal run;
+  and `toolbox_report/` (run_report.txt + the dictionary A as image, .npz
+  and column table), recording what produced the maps, are written as part
+  of the normal run;
 - the R2 / RMSE fit-quality maps are ordinary output channels now, always
   computed by the fit, so `--compute-r2` is gone.
 
@@ -171,7 +172,7 @@ def main():
     skipped = [n for n in names if n not in saved]
     print(f"  {len(saved)} channel maps -> {args.out}/NN_<channel>.nii.gz")
     print(f"  fiber-tensor validity mask -> {args.out}/fiber_valid.nii.gz")
-    print(f"  run report -> {args.out}/run_report.txt")
+    print(f"  toolbox report (run report + dictionary) -> {args.out}/toolbox_report/")
     print(f"  Skipped {len(skipped)} channels (invalid in {model_mode}-ISO mode "
           f"or exact duplicates): {', '.join(skipped)}")
 

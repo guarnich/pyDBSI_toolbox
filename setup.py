@@ -75,6 +75,7 @@ setup(
         "scipy>=1.7.0",
         "tqdm>=4.60.0",
         "pandas>=1.3.0",
+        "matplotlib>=3.3.0",
         "ipykernel>=6.0.0",
     ],
     entry_points={

@@ -1699,6 +1699,7 @@ class DBSI_Adaptive:
         self.hemisphere_spacing_deg_ = None
         self.cone_refinement_schedule_ = None
         self.run_report_ = None
+        self.dictionary_ = None
 
     # ------------------------------------------------------------------
     def fit(self, data, bvals, bvecs, mask, run_calibration=True,
@@ -1754,6 +1755,7 @@ class DBSI_Adaptive:
         self.n_iso_columns_res_ = None
         self.n_iso_columns_wat_ = None
         self.rician_clamp_ = None
+        self.dictionary_ = None
 
         print("\n" + "="*70)
         print("  DBSI ADAPTIVE PIPELINE — v3 + MRDS Multi-Fiber Extension")
@@ -2261,6 +2263,19 @@ class DBSI_Adaptive:
               f"Condition number (regularized): {cond:.2e}")
         print(f"   Regularization: lambda_aniso={self.lambda_aniso:.4f}  "
               f"lambda_iso={self.lambda_iso:.4f}")
+        # Il dizionario EFFETTIVO del fit, conservato per il toolbox_report
+        # (immagine + .npz). Piccolo (n_misure x ~300 colonne), e fino alla 1.3.9
+        # non era ricostruibile dalle mappe: serviva rifare la configurazione.
+        self.dictionary_ = dict(
+            A=A, bvals=np.asarray(bvals, dtype=np.float64).ravel(), bvecs=bvecs,
+            fiber_dirs=np.asarray(fiber_dirs), diff_pairs=np.asarray(diff_pairs),
+            iso_grid=np.asarray(iso_grid), n_dirs=int(self.n_dirs),
+            n_pairs=int(n_pairs), n_aniso_cols=int(n_aniso_cols),
+            n_iso=int(self.n_iso), lambda_aniso=float(self.lambda_aniso),
+            lambda_iso=float(self.lambda_iso),
+            condition_number_regularized=float(cond),
+            thresh_res=float(THRESH_RES), thresh_wat=float(THRESH_WAT),
+        )
 
         # Both MC-null calibrations below (concentration gate + RF response)
         # simulate unit-S0 signals, so they need sigma in NORMALISED (S/S0)
@@ -2506,6 +2521,18 @@ class DBSI_Adaptive:
             # correzione: distorce la RF verso il basso dove morde, e la 1.3.5
             # l'ha raddoppiato correggendo sigma.
             rician_clamp=dict(getattr(self, 'rician_clamp_', {}) or {}),
+            # Il dizionario di Stage A: A = [A_aniso | A_iso]. La matrice stessa e
+            # la sua immagine stanno in toolbox_report/ accanto a questo file.
+            dictionary=dict(
+                n_measurements=int(self.dictionary_['A'].shape[0]),
+                n_dirs=self.dictionary_['n_dirs'],
+                n_diffusivity_pairs=self.dictionary_['n_pairs'],
+                n_aniso_columns=self.dictionary_['n_aniso_cols'],
+                n_iso_columns=int(len(self.dictionary_['iso_grid'])),
+                n_total_columns=int(self.dictionary_['A'].shape[1]),
+                condition_number_regularized=self.dictionary_[
+                    'condition_number_regularized'],
+            ),
             noise=dict(snr=float(snr), sigma_raw=float(sigma),
                        n_b0=int(np.sum(np.asarray(bvals) < 50)),
                        sigma_estimator=('legacy_biased'

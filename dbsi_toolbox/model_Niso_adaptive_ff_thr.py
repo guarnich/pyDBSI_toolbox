@@ -398,7 +398,28 @@ _DEFAULT_MIN_PEAK_RATIO = 0.35
 # by ~89% (npop 2.0->0.22) while KEEPING low-SNR (SNR15) fiber detection
 # (npop~1.0 vs 0.78 at 0.38). Raise toward 0.38 for max specificity at the cost
 # of low-SNR sensitivity. Below the gate -> npop=0.
-_DEFAULT_MIN_DOMINANT_CONCENTRATION = 0.35
+#
+# SPENTO DI DEFAULT dalla 1.4.0 (0.0 = il gate non rifiuta mai; resta la soglia
+# `fiber_threshold` sulla frazione di fibra). La storia sopra e' stata smentita:
+#   - sul fantoccio un crossing a 90 gradi VERO ha concentrazione 0.421 e un
+#     voxel tipo tumore 0.414: il gate non puo' distinguerli, perche' un crossing
+#     ad angolo largo e' angolarmente diffuso PER COSTRUZIONE. Col nullo MC vero
+#     la detezione crolla sopra i 60 gradi: il gate rifiuta i crossing che il
+#     dizionario sa risolvere e ammette quelli che non sa risolvere;
+#   - sui dati veri (Codes_fixed_20260923/07_gate_su_dati_veri, 4000 voxel,
+#     tutto congelato tranne il gate) il gate congelato 0.4535 toglieva la fibra
+#     al 19.5% dei voxel; quei voxel, rifiutati, lasciano un residuo di 1.80
+#     sigma, e ammessi scendono a 1.03 sigma (il 97% diventa crossing). La
+#     riduzione e' 0.57x, contro 0.87-0.94x attese dai soli gradi di liberta'.
+#     A OGNI gradino dello sweep (0.30 -> 0.55) i voxel persi passano da ~1.0 a
+#     ~1.8 sigma: non esiste un punto di lavoro;
+#   - calibrato per sessione, era il parametro piu' legato all'SNR (Spearman
+#     -0.86 su 40 soggetti) e la causa radice del divario BR/BT.
+# Resta disponibile: `min_dominant_concentration=<valore>` oppure
+# `fit(calibrate_concentration_gate=True)` per il nullo MC. Attenzione: se il
+# nullo MC e' troppo rado ripiega sul valore del costruttore, che ora e' 0.0 --
+# cioe' "nessun gate"; il messaggio "FELL BACK" lo dichiara.
+_DEFAULT_MIN_DOMINANT_CONCENTRATION = 0.0
 
 # Plan A (Point 2) — per-voxel concentration-modulated lambda_aniso defaults.
 # ON by default (disable via lambda_aniso_conc_mod=False): when a voxel's
@@ -1706,9 +1727,10 @@ class DBSI_Adaptive:
            n_calibration_voxels=1000,
            n_iso_method='quadrature', n_bootstrap=50,
            run_sure_crosscheck=False, sure_crosscheck_n_probes=15,
-           calibrate_concentration_gate=True,
+           calibrate_concentration_gate=False,
            concentration_gate_percentile=_CONCENTRATION_GATE_PERCENTILE,
-           correct_restricted_fraction=False):
+           correct_restricted_fraction=False,
+           _calibration_only=False, _lambda_aniso_grid=None, _lambda_iso_grid=None):
         """
         Fit the v3 hybrid two-stage adaptive DBSI model (+ MRDS
         multi-fiber extension) to 4D diffusion MRI data.
@@ -1756,6 +1778,7 @@ class DBSI_Adaptive:
         self.n_iso_columns_wat_ = None
         self.rician_clamp_ = None
         self.dictionary_ = None
+        self.calibration_curves_ = None
 
         print("\n" + "="*70)
         print("  DBSI ADAPTIVE PIPELINE — v3 + MRDS Multi-Fiber Extension")
@@ -2139,7 +2162,12 @@ class DBSI_Adaptive:
             self.lambda_aniso, self.lambda_iso, _dd_diag = select_lambdas_data_driven(
                 bvals, bvecs, fiber_dirs, diff_pairs, iso_grid, y_cal, sigma_cal,
                 lambda_aniso_method=self.lambda_aniso_method,
+                lambda_iso_grid=_lambda_iso_grid,
+                lambda_aniso_grid=_lambda_aniso_grid,
             )
+            # Le curve complete, non solo i minimi: servono ad aggregare la
+            # calibrazione di piu' acquisizioni dello stesso protocollo.
+            self.calibration_curves_ = _dd_diag
             # Su quale estremo della griglia di ricerca e' finito ciascun lambda?
             # Un lambda al bordo non e' un minimo interno: non si distingue
             # "l'ottimo e' qui" da "l'ottimo sta oltre la griglia". Va visto,
@@ -2333,6 +2361,12 @@ class DBSI_Adaptive:
             print(f"   RF response function (data-driven bias correction): "
                   f"FF rows {np.round(_ff_rows, 2).tolist()}, RF_true grid "
                   f"{list(_RF_CORRECTION_RF_LEVELS)} -> table built.")
+
+        # ── Solo calibrazione: ci si ferma qui, prima del fit voxel per voxel ──
+        if _calibration_only:
+            return self._calibration_record(
+                bvals, snr, sigma, sigma_cal, y_cal, iso_grid, run_calibration,
+                calibrate_concentration_gate)
 
         # ── Allocate output (27 channels — see module docstring) ────────────
         results = np.zeros(data.shape[:3] + (self.N_CHANNELS,), dtype=np.float32)
@@ -2587,6 +2621,111 @@ class DBSI_Adaptive:
         print(f"\n{'='*70}\n")
 
         return results, model_mode
+
+    # ------------------------------------------------------------------
+    def calibrate(self, data, bvals, bvecs, mask, n_calibration_voxels=1000,
+                  lambda_aniso_grid=None, lambda_iso_grid=None,
+                  n_iso_method='quadrature', calibrate_concentration_gate=False):
+        """
+        Calibra UNA acquisizione senza fittarla: esegue la parte di `fit()` che
+        sceglie gli iperparametri e si ferma prima del fit voxel per voxel.
+
+        E' il mattone della calibrazione di PROTOCOLLO: si chiama su un campione
+        di acquisizioni con lo stesso protocollo e si aggregano i record. Per
+        questo il record contiene le curve di selezione COMPLETE (GCV di
+        lambda_aniso e di lambda_iso), non solo i minimi, e l'impronta del
+        protocollo (`calibration.protocol.protocol_fingerprint`).
+
+        Il modello su cui si chiama NON viene modificato (si lavora su una
+        copia), quindi lo stesso oggetto si puo' riusare su N acquisizioni.
+
+        Parameters
+        ----------
+        lambda_aniso_grid, lambda_iso_grid : array or None
+            Griglie di ricerca. Default: quelle di `fit()` (logspace(-4, 4, 40)
+            e logspace(-5, 1, 40)). Una griglia piu' fine ha senso qui, perche'
+            la calibrazione di protocollo si paga una volta sola.
+        n_iso_method, calibrate_concentration_gate
+            Come in `fit()`. Il gate e' spento di default dalla 1.4.0.
+
+        Returns
+        -------
+        record : dict, serializzabile in JSON (liste e float).
+        """
+        import copy
+        if self.lambda_aniso is not None or self.lambda_iso is not None:
+            raise ValueError(
+                "calibrate() stima i lambda: costruisci il modello SENZA "
+                "lambda_aniso / lambda_iso. Con uno solo dei due la calibrazione "
+                "riscriverebbe comunque entrambi.")
+        m = copy.deepcopy(self)
+        return m.fit(data, bvals, bvecs, mask, run_calibration=True,
+                     n_calibration_voxels=n_calibration_voxels,
+                     n_iso_method=n_iso_method,
+                     calibrate_concentration_gate=calibrate_concentration_gate,
+                     correct_restricted_fraction=False,
+                     _calibration_only=True,
+                     _lambda_aniso_grid=lambda_aniso_grid,
+                     _lambda_iso_grid=lambda_iso_grid)
+
+    def _calibration_record(self, bvals, snr, sigma, sigma_cal, y_cal, iso_grid,
+                            run_calibration, calibrate_concentration_gate):
+        """Il record di `calibrate()`: tutto cio' che serve ad aggregare."""
+        import datetime as _dt
+        from .calibration.protocol import protocol_fingerprint
+
+        def _j(o):
+            if isinstance(o, dict):
+                return {str(k): _j(v) for k, v in o.items()}
+            if isinstance(o, (list, tuple)):
+                return [_j(v) for v in o]
+            if isinstance(o, np.ndarray):
+                return [_j(v) for v in o.tolist()]
+            if isinstance(o, (np.bool_, bool)):
+                return bool(o)
+            if isinstance(o, (np.integer,)):
+                return int(o)
+            if isinstance(o, (np.floating, float)):
+                return float(o)
+            return o
+
+        dd = self.calibration_curves_ or {}
+        an = dd.get('lambda_aniso_selection') or {}
+        gi = dd.get('gcv') or {}
+        return _j(dict(
+            kind='pydbsi_acquisition_calibration', format_version=1,
+            run_utc=_dt.datetime.now(_dt.timezone.utc).isoformat(timespec='seconds'),
+            **_package_provenance(),
+            protocol=protocol_fingerprint(bvals),
+            noise=dict(snr=snr, sigma_raw=sigma, sigma_normalised=sigma_cal,
+                       n_b0=int(np.sum(np.asarray(bvals).ravel() < 50))),
+            n_calibration_voxels=(0 if y_cal is None else int(len(y_cal))),
+            hyperparameters=dict(
+                n_iso=self.n_iso, n_iso_source=str(self.n_iso_source_ or 'user'),
+                n_iso_columns=int(len(iso_grid)),
+                lambda_aniso=self.lambda_aniso, lambda_iso=self.lambda_iso,
+                lambda_aniso_method=self.lambda_aniso_method,
+                concentration_gate=self.min_dominant_concentration,
+                concentration_gate_calibrated=bool(
+                    run_calibration and calibrate_concentration_gate)),
+            selection=dict(
+                lambda_iso_gcv=dd.get('lambda_iso_gcv'),
+                lambda_iso_cap=dd.get('lambda_iso_cap'),
+                lambda_iso_capped=dd.get('lambda_iso_capped'),
+                lambda_iso_pass1=dd.get('lambda_iso_pass1'),
+                lambda_aniso_pass1=dd.get('lambda_aniso_pass1'),
+                lambda_aniso_at_grid_edge=(self.lambda_edges_ or {}).get(
+                    'lambda_aniso_at_grid_edge'),
+                lambda_iso_at_grid_edge=(self.lambda_edges_ or {}).get(
+                    'lambda_iso_at_grid_edge')),
+            curves=dict(
+                lambda_aniso={k: v for k, v in an.items()},
+                lambda_iso=dict(lambda_grid=gi.get('lambda_'), gcv=gi.get('gcv'))),
+            model=dict(n_dirs=self.n_dirs, n_ad=self.n_ad, n_rd=self.n_rd,
+                       anisotropy_ratio=self.anisotropy_ratio,
+                       fiber_threshold=self.fiber_threshold,
+                       iso_range=list(self.iso_range), iso_grid=iso_grid),
+        ))
 
     # ------------------------------------------------------------------
     @staticmethod

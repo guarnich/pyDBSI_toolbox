@@ -192,8 +192,13 @@ is in `voxel_journey_report`.
    `lambda_aniso` is boosted and the voxel is re-solved. A continuous ramp,
    so low-FA fibers are not crushed along with the leakage.
 3. **Population detection**: local maxima on the direction graph, Voronoi
-   basin mass, a data-driven concentration gate, then greedy selection with
-   angular non-maximum suppression. Yields 0, 1 or **at most 2**
+   basin mass, then greedy selection with angular non-maximum suppression.
+   The angular-concentration gate that used to precede the selection is
+   **off by default since 1.4.0**: a wide-angle crossing is angularly diffuse
+   by construction, so the gate rejected exactly the crossings the dictionary
+   can resolve (on real data it removed the fiber compartment from 19.5% of
+   voxels, whose residual rose from 1.03 to 1.80 sigma). Fiber/no-fiber
+   discrimination is left to `fiber_threshold`. Yields 0, 1 or **at most 2**
    populations (`MAX_FIBER_POPULATIONS`, fixed).
 4. **Per-voxel tensor estimation**, by branch:
    - **one population → cone refinement, then Stage C (VARPRO)**: Stage A's
@@ -240,7 +245,16 @@ docstring of `build_rf_response_table`.
   `n_iso_columns` in `toolbox_report/run_report.txt`. Per-dataset selection
   (`n_iso_method='bootstrap'`) was the default before 1.3.9.
 * `lambda_aniso`, `lambda_iso`: Stage A regularization strengths
-  (default: auto-calibrated; evaluated end-to-end through Stage A + B).
+  (default: auto-calibrated per acquisition by GCV). For a cohort they
+  should be calibrated **once per protocol** and imposed on every
+  acquisition: `model.calibrate(data, bvals, bvecs, mask)` runs only the
+  calibration of one acquisition (no voxel-wise fit) and returns a JSON-ready
+  record with the full GCV curves and the protocol fingerprint
+  (`protocol_fingerprint`: volume, b=0 and per-shell counts, never the exact
+  gradient vectors), to be aggregated across acquisitions.
+* `min_dominant_concentration`: angular-concentration gate (default **0.0**,
+  i.e. off since 1.4.0). Available on request, as is
+  `fit(calibrate_concentration_gate=True)` for the Monte Carlo null.
 * `n_dirs`: Number of fiber directions on the hemisphere for Stage A
   (default: `None`, autoconfigured from the protocol).
 * `n_ad`, `n_rd`: Stage A's AD/RD grid density (default: 3, 3 —

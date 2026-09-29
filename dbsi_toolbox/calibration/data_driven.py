@@ -1267,7 +1267,8 @@ def select_lambdas_data_driven(bvals, bvecs, fiber_dirs, diff_pairs, iso_grid,
                                 y_voxels, sigma,
                                 lambda_iso_grid=None,
                                 lambda_aniso_bracket=(1e-6, 1e4),
-                                lambda_aniso_method='discrepancy'):
+                                lambda_aniso_method='discrepancy',
+                                lambda_aniso_grid=None):
     """
     Convenience wrapper: select (lambda_aniso, lambda_iso) for a given
     Stage A dictionary using GCV (lambda_iso) followed by the
@@ -1303,6 +1304,11 @@ def select_lambdas_data_driven(bvals, bvecs, fiber_dirs, diff_pairs, iso_grid,
     lambda_aniso_bracket : tuple (float, float)
         Search bracket for the discrepancy principle bisection (see
         `select_lambda_aniso_discrepancy`).
+    lambda_aniso_grid : array or None
+        Candidate grid for the 'gcv'/'lcurve' search (see
+        `select_lambda_aniso_gcv_lcurve`; default logspace(-4, 4, 40)). A
+        finer grid is useful for protocol-level calibration, whose cost is
+        paid once. Ignored by 'discrepancy'.
 
     Returns
     -------
@@ -1392,6 +1398,7 @@ def select_lambdas_data_driven(bvals, bvecs, fiber_dirs, diff_pairs, iso_grid,
     elif lambda_aniso_method in ('gcv', 'lcurve'):
         lambda_aniso, aniso_sel_diag = select_lambda_aniso_gcv_lcurve(
             AtA, At, y2d, n_aniso_cols, lambda_iso, method=lambda_aniso_method,
+            lambda_grid=lambda_aniso_grid,
         )
     else:
         raise ValueError("lambda_aniso_method must be 'discrepancy', 'gcv', or "

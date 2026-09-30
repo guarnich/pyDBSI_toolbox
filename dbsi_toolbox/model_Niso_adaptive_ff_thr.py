@@ -175,6 +175,7 @@ from .core.solvers import (
     estimate_AD_RD_mrds,          # NEW — MRDS multi-fiber Stage B
     mrds_varpro_nfiber,           # EXPERIMENTAL — fit(_mrds_mode>=2) only
     mrds_varpro_scan_init,        # EXPERIMENTAL — fit(_mrds_mode=3) only
+    crossing_shared_tensor_varpro,  # EXPERIMENTAL — fit(_mrds_mode=4|5) only
 )
 from .calibration.data_driven import (fiber_subtracted_residual,
                                       select_lambdas_data_driven,
@@ -744,7 +745,7 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         stagec_enabled, iso_forward, iso_gram,
                         stagec_ad_grid, stagec_rd_grid, stagec_aniso_ratio,
                         data_raw, stagec_iso_grid, stagec_dir_refine,
-                        mrds_mode):
+                        mrds_mode, crossing_ad_fixed):
     """
     v3 parallel fitting kernel — two-compartment isotropic model (2-ISO).
 
@@ -765,6 +766,11 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
     n_pairs = len(diff_pairs)
     n_aniso_cols = n_dirs * n_pairs
     n_iso = len(iso_grid)
+    iso_cent_d = np.array(_ISO_RESOLVE_D_2ISO)
+    iso_cent_fw = np.empty((len(bvals), iso_cent_d.shape[0]))
+    for jj in range(iso_cent_d.shape[0]):
+        for ii in range(len(bvals)):
+            iso_cent_fw[ii, jj] = np.exp(-bvals[ii] * iso_cent_d[jj])
 
     for idx in prange(n_voxels):
         x, y, z = coords[idx]
@@ -1019,16 +1025,33 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                 if mrds_mode >= 2:
                     n_iso_vp = iso_forward.shape[1]
                     w_vp = np.zeros(n_pop + n_iso_vp)
-                    if mrds_mode == 3:
-                        AD_out, RD_out = mrds_varpro_scan_init(
-                            sig_mrds, bvals, bvecs, directions, AD_out, RD_out,
-                            iso_forward, stagec_ad_grid, stagec_rd_grid,
-                            stagec_aniso_ratio
+                    if mrds_mode >= 4:
+                        # 4: one tensor shared by the populations; 5: the same
+                        # with AD imposed from the subject's single fibers;
+                        # 6: as 4 with the iso block reduced to Stage D's centroids.
+                        if mrds_mode == 6:
+                            n_iso_vp = iso_cent_d.shape[0]
+                            w_vp = np.zeros(n_pop + n_iso_vp)
+                        ad_s, rd_s = crossing_shared_tensor_varpro(
+                            sig_mrds, bvals, bvecs, directions,
+                            iso_cent_fw if mrds_mode == 6 else iso_forward,
+                            stagec_ad_grid, stagec_rd_grid, stagec_aniso_ratio,
+                            crossing_ad_fixed if mrds_mode == 5 else 0.0, w_vp
                         )
-                    AD_out, RD_out = mrds_varpro_nfiber(
-                        sig_mrds, bvals, bvecs, directions, AD_out, RD_out,
-                        iso_forward, w_vp, _MRDS_LM_MAX_ITER
-                    )
+                        for k in range(n_pop):
+                            AD_out[k] = ad_s
+                            RD_out[k] = rd_s
+                    else:
+                        if mrds_mode == 3:
+                            AD_out, RD_out = mrds_varpro_scan_init(
+                                sig_mrds, bvals, bvecs, directions, AD_out, RD_out,
+                                iso_forward, stagec_ad_grid, stagec_rd_grid,
+                                stagec_aniso_ratio
+                            )
+                        AD_out, RD_out = mrds_varpro_nfiber(
+                            sig_mrds, bvals, bvecs, directions, AD_out, RD_out,
+                            iso_forward, w_vp, _MRDS_LM_MAX_ITER
+                        )
                     tot_vp = 0.0
                     for a in range(n_pop + n_iso_vp):
                         tot_vp += w_vp[a]
@@ -1043,7 +1066,7 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         wd_vp = 0.0
                         for j in range(n_iso_vp):
                             wj = w_vp[n_pop + j]
-                            dj = stagec_iso_grid[j]
+                            dj = iso_cent_d[j] if mrds_mode == 6 else stagec_iso_grid[j]
                             if dj <= THRESH_RES:
                                 res_vp += wj
                             elif dj <= THRESH_WAT:
@@ -1093,7 +1116,7 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         stagec_enabled, iso_forward, iso_gram,
                         stagec_ad_grid, stagec_rd_grid, stagec_aniso_ratio,
                         data_raw, stagec_iso_grid, stagec_dir_refine,
-                        mrds_mode):
+                        mrds_mode, crossing_ad_fixed):
     """v3 parallel fitting kernel — three-compartment isotropic model
     (3-ISO). Same Stage A / Stage B (+ MRDS multi-fiber) structure as
     `_fit_voxels_2iso_v3`; see that kernel's docstring for the full
@@ -1104,6 +1127,11 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
     n_pairs = len(diff_pairs)
     n_aniso_cols = n_dirs * n_pairs
     n_iso = len(iso_grid)
+    iso_cent_d = np.array(_ISO_RESOLVE_D_3ISO)
+    iso_cent_fw = np.empty((len(bvals), iso_cent_d.shape[0]))
+    for jj in range(iso_cent_d.shape[0]):
+        for ii in range(len(bvals)):
+            iso_cent_fw[ii, jj] = np.exp(-bvals[ii] * iso_cent_d[jj])
 
     for idx in prange(n_voxels):
         x, y, z = coords[idx]
@@ -1361,16 +1389,33 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                 if mrds_mode >= 2:
                     n_iso_vp = iso_forward.shape[1]
                     w_vp = np.zeros(n_pop + n_iso_vp)
-                    if mrds_mode == 3:
-                        AD_out, RD_out = mrds_varpro_scan_init(
-                            sig_mrds, bvals, bvecs, directions, AD_out, RD_out,
-                            iso_forward, stagec_ad_grid, stagec_rd_grid,
-                            stagec_aniso_ratio
+                    if mrds_mode >= 4:
+                        # 4: one tensor shared by the populations; 5: the same
+                        # with AD imposed from the subject's single fibers;
+                        # 6: as 4 with the iso block reduced to Stage D's centroids.
+                        if mrds_mode == 6:
+                            n_iso_vp = iso_cent_d.shape[0]
+                            w_vp = np.zeros(n_pop + n_iso_vp)
+                        ad_s, rd_s = crossing_shared_tensor_varpro(
+                            sig_mrds, bvals, bvecs, directions,
+                            iso_cent_fw if mrds_mode == 6 else iso_forward,
+                            stagec_ad_grid, stagec_rd_grid, stagec_aniso_ratio,
+                            crossing_ad_fixed if mrds_mode == 5 else 0.0, w_vp
                         )
-                    AD_out, RD_out = mrds_varpro_nfiber(
-                        sig_mrds, bvals, bvecs, directions, AD_out, RD_out,
-                        iso_forward, w_vp, _MRDS_LM_MAX_ITER
-                    )
+                        for k in range(n_pop):
+                            AD_out[k] = ad_s
+                            RD_out[k] = rd_s
+                    else:
+                        if mrds_mode == 3:
+                            AD_out, RD_out = mrds_varpro_scan_init(
+                                sig_mrds, bvals, bvecs, directions, AD_out, RD_out,
+                                iso_forward, stagec_ad_grid, stagec_rd_grid,
+                                stagec_aniso_ratio
+                            )
+                        AD_out, RD_out = mrds_varpro_nfiber(
+                            sig_mrds, bvals, bvecs, directions, AD_out, RD_out,
+                            iso_forward, w_vp, _MRDS_LM_MAX_ITER
+                        )
                     tot_vp = 0.0
                     for a in range(n_pop + n_iso_vp):
                         tot_vp += w_vp[a]
@@ -1385,7 +1430,7 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         wd_vp = 0.0
                         for j in range(n_iso_vp):
                             wj = w_vp[n_pop + j]
-                            dj = stagec_iso_grid[j]
+                            dj = iso_cent_d[j] if mrds_mode == 6 else stagec_iso_grid[j]
                             if dj <= THRESH_RES:
                                 res_vp += wj
                             elif dj <= THRESH_WAT:
@@ -2763,7 +2808,10 @@ class DBSI_Adaptive:
         b0_thr = 100.0
 
         t0 = time.time()
-        with tqdm(total=n_voxels, desc="   Progress", unit="vox") as pbar:
+        _results_init = results.copy()
+
+        def _run_kernel(mode_k, ad_fixed_k):
+          with tqdm(total=n_voxels, desc="   Progress", unit="vox") as pbar:
             for i in range(n_batches):
                 start = i * batch_sz
                 end = min((i + 1) * batch_sz, n_voxels)
@@ -2782,9 +2830,26 @@ class DBSI_Adaptive:
                     bool(self.stagec_refine), iso_forward, iso_gram,
                     stagec_ad_grid, stagec_rd_grid, float(_STAGEC_ANISO_RATIO),
                     data, stagec_iso_grid, bool(self.stagec_dir_refine),
-                    int(_mrds_mode)
+                    int(mode_k), float(ad_fixed_k)
                 )
                 pbar.update(end - start)
+
+        self.crossing_ad_fixed_ = None
+        if int(_mrds_mode) == 5:
+            # EXPERIMENTAL option 3: pass 1 (production) gives the single fibers,
+            # whose median AD is then imposed on the crossings in pass 2.
+            _run_kernel(0, 0.0)
+            _np = results[..., _C_NPOP]
+            _sel = mask & (_np == 1) & (results[..., _C_FF] >= 0.30) & np.isfinite(results[..., _C_AD1])
+            if _sel.sum() < 20:
+                raise RuntimeError(f'_mrds_mode=5: solo {int(_sel.sum())} mono-fibra affidabili')
+            self.crossing_ad_fixed_ = float(np.median(results[..., _C_AD1][_sel]))
+            print(f"   [EXPERIMENTAL] crossing AD fixed at {self.crossing_ad_fixed_*1e3:.3f}e-3 "
+                  f"(median of {int(_sel.sum())} single fibers with FF >= 0.30)")
+            results[...] = _results_init
+            _run_kernel(5, self.crossing_ad_fixed_)
+        else:
+            _run_kernel(int(_mrds_mode), 0.0)
 
         elapsed = time.time() - t0
         n_fitted = int(np.sum(~np.isnan(results[..., _C_AD1]) & mask))

@@ -2127,3 +2127,95 @@ def mrds_varpro_scan_init(sig_norm, bvals, bvecs, directions, AD_prod, RD_prod,
                 best_ad[:] = ads
                 best_rd[:] = rds
     return best_ad, best_rd
+
+
+@njit(cache=True, fastmath=True)
+def crossing_shared_tensor_varpro(sig_norm, bvals, bvecs, directions, iso_forward,
+                                  ad_grid, rd_grid, aniso_ratio, ad_fixed, w_out):
+    """
+    EXPERIMENTAL (inspection 2026-09-30, `fit(_mrds_mode=4|5)`): the crossing
+    analogue of Stage C with ONE tensor shared by all populations.
+
+    Nonlinear unknowns: (AD, RD) shared -- 2, as in Stage C -- or only RD when
+    `ad_fixed` > 0 (option 3: AD imposed from the subject's single fibers).
+    Linear unknowns: one weight per population + the iso spectrum, NNLS-solved
+    at every candidate (variable projection). Coarse scan on Stage C's grid
+    (AD >= aniso_ratio * RD), then _STAGEC_N_REFINE bisections around the best
+    node, exactly as `stagec_varpro_single_fiber`.
+
+    Why: production fits 4 tensor parameters with FF FIXED at Stage A's value,
+    which is biased low on crossings and drags RD onto the floor; freeing FF
+    with 4 tensor parameters is not identifiable (tested). A shared tensor keeps
+    the problem as small as the single-fiber one, and the FF-weighted RD becomes
+    a direct estimate instead of an average of two biased ones.
+
+    w_out : (n_pop + n_iso,) OUTPUT weights at the returned tensor.
+    Returns (ad, rd).
+    """
+    N = len(bvals)
+    n_pop = directions.shape[0]
+    n_iso = iso_forward.shape[1]
+    ntot = n_pop + n_iso
+    cos2 = _cos2_matrix(bvecs, directions)
+    A = np.empty((N, ntot))
+    for i in range(N):
+        for j in range(n_iso):
+            A[i, n_pop + j] = iso_forward[i, j]
+    yty = 0.0
+    for i in range(N):
+        yty += sig_norm[i] * sig_norm[i]
+
+    best = 1e30
+    best_ad = ad_fixed if ad_fixed > 0 else ad_grid[0]
+    best_rd = rd_grid[0]
+    wb = np.zeros(ntot)
+
+    def _eval(ad, rd):
+        for i in range(N):
+            for k in range(n_pop):
+                A[i, k] = np.exp(-bvals[i] * (rd + (ad - rd) * cos2[i, k]))
+        AtA = A.T @ A
+        Aty = A.T @ sig_norm
+        w, _ = nnls_coordinate_descent(AtA, Aty, 0.0)
+        res = yty - 2.0 * np.dot(w, Aty) + np.dot(w, AtA @ w)
+        return res, w
+
+    n_ad = 1 if ad_fixed > 0 else ad_grid.shape[0]
+    for ia in range(n_ad):
+        ad = ad_fixed if ad_fixed > 0 else ad_grid[ia]
+        for ir in range(rd_grid.shape[0]):
+            rd = max(rd_grid[ir], _TENSOR_RD_FLOOR)
+            if ad < rd * aniso_ratio:
+                continue
+            c, w = _eval(ad, rd)
+            if c < best:
+                best = c
+                best_ad = ad
+                best_rd = rd
+                wb[:] = w
+
+    da = (ad_grid[1] - ad_grid[0]) if ad_grid.shape[0] > 1 else 0.1e-3
+    dr = (rd_grid[1] - rd_grid[0]) if rd_grid.shape[0] > 1 else 0.1e-3
+    for _ in range(_STAGEC_N_REFINE):
+        da *= 0.5
+        dr *= 0.5
+        cad = best_ad
+        crd = best_rd
+        for ja in range(5):
+            if ad_fixed > 0 and ja != 2:
+                continue
+            ad = cad + (ja - 2) * da if ad_fixed <= 0 else ad_fixed
+            ad = min(_TENSOR_AD_CEIL, max(_TENSOR_AD_FLOOR, ad))
+            for jr in range(5):
+                rd = min(_TENSOR_RD_CEIL, max(_TENSOR_RD_FLOOR, crd + (jr - 2) * dr))
+                if ad < rd * aniso_ratio:
+                    continue
+                c, w = _eval(ad, rd)
+                if c < best:
+                    best = c
+                    best_ad = ad
+                    best_rd = rd
+                    wb[:] = w
+    for a in range(ntot):
+        w_out[a] = wb[a]
+    return best_ad, best_rd

@@ -2219,3 +2219,99 @@ def crossing_shared_tensor_varpro(sig_norm, bvals, bvecs, directions, iso_forwar
     for a in range(ntot):
         w_out[a] = wb[a]
     return best_ad, best_rd
+
+
+@njit(cache=True, fastmath=True)
+def crossing_varpro_ad_shared_rd_sep(sig_norm, bvals, bvecs, directions, iso_forward,
+                                     ad_grid, rd_grid, aniso_ratio, ad_fixed, w_out,
+                                     rd_out):
+    """
+    EXPERIMENTAL (inspection 2026-09-30, `fit(_mrds_mode=7|8)`): crossing fit
+    with ONE axial diffusivity for the populations and a SEPARATE radial
+    diffusivity per population; fractions and iso spectrum NNLS-solved at
+    every candidate (variable projection).
+
+    ad_fixed > 0 : AD imposed (mode 7, option 3b: AD from the subject's single
+                   fibers), nonlinear unknowns RD_1..RD_n.
+    ad_fixed <= 0: AD shared but estimated (mode 8, option 2c).
+
+    Keeps a per-population RD (so pop1 != pop2 where the tissue differs, e.g.
+    one demyelinated bundle crossing a healthy one) while removing the AD
+    freedom that made the free 4-parameter crossing fit non-identifiable.
+    Written for n_pop == 2 (the toolbox maximum). Coarse scan on Stage C's
+    grids, then _STAGEC_N_REFINE bisections. rd_out (n_pop,) and w_out
+    (n_pop + n_iso,) are outputs; returns ad.
+    """
+    N = len(bvals)
+    n_pop = directions.shape[0]
+    n_iso = iso_forward.shape[1]
+    ntot = n_pop + n_iso
+    cos2 = _cos2_matrix(bvecs, directions)
+    A = np.empty((N, ntot))
+    for i in range(N):
+        for j in range(n_iso):
+            A[i, n_pop + j] = iso_forward[i, j]
+    yty = 0.0
+    for i in range(N):
+        yty += sig_norm[i] * sig_norm[i]
+    rds = np.empty(n_pop)
+
+    def _eval(ad, rds):
+        for i in range(N):
+            for k in range(n_pop):
+                A[i, k] = np.exp(-bvals[i] * (rds[k] + (ad - rds[k]) * cos2[i, k]))
+        AtA = A.T @ A
+        Aty = A.T @ sig_norm
+        w, _ = nnls_coordinate_descent(AtA, Aty, 0.0)
+        return yty - 2.0 * np.dot(w, Aty) + np.dot(w, AtA @ w), w
+
+    best = 1e30
+    best_ad = ad_fixed if ad_fixed > 0 else ad_grid[0]
+    best_rd = np.full(n_pop, max(rd_grid[0], _TENSOR_RD_FLOOR))
+    wb = np.zeros(ntot)
+    n_ad = 1 if ad_fixed > 0 else ad_grid.shape[0]
+    nr = rd_grid.shape[0]
+    for ia in range(n_ad):
+        ad = ad_fixed if ad_fixed > 0 else ad_grid[ia]
+        for i1 in range(nr):
+            for i2 in range(nr):
+                rds[0] = max(rd_grid[i1], _TENSOR_RD_FLOOR)
+                rds[1] = max(rd_grid[i2], _TENSOR_RD_FLOOR)
+                if ad < rds[0] * aniso_ratio or ad < rds[1] * aniso_ratio:
+                    continue
+                c, w = _eval(ad, rds)
+                if c < best:
+                    best = c
+                    best_ad = ad
+                    best_rd[:] = rds
+                    wb[:] = w
+
+    da = (ad_grid[1] - ad_grid[0]) if ad_grid.shape[0] > 1 else 0.1e-3
+    dr = (rd_grid[1] - rd_grid[0]) if rd_grid.shape[0] > 1 else 0.1e-3
+    for _ in range(_STAGEC_N_REFINE):
+        da *= 0.5
+        dr *= 0.5
+        cad = best_ad
+        crd0 = best_rd[0]
+        crd1 = best_rd[1]
+        for ja in range(5):
+            if ad_fixed > 0 and ja != 2:
+                continue
+            ad = ad_fixed if ad_fixed > 0 else min(_TENSOR_AD_CEIL, max(_TENSOR_AD_FLOOR, cad + (ja - 2) * da))
+            for j1 in range(5):
+                for j2 in range(5):
+                    rds[0] = min(_TENSOR_RD_CEIL, max(_TENSOR_RD_FLOOR, crd0 + (j1 - 2) * dr))
+                    rds[1] = min(_TENSOR_RD_CEIL, max(_TENSOR_RD_FLOOR, crd1 + (j2 - 2) * dr))
+                    if ad < rds[0] * aniso_ratio or ad < rds[1] * aniso_ratio:
+                        continue
+                    c, w = _eval(ad, rds)
+                    if c < best:
+                        best = c
+                        best_ad = ad
+                        best_rd[:] = rds
+                        wb[:] = w
+    for a in range(ntot):
+        w_out[a] = wb[a]
+    for k in range(n_pop):
+        rd_out[k] = best_rd[k]
+    return best_ad

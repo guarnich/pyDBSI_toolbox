@@ -175,7 +175,8 @@ from .core.solvers import (
     estimate_AD_RD_mrds,          # NEW — MRDS multi-fiber Stage B
     mrds_varpro_nfiber,           # EXPERIMENTAL — fit(_mrds_mode>=2) only
     mrds_varpro_scan_init,        # EXPERIMENTAL — fit(_mrds_mode=3) only
-    crossing_shared_tensor_varpro,  # EXPERIMENTAL — fit(_mrds_mode=4|5) only
+    crossing_shared_tensor_varpro,  # EXPERIMENTAL — fit(_mrds_mode=4|5|6) only
+    crossing_varpro_ad_shared_rd_sep,  # EXPERIMENTAL — fit(_mrds_mode=7|8) only
 )
 from .calibration.data_driven import (fiber_subtracted_residual,
                                       select_lambdas_data_driven,
@@ -1025,7 +1026,19 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                 if mrds_mode >= 2:
                     n_iso_vp = iso_forward.shape[1]
                     w_vp = np.zeros(n_pop + n_iso_vp)
-                    if mrds_mode >= 4:
+                    if mrds_mode >= 7:
+                        # 7: AD imposed (subject's single fibers), RD per population;
+                        # 8: AD shared and estimated, RD per population.
+                        rd_sep = np.empty(n_pop)
+                        ad_s = crossing_varpro_ad_shared_rd_sep(
+                            sig_mrds, bvals, bvecs, directions, iso_forward,
+                            stagec_ad_grid, stagec_rd_grid, stagec_aniso_ratio,
+                            crossing_ad_fixed if mrds_mode == 7 else 0.0, w_vp, rd_sep
+                        )
+                        for k in range(n_pop):
+                            AD_out[k] = ad_s
+                            RD_out[k] = rd_sep[k]
+                    elif mrds_mode >= 4:
                         # 4: one tensor shared by the populations; 5: the same
                         # with AD imposed from the subject's single fibers;
                         # 6: as 4 with the iso block reduced to Stage D's centroids.
@@ -1389,7 +1402,19 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                 if mrds_mode >= 2:
                     n_iso_vp = iso_forward.shape[1]
                     w_vp = np.zeros(n_pop + n_iso_vp)
-                    if mrds_mode >= 4:
+                    if mrds_mode >= 7:
+                        # 7: AD imposed (subject's single fibers), RD per population;
+                        # 8: AD shared and estimated, RD per population.
+                        rd_sep = np.empty(n_pop)
+                        ad_s = crossing_varpro_ad_shared_rd_sep(
+                            sig_mrds, bvals, bvecs, directions, iso_forward,
+                            stagec_ad_grid, stagec_rd_grid, stagec_aniso_ratio,
+                            crossing_ad_fixed if mrds_mode == 7 else 0.0, w_vp, rd_sep
+                        )
+                        for k in range(n_pop):
+                            AD_out[k] = ad_s
+                            RD_out[k] = rd_sep[k]
+                    elif mrds_mode >= 4:
                         # 4: one tensor shared by the populations; 5: the same
                         # with AD imposed from the subject's single fibers;
                         # 6: as 4 with the iso block reduced to Stage D's centroids.
@@ -2835,7 +2860,7 @@ class DBSI_Adaptive:
                 pbar.update(end - start)
 
         self.crossing_ad_fixed_ = None
-        if int(_mrds_mode) == 5:
+        if int(_mrds_mode) in (5, 7):
             # EXPERIMENTAL option 3: pass 1 (production) gives the single fibers,
             # whose median AD is then imposed on the crossings in pass 2.
             _run_kernel(0, 0.0)
@@ -2847,7 +2872,7 @@ class DBSI_Adaptive:
             print(f"   [EXPERIMENTAL] crossing AD fixed at {self.crossing_ad_fixed_*1e3:.3f}e-3 "
                   f"(median of {int(_sel.sum())} single fibers with FF >= 0.30)")
             results[...] = _results_init
-            _run_kernel(5, self.crossing_ad_fixed_)
+            _run_kernel(int(_mrds_mode), self.crossing_ad_fixed_)
         else:
             _run_kernel(int(_mrds_mode), 0.0)
 

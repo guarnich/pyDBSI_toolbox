@@ -1645,6 +1645,33 @@ def compute_fiber_fa(AD, RD):
 #   conditions on FF, only 3/6 on NRF) and is NOT included here. Isotropic
 #   fraction accuracy under true crossing-fiber ground truth is TRACKED AS
 #   A DOCUMENTED OPEN LIMITATION, not something this module claims to fix.
+#   MEASURED 2026-09-30 (inspection, experiments/crossing_asymmetry/): the
+#   limitation reaches the TENSORS, not just the fractions. Synthetic crossings,
+#   P3 protocol, SNR 26, FF 0.6, AD 1.7e-3, iso 0.10/0.20/0.10:
+#
+#                                    RD bias (e-3)   RD at floor   FF bias
+#     crossing, full fit, RD 0.3       -0.10           ~43%          -0.07
+#     crossing, full fit, RD 0.5       -0.28           ~40%          -0.21
+#     single fiber (Stage C), RD 0.3   -0.01            5%           +0.01
+#     single fiber (Stage C), RD 0.5   -0.03            2%            0.00
+#     THIS solver, TRUE fractions/iso  +0.01            0%             --
+#     THIS solver, FF x0.70            -0.15/-0.21      91%/0%         --
+#
+#   So the LM is unbiased; the bias is Stage A's crossing FF, which is
+#   UNDER-estimated (heavy lambda_aniso shrinks the anisotropic block, and
+#   nothing re-solves FF on crossings) and held fixed here, so the tensor turns
+#   more anisotropic to carry the angular contrast -- RD to the floor, AD low.
+#   This is what the ~49% of real crossings on the RD floor are. Raw vs
+#   corrected signal makes no difference (tested). Alternatives tried, none
+#   adopted, each moves the bias rather than removing it: VARPRO over
+#   [fibers | iso grid] from this solver's estimate (AD bias fixed, RD not);
+#   the same from a global shared-tensor scan (RD bias -0.28 -> -0.10, floor
+#   40 -> 22%, but AD bias turns +0.3 and FF MAE does not improve); an
+#   UNpenalised re-solve on the detected support (FF over-shoots, +0.10/+0.18).
+#   The truth sits between the penalised and the unpenalised FF and no
+#   parameter-free estimator lands on it at this SNR: per-population tensors of
+#   crossings are not quantitative, and crossing FF is biased low relative to
+#   single-fiber FF. The variants live on branch `ispezione-crossing`.
 # - Does NOT refine direction (unlike the existing single-fiber MRDS-lite
 #   cone search): directions passed in are Stage A's raw discrete-grid
 #   detections. Extending per-population cone refinement to 2-3 populations

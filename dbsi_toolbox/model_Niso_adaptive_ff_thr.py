@@ -1369,6 +1369,13 @@ def _iso_resolve_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso, 
             # mass to iso and under-estimates FF_total -- validated). Use Stage D
             # only for the ISO SPLIT (RF/HF/WF proportions), rescaled to the
             # existing (1 - FF). FF (ch 0) and pop-2 fraction (ch 15) untouched.
+            # CORRECTION 2026-09-30: "captures the total anisotropic mass well"
+            # is not what was measured on synthetic crossings (P3, SNR 26):
+            # Stage A UNDER-estimates crossing FF by 0.07 (RD 0.3e-3) to 0.21
+            # (RD 0.5e-3), where single fibers after Stage C/D are unbiased, and
+            # that deficit is what drives crossing RD onto the floor. Keeping it
+            # is still the least-bad option tested -- see "MEASURED 2026-09-30"
+            # in the MRDS section of core/solvers.py.
             ff_keep = out[x, y, z, _C_FF]
             if np.isnan(ff_keep):
                 ff_keep = f_fib

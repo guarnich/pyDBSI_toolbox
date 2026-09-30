@@ -2315,3 +2315,74 @@ def crossing_varpro_ad_shared_rd_sep(sig_norm, bvals, bvecs, directions, iso_for
     for k in range(n_pop):
         rd_out[k] = best_rd[k]
     return best_ad
+
+
+@njit(cache=True, fastmath=True)
+def crossing_varpro_ad_fixed_rd_sep(sig_norm, bvals, bvecs, directions, iso_forward,
+                                    rd_grid, aniso_ratio, ad_fix, w_out, rd_out):
+    """
+    EXPERIMENTAL (inspection 2026-09-30, `fit(_mrds_mode=9)`): crossing fit with
+    the axial diffusivity IMPOSED PER POPULATION (`ad_fix`, shape (n_pop,)) --
+    in mode 9 the local AD of the single-fiber voxels of the same tract -- and
+    a separate RD per population; fractions and iso spectrum NNLS-solved at
+    every candidate. Written for n_pop == 2. Coarse RD_1 x RD_2 scan, then
+    _STAGEC_N_REFINE bisections.
+    """
+    N = len(bvals)
+    n_pop = directions.shape[0]
+    n_iso = iso_forward.shape[1]
+    ntot = n_pop + n_iso
+    cos2 = _cos2_matrix(bvecs, directions)
+    A = np.empty((N, ntot))
+    for i in range(N):
+        for j in range(n_iso):
+            A[i, n_pop + j] = iso_forward[i, j]
+    yty = 0.0
+    for i in range(N):
+        yty += sig_norm[i] * sig_norm[i]
+    rds = np.empty(n_pop)
+
+    def _eval(rds):
+        for i in range(N):
+            for k in range(n_pop):
+                A[i, k] = np.exp(-bvals[i] * (rds[k] + (ad_fix[k] - rds[k]) * cos2[i, k]))
+        AtA = A.T @ A
+        Aty = A.T @ sig_norm
+        w, _ = nnls_coordinate_descent(AtA, Aty, 0.0)
+        return yty - 2.0 * np.dot(w, Aty) + np.dot(w, AtA @ w), w
+
+    best = 1e30
+    best_rd = np.full(n_pop, max(rd_grid[0], _TENSOR_RD_FLOOR))
+    wb = np.zeros(ntot)
+    nr = rd_grid.shape[0]
+    for i1 in range(nr):
+        for i2 in range(nr):
+            rds[0] = max(rd_grid[i1], _TENSOR_RD_FLOOR)
+            rds[1] = max(rd_grid[i2], _TENSOR_RD_FLOOR)
+            if ad_fix[0] < rds[0] * aniso_ratio or ad_fix[1] < rds[1] * aniso_ratio:
+                continue
+            c, w = _eval(rds)
+            if c < best:
+                best = c
+                best_rd[:] = rds
+                wb[:] = w
+    dr = (rd_grid[1] - rd_grid[0]) if rd_grid.shape[0] > 1 else 0.1e-3
+    for _ in range(_STAGEC_N_REFINE):
+        dr *= 0.5
+        c0 = best_rd[0]
+        c1 = best_rd[1]
+        for j1 in range(5):
+            for j2 in range(5):
+                rds[0] = min(_TENSOR_RD_CEIL, max(_TENSOR_RD_FLOOR, c0 + (j1 - 2) * dr))
+                rds[1] = min(_TENSOR_RD_CEIL, max(_TENSOR_RD_FLOOR, c1 + (j2 - 2) * dr))
+                if ad_fix[0] < rds[0] * aniso_ratio or ad_fix[1] < rds[1] * aniso_ratio:
+                    continue
+                c, w = _eval(rds)
+                if c < best:
+                    best = c
+                    best_rd[:] = rds
+                    wb[:] = w
+    for a in range(ntot):
+        w_out[a] = wb[a]
+    for k in range(n_pop):
+        rd_out[k] = best_rd[k]

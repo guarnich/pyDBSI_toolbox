@@ -177,6 +177,7 @@ from .core.solvers import (
     mrds_varpro_scan_init,        # EXPERIMENTAL — fit(_mrds_mode=3) only
     crossing_shared_tensor_varpro,  # EXPERIMENTAL — fit(_mrds_mode=4|5|6) only
     crossing_varpro_ad_shared_rd_sep,  # EXPERIMENTAL — fit(_mrds_mode=7|8) only
+    crossing_varpro_ad_fixed_rd_sep,   # EXPERIMENTAL — fit(_mrds_mode=9) only
 )
 from .calibration.data_driven import (fiber_subtracted_residual,
                                       select_lambdas_data_driven,
@@ -746,7 +747,7 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         stagec_enabled, iso_forward, iso_gram,
                         stagec_ad_grid, stagec_rd_grid, stagec_aniso_ratio,
                         data_raw, stagec_iso_grid, stagec_dir_refine,
-                        mrds_mode, crossing_ad_fixed):
+                        mrds_mode, crossing_ad_fixed, crossing_ad_map):
     """
     v3 parallel fitting kernel — two-compartment isotropic model (2-ISO).
 
@@ -1026,7 +1027,22 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                 if mrds_mode >= 2:
                     n_iso_vp = iso_forward.shape[1]
                     w_vp = np.zeros(n_pop + n_iso_vp)
-                    if mrds_mode >= 7:
+                    if mrds_mode == 9:
+                        # 9: AD imposed PER POPULATION from the local single fibers
+                        # of the same tract (map built between two passes), RD per
+                        # population.
+                        rd_sep = np.empty(n_pop)
+                        ad_loc = np.empty(n_pop)
+                        for k in range(n_pop):
+                            ad_loc[k] = crossing_ad_map[x, y, z, k]
+                        crossing_varpro_ad_fixed_rd_sep(
+                            sig_mrds, bvals, bvecs, directions, iso_forward,
+                            stagec_rd_grid, stagec_aniso_ratio, ad_loc, w_vp, rd_sep
+                        )
+                        for k in range(n_pop):
+                            AD_out[k] = ad_loc[k]
+                            RD_out[k] = rd_sep[k]
+                    elif mrds_mode >= 7:
                         # 7: AD imposed (subject's single fibers), RD per population;
                         # 8: AD shared and estimated, RD per population.
                         rd_sep = np.empty(n_pop)
@@ -1129,7 +1145,7 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         stagec_enabled, iso_forward, iso_gram,
                         stagec_ad_grid, stagec_rd_grid, stagec_aniso_ratio,
                         data_raw, stagec_iso_grid, stagec_dir_refine,
-                        mrds_mode, crossing_ad_fixed):
+                        mrds_mode, crossing_ad_fixed, crossing_ad_map):
     """v3 parallel fitting kernel — three-compartment isotropic model
     (3-ISO). Same Stage A / Stage B (+ MRDS multi-fiber) structure as
     `_fit_voxels_2iso_v3`; see that kernel's docstring for the full
@@ -1402,7 +1418,22 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                 if mrds_mode >= 2:
                     n_iso_vp = iso_forward.shape[1]
                     w_vp = np.zeros(n_pop + n_iso_vp)
-                    if mrds_mode >= 7:
+                    if mrds_mode == 9:
+                        # 9: AD imposed PER POPULATION from the local single fibers
+                        # of the same tract (map built between two passes), RD per
+                        # population.
+                        rd_sep = np.empty(n_pop)
+                        ad_loc = np.empty(n_pop)
+                        for k in range(n_pop):
+                            ad_loc[k] = crossing_ad_map[x, y, z, k]
+                        crossing_varpro_ad_fixed_rd_sep(
+                            sig_mrds, bvals, bvecs, directions, iso_forward,
+                            stagec_rd_grid, stagec_aniso_ratio, ad_loc, w_vp, rd_sep
+                        )
+                        for k in range(n_pop):
+                            AD_out[k] = ad_loc[k]
+                            RD_out[k] = rd_sep[k]
+                    elif mrds_mode >= 7:
                         # 7: AD imposed (subject's single fibers), RD per population;
                         # 8: AD shared and estimated, RD per population.
                         rd_sep = np.empty(n_pop)
@@ -1707,6 +1738,37 @@ def _fiber_detection_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3i
             for c in (_C_AD1, _C_RD1, _C_FA1, _C_DIR1, _C_DIR1 + 1, _C_DIR1 + 2,
                       _C_FF2, _C_AD2, _C_RD2, _C_FA2, _C_DIR2, _C_DIR2 + 1, _C_DIR2 + 2):
                 out[x, y, z, c] = np.nan
+
+
+def _local_crossing_ad_map(results, mask, radius=3, radius_max=6, min_n=5,
+                           ff_min=0.30, max_angle_deg=25.0):
+    """EXPERIMENTAL (mode 9): per crossing voxel and per population, the median
+    AD of the single-fiber voxels within `radius` (widened up to `radius_max`)
+    whose direction is within `max_angle_deg` of that population -- the
+    single-fiber segments of the same tract. Fallback: the global median of
+    reliable single fibers. Returns (X, Y, Z, 2) float64, 0 outside crossings."""
+    npop = results[..., _C_NPOP]
+    mono = mask & (npop == 1) & (results[..., _C_FF] >= ff_min) & np.isfinite(results[..., _C_AD1])
+    mono_xyz = np.argwhere(mono)
+    mono_ad = results[..., _C_AD1][mono]
+    mono_dir = np.stack([results[..., _C_DIR1 + c][mono] for c in range(3)], axis=1)
+    g = float(np.median(mono_ad)) if mono_ad.size else 1.7e-3
+    out = np.zeros(results.shape[:3] + (2,), dtype=np.float64)
+    cos_min = np.cos(np.radians(max_angle_deg))
+    for x, y, z in np.argwhere(mask & (npop >= 2)):
+        dist = np.max(np.abs(mono_xyz - np.array([x, y, z])), axis=1) if mono_xyz.size else np.array([])
+        for k, c0 in enumerate((_C_DIR1, _C_DIR2)):
+            d = np.array([results[x, y, z, c0 + c] for c in range(3)])
+            val = g
+            if mono_xyz.size:
+                al = np.abs(mono_dir @ d) >= cos_min
+                for r in range(radius, radius_max + 1):
+                    sel = al & (dist <= r)
+                    if sel.sum() >= min_n:
+                        val = float(np.median(mono_ad[sel]))
+                        break
+            out[x, y, z, k] = val
+    return out
 
 
 def _package_provenance():
@@ -2120,7 +2182,7 @@ class DBSI_Adaptive:
            calibrate_concentration_gate=False,
            concentration_gate_percentile=_CONCENTRATION_GATE_PERCENTILE,
            _calibration_only=False, _lambda_aniso_grid=None, _lambda_iso_grid=None,
-           _mrds_mode=0, _rician_correction='clamp'):
+           _mrds_mode=0, _rician_correction='clamp', _crossing_ad_map=None):
         """
         Fit the v3 hybrid two-stage adaptive DBSI model (+ MRDS
         multi-fiber extension) to 4D diffusion MRI data.
@@ -2835,7 +2897,9 @@ class DBSI_Adaptive:
         t0 = time.time()
         _results_init = results.copy()
 
-        def _run_kernel(mode_k, ad_fixed_k):
+        _no_map = np.zeros((1, 1, 1, 2))
+
+        def _run_kernel(mode_k, ad_fixed_k, ad_map_k=_no_map):
           with tqdm(total=n_voxels, desc="   Progress", unit="vox") as pbar:
             for i in range(n_batches):
                 start = i * batch_sz
@@ -2855,12 +2919,27 @@ class DBSI_Adaptive:
                     bool(self.stagec_refine), iso_forward, iso_gram,
                     stagec_ad_grid, stagec_rd_grid, float(_STAGEC_ANISO_RATIO),
                     data, stagec_iso_grid, bool(self.stagec_dir_refine),
-                    int(mode_k), float(ad_fixed_k)
+                    int(mode_k), float(ad_fixed_k), ad_map_k
                 )
                 pbar.update(end - start)
 
         self.crossing_ad_fixed_ = None
-        if int(_mrds_mode) in (5, 7):
+        self.crossing_ad_map_ = None
+        if int(_mrds_mode) == 9:
+            # EXPERIMENTAL option 3c: pass 1 (production), then per crossing voxel
+            # and per population the median AD of the single-fiber voxels NEARBY
+            # and ALIGNED with that population (same tract), then pass 2.
+            if _crossing_ad_map is not None:
+                _admap = np.ascontiguousarray(_crossing_ad_map, dtype=np.float64)
+                self.crossing_ad_source_ = 'given'
+            else:
+                _run_kernel(0, 0.0)
+                _admap = _local_crossing_ad_map(results, mask)
+                self.crossing_ad_source_ = 'local_single_fibers'
+                results[...] = _results_init
+            self.crossing_ad_map_ = _admap
+            _run_kernel(9, 0.0, _admap)
+        elif int(_mrds_mode) in (5, 7):
             # EXPERIMENTAL option 3: pass 1 (production) gives the single fibers,
             # whose median AD is then imposed on the crossings in pass 2.
             _run_kernel(0, 0.0)

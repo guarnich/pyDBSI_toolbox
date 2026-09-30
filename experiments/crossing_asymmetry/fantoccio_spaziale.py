@@ -4,7 +4,8 @@ Lastra 40x40x3, protocollo P3. Tratto A lungo x (righe y 10-29), tratto B lungo 
 x 10-29): incrocio a 90 gradi nel quadrato centrale, segmenti a fibra singola lungo i tratti,
 sostanza grigia isotropa fuori. Lesione circolare (centro x=12, y=20, raggio 7) sul tratto A:
 copre sia un pezzo del segmento mono-fibra di A sia un pezzo dell'incrocio.
-Varianti: 0 produzione, 7 AD globale, 9 AD locale per popolazione, 9o oracolo (AD vera per fascio)."""
+Varianti: 0 produzione, 7 AD globale, 9 AD locale per popolazione, 9o oracolo (AD vera per fascio),
+10 FF dei crossing ri-stimata sul supporto prima dell LM (+ Stage D sui crossing)."""
 import io, sys, contextlib, numpy as np, pandas as pd
 from pathlib import Path
 from dbsi_toolbox import DBSI_Adaptive
@@ -78,6 +79,7 @@ for cond in COND:
     R['0 produzione'], _ = fit(data, 0)
     R['7 AD globale'], _ = fit(data, 7)
     R['9 AD locale'], m9 = fit(data, 9)
+    R['10 FF ristimata'], _ = fit(data, 10)
     # oracolo: AD vera per fascio, nell'ordine delle popolazioni di Stage A (identico fra i passaggi)
     r0 = R['0 produzione']; ia = abbina(r0)
     orc = np.zeros(data.shape[:3] + (2,))
@@ -117,4 +119,4 @@ for cond in COND:
 df = pd.DataFrame(righe)
 pd.set_option('display.width', 250); pd.set_option('display.max_columns', 20)
 print(df.round(3).to_string(index=False))
-df.to_csv(HERE / f'esito_fantoccio_spaziale_snr{int(SNR)}.csv', index=False)
+df.to_csv(HERE / f'esito_fantoccio_spaziale_snr{int(SNR)}_con10.csv', index=False)

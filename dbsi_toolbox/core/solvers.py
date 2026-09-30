@@ -2386,3 +2386,74 @@ def crossing_varpro_ad_fixed_rd_sep(sig_norm, bvals, bvecs, directions, iso_forw
         w_out[a] = wb[a]
     for k in range(n_pop):
         rd_out[k] = best_rd[k]
+
+
+# EXPERIMENTAL (inspection 2026-09-30, fit(_mrds_mode=10) only): the crossing FF
+# re-solved on the DETECTED SUPPORT before the MRDS LM, instead of keeping Stage
+# A's heavily penalised FF. Support = for each detected direction, its grid node
+# and the 6 nearest nodes (axially), every admissible (AD, RD) pair; plus the
+# full iso grid (unpenalised). Ridge `ridge` on the anisotropic block only.
+# Measured (experiments/crossing_asymmetry/ff_corretta.py, P3, SNR 26, ridge
+# 0.03 on 91 measurements): the LM with this FF has RD bias ~0 on healthy
+# crossings (production -0.10..-0.27e-3), RD floor 2-11% (42-49%), and
+# recovers a one-bundle demyelination contrast 0.38 of 0.40 (production 0.09).
+@njit(cache=True)
+def crossing_ff_resolve(sig_norm, bvals, bvecs, fiber_dirs, directions, n_pop,
+                        diff_pairs, iso_grid, ridge, iso_sig_out):
+    """Returns the fiber fraction; writes the normalised iso signal to iso_sig_out."""
+    N = bvals.shape[0]
+    n_d = fiber_dirs.shape[0]
+    n_p = diff_pairs.shape[0]
+    n_iso = iso_grid.shape[0]
+    n_near = 7 if n_d >= 7 else n_d
+    nodes = np.full(n_pop * n_near, -1, dtype=np.int64)
+    n_nodes = 0
+    for k in range(n_pop):
+        dots = np.empty(n_d)
+        for j in range(n_d):
+            dots[j] = -abs(fiber_dirs[j, 0] * directions[k, 0] + fiber_dirs[j, 1] * directions[k, 1]
+                           + fiber_dirs[j, 2] * directions[k, 2])
+        order = np.argsort(dots)
+        for q in range(n_near):
+            j = order[q]
+            seen = False
+            for r in range(n_nodes):
+                if nodes[r] == j:
+                    seen = True
+                    break
+            if not seen:
+                nodes[n_nodes] = j
+                n_nodes += 1
+    na = n_nodes * n_p
+    A = np.empty((N, na + n_iso))
+    for r in range(n_nodes):
+        j = nodes[r]
+        for i in range(N):
+            c = bvecs[i, 0] * fiber_dirs[j, 0] + bvecs[i, 1] * fiber_dirs[j, 1] + bvecs[i, 2] * fiber_dirs[j, 2]
+            c2 = c * c
+            for p in range(n_p):
+                ad = diff_pairs[p, 0]
+                rd = diff_pairs[p, 1]
+                A[i, r * n_p + p] = np.exp(-bvals[i] * (rd + (ad - rd) * c2))
+    for j in range(n_iso):
+        for i in range(N):
+            A[i, na + j] = np.exp(-bvals[i] * iso_grid[j])
+    AtA = A.T @ A
+    for a in range(na):
+        AtA[a, a] += ridge
+    Aty = A.T @ sig_norm
+    w, _ = nnls_coordinate_descent(AtA, Aty, 0.0)
+    tot = 0.0
+    wa = 0.0
+    for a in range(na + n_iso):
+        tot += w[a]
+        if a < na:
+            wa += w[a]
+    for i in range(N):
+        iso_sig_out[i] = 0.0
+    if tot <= 1e-10:
+        return np.nan
+    for j in range(n_iso):
+        for i in range(N):
+            iso_sig_out[i] += A[i, na + j] * w[na + j] / tot
+    return wa / tot

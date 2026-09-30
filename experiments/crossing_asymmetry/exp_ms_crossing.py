@@ -76,4 +76,4 @@ for gi, g in enumerate(G):
 df = pd.DataFrame(righe)
 pd.set_option('display.width', 250); pd.set_option('display.max_columns', 20)
 print(df.round(3).to_string(index=False))
-df.to_csv(HERE / f'esito_ms_snr{int(SNR)}.csv', index=False)
+df.to_csv(HERE / (f'esito_ms_snr{int(SNR)}' + ('' if MODES == (0, 4, 7, 8) else '_modi' + '-'.join(map(str, MODES))) + '.csv'), index=False)

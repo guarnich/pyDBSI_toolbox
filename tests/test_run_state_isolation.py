@@ -35,6 +35,7 @@ from dbsi_toolbox import DBSI_Adaptive
 ATTRIBUTI_DI_RUN = [
     'model_mode_', 'b_max_', 'n_shells_', 'n_aniso_cols_', 'diff_pairs_',
     'sure_crosscheck_report_', 'n_iso_source_', 'lambda_edges_',
+    'fiber_detection_stat_', 'fiber_detection_',
     'hemisphere_spacing_deg_', 'cone_refinement_schedule_', 'run_report_',
     'n_iso_columns_', 'n_iso_columns_res_', 'n_iso_columns_wat_',
 ]

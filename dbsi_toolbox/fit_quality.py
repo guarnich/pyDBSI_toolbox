@@ -637,6 +637,9 @@ def save_output_maps(results, channel_names, affine, output_dir,
                                 FF-weighted aggregates
         fiber_valid_pop2.nii.gz uint8 validity mask for the pop-2 block, which
                                 has a DIFFERENT domain (NaN where n_pop < 2)
+        fiber_detection_stat.nii.gz  (when `model` is given, v1.6.1+) the fiber
+                                detection statistic, dRSS/sigma^2, NaN where no
+                                fiber was tested
         toolbox_report/        what produced these maps (when `model` is given):
             run_report.txt           see below
             design_matrix.png        image of the dictionary A = [A_aniso | A_iso]
@@ -705,6 +708,14 @@ def save_output_maps(results, channel_names, affine, output_dir,
                 compute_fiber_validity_map(results, names, 'pop2'), affine),
                 os.path.join(output_dir, 'fiber_valid_pop2.nii.gz'))
     if model is not None:
+        # Statistica del test di rilevamento della fibra (v1.6.1): per ogni voxel
+        # con fibra, quanto le fibre abbassano il residuo in unita' di sigma^2.
+        # Scritta sempre quando esiste, anche a test spento, perche' e' cio' che
+        # permette di scegliere la soglia sui dati veri.
+        stat = getattr(model, 'fiber_detection_stat_', None)
+        if stat is not None:
+            nib.save(nib.Nifti1Image(np.asarray(stat, np.float32), affine),
+                     os.path.join(output_dir, 'fiber_detection_stat.nii.gz'))
         from .toolbox_report import save_toolbox_report
         save_toolbox_report(model, output_dir, saved_channels=saved)
     return saved

@@ -167,10 +167,17 @@ Optional overrides for Stage A's detection dictionary (default: coarse
 
 ```bash
 python -m scripts.run_dbsi \
-    --dwi data.nii.gz --bval data.bval --bvec data.bvec --out results/ \
+    --dwi data.nii.gz --bval data.bval --bvec data.bvec --mask mask.nii.gz --out results/ \
     --n-dirs 30 --n-ad 3 --n-rd 3 --anisotropy-ratio 2.0 \
     --lambda-aniso 0.6 --lambda-iso 0.005 --min-weight-fraction 0.05
 ```
+
+Options you do not pass take the constructor's own default (the CLI does not
+keep copies of them). **Reproducing a production run:** the CLI with the same
+calibration — `--protocol-calibration <json>`, or `--lambda-aniso`,
+`--lambda-iso` and `--n-iso` — gives maps identical bit for bit to
+`DBSI_Adaptive(...).fit(...)` in Python; `tests/test_cli_matches_production.py`
+checks it on every channel.
 
 ## Algorithm Details
 
@@ -296,6 +303,16 @@ by the acquisitions' discrepancy ceilings (`lambda_iso_cap_rule`).
 * `min_dominant_concentration`: angular-concentration gate (default **0.0**,
   i.e. off since 1.4.0). Available on request, as is
   `fit(calibrate_concentration_gate=True)` for the Monte Carlo null.
+* `fiber_detection_threshold` (v1.6.1, default `None` = off): reject a voxel's
+  fibers when they lower the Stage D residual by less than this many noise
+  variances, `(RSS_iso_only - RSS_fibers+iso) / sigma_voxel^2`. The statistic is
+  always computed, summarised in the run report (`fiber_detection`) and written
+  to `fiber_detection_stat.nii.gz`. Why: on synthetic isotropic tissue at SNR 26
+  (P3 protocol) 38-62% of voxels get a false fiber, almost all as a crossing
+  with FF just above `fiber_threshold`; the statistic's null is SNR-invariant
+  (median 4-6, p95 11-14) while true fibers score >= 17 (weak 90-degree
+  crossing) to >= 74 (single fiber, FF 0.25). The default threshold will be set
+  from the 13-scenario battery and real data.
 * `n_dirs`: Number of fiber directions on the hemisphere for Stage A
   (default: `None`, autoconfigured from the protocol).
 * `n_ad`, `n_rd`: Stage A's AD/RD grid density (default: 3, 3 —

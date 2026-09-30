@@ -3,9 +3,9 @@ import sys, io, contextlib, numpy as np
 from scipy.optimize import nnls
 from dbsi_toolbox import DBSI_Adaptive
 from dbsi_toolbox.core.solvers import estimate_AD_RD_mrds, _TENSOR_RD_FLOOR
-SP = sys.argv[1]; SNR = 26.0; sd = 1 / SNR
-bvals = np.loadtxt(f'{SP}/nb09/fake_sess/prep/F_corrected.bval').ravel()
-bvecs = np.loadtxt(f'{SP}/nb09/fake_sess/prep/F_corrected.bvec'); bvecs = bvecs.T if bvecs.shape[0] == 3 else bvecs
+from pathlib import Path; HERE = Path(__file__).parent; SNR = 26.0; sd = 1 / SNR
+bvals = np.loadtxt(HERE / 'p3_like.bval').ravel()
+bvecs = np.loadtxt(HERE / 'p3_like.bvec'); bvecs = bvecs.T if bvecs.shape[0] == 3 else bvecs
 nb = np.linalg.norm(bvecs, axis=1, keepdims=True); nb[nb == 0] = 1; bvecs = bvecs / nb
 b0 = bvals < 100; rng = np.random.default_rng(7)
 N = DBSI_Adaptive.output_map_names(3); IX = {n: i for i, n in enumerate(N)}

@@ -1955,3 +1955,148 @@ def estimate_AD_RD_mrds(bvals, bvecs, sig_norm, directions, fractions,
         AD_init, RD_init, max_iter=lm_max_iter
     )
 
+
+
+@njit(cache=True, fastmath=True)
+def mrds_varpro_nfiber(sig_norm, bvals, bvecs, directions, AD_init, RD_init,
+                       iso_forward, w_out, max_iter=25):
+    """
+    EXPERIMENTAL (inspection 2026-09-30, `fit(_mrds_mode=2)`): the crossing
+    analogue of Stage C. Joint (AD, RD) of n_pop fibers with the FRACTIONS
+    re-solved at every step -- variable projection: for a trial tensor set the
+    weights of [fiber_1 .. fiber_n | iso_forward columns] are the NNLS solution,
+    and LM moves the tensors on the projected residual (Kaufman's Jacobian,
+    weights held at their current NNLS value). Production keeps the fractions
+    FIXED at Stage A's values (`estimate_AD_RD_nfiber_joint`), which are the
+    inflated ones Stage C exists to replace on single fibers.
+
+    Starts from (AD_init, RD_init), normally the production MRDS estimate, and
+    accepts a step only if the projected cost decreases, so it cannot end worse
+    than its start under its own objective. Bounds as every other tensor solver.
+
+    w_out : array (n_pop + n_iso,) -- OUTPUT, the non-negative weights at the
+    returned tensors (unnormalised).
+    """
+    N = len(bvals)
+    n_pop = directions.shape[0]
+    n_iso = iso_forward.shape[1]
+    ntot = n_pop + n_iso
+    n_par = 2 * n_pop
+    cos2 = _cos2_matrix(bvecs, directions)
+
+    p = np.empty(n_par)
+    lb = np.empty(n_par)
+    ub = np.empty(n_par)
+    for k in range(n_pop):
+        p[2 * k] = AD_init[k]
+        p[2 * k + 1] = RD_init[k]
+        lb[2 * k] = _TENSOR_AD_FLOOR
+        ub[2 * k] = _TENSOR_AD_CEIL
+        lb[2 * k + 1] = _TENSOR_RD_FLOOR
+        ub[2 * k + 1] = _TENSOR_RD_CEIL
+    for i in range(n_par):
+        p[i] = min(ub[i], max(lb[i], p[i]))
+
+    def _project(pp):
+        A = np.empty((N, ntot))
+        for i in range(N):
+            b = bvals[i]
+            for k in range(n_pop):
+                A[i, k] = np.exp(-b * (pp[2 * k + 1] + (pp[2 * k] - pp[2 * k + 1]) * cos2[i, k]))
+            for j in range(n_iso):
+                A[i, n_pop + j] = iso_forward[i, j]
+        AtA = A.T @ A
+        Aty = A.T @ sig_norm
+        w, _ = nnls_coordinate_descent(AtA, Aty, 0.0)
+        r = sig_norm - A @ w
+        return w, r, np.sum(r * r)
+
+    w, r, cost = _project(p)
+    lam = 1e-3
+    for _it in range(max_iter):
+        J = np.zeros((N, n_par))
+        for i in range(N):
+            b = bvals[i]
+            for k in range(n_pop):
+                e = np.exp(-b * (p[2 * k + 1] + (p[2 * k] - p[2 * k + 1]) * cos2[i, k]))
+                J[i, 2 * k] = w[k] * e * b * cos2[i, k]
+                J[i, 2 * k + 1] = w[k] * e * b * (1.0 - cos2[i, k])
+        JTJ = J.T @ J
+        JTr = J.T @ r
+        improved = False
+        for _try in range(10):
+            A = JTJ + lam * np.diag(np.diag(JTJ) + 1e-12)
+            delta = np.linalg.solve(A, JTr)
+            p_new = p - delta          # J is d(residual)/dp: see estimate_AD_RD_nfiber_joint
+            for i in range(n_par):
+                p_new[i] = min(ub[i], max(lb[i], p_new[i]))
+            w_new, r_new, cost_new = _project(p_new)
+            if cost_new < cost:
+                p = p_new
+                w = w_new
+                r = r_new
+                cost = cost_new
+                lam = max(lam * 0.5, 1e-10)
+                improved = True
+                break
+            lam = min(lam * 3.0, 1e10)
+        if not improved:
+            break
+
+    for a in range(ntot):
+        w_out[a] = w[a]
+    AD_out = np.empty(n_pop)
+    RD_out = np.empty(n_pop)
+    for k in range(n_pop):
+        AD_out[k] = p[2 * k]
+        RD_out[k] = p[2 * k + 1]
+    return AD_out, RD_out
+
+
+@njit(cache=True, fastmath=True)
+def mrds_varpro_scan_init(sig_norm, bvals, bvecs, directions, AD_prod, RD_prod,
+                          iso_forward, ad_grid, rd_grid, aniso_ratio):
+    """
+    EXPERIMENTAL (`fit(_mrds_mode=3)`): a GLOBAL starting point for
+    `mrds_varpro_nfiber`, as Stage C has for single fibers. Scans one (AD, RD)
+    shared by all populations on Stage C's grid (AD >= aniso_ratio * RD), with
+    the fractions NNLS-solved at each node, and returns whichever of the best
+    node and the production estimate (AD_prod, RD_prod) has the lower projected
+    cost. A shared tensor is only the start: the LM then frees each population.
+    """
+    N = len(bvals)
+    n_pop = directions.shape[0]
+    n_iso = iso_forward.shape[1]
+    ntot = n_pop + n_iso
+    cos2 = _cos2_matrix(bvecs, directions)
+    A = np.empty((N, ntot))
+    for i in range(N):
+        for j in range(n_iso):
+            A[i, n_pop + j] = iso_forward[i, j]
+
+    def _cost(ads, rds):
+        for i in range(N):
+            for k in range(n_pop):
+                A[i, k] = np.exp(-bvals[i] * (rds[k] + (ads[k] - rds[k]) * cos2[i, k]))
+        w, _ = nnls_coordinate_descent(A.T @ A, A.T @ sig_norm, 0.0)
+        r = sig_norm - A @ w
+        return np.sum(r * r)
+
+    best_ad = AD_prod.copy()
+    best_rd = RD_prod.copy()
+    best = _cost(best_ad, best_rd)
+    ads = np.empty(n_pop)
+    rds = np.empty(n_pop)
+    for ia in range(ad_grid.shape[0]):
+        for ir in range(rd_grid.shape[0]):
+            if ad_grid[ia] < rd_grid[ir] * aniso_ratio:
+                continue
+            for k in range(n_pop):
+                ads[k] = ad_grid[ia]
+                rds[k] = max(rd_grid[ir], _TENSOR_RD_FLOOR)
+            c = _cost(ads, rds)
+            if c < best:
+                best = c
+                best_ad[:] = ads
+                best_rd[:] = rds
+    return best_ad, best_rd

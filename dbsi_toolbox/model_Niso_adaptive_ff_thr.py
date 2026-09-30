@@ -173,6 +173,8 @@ from .core.solvers import (
     compute_cone_refinement_schedule,
     measure_hemisphere_spacing,
     estimate_AD_RD_mrds,          # NEW — MRDS multi-fiber Stage B
+    mrds_varpro_nfiber,           # EXPERIMENTAL — fit(_mrds_mode>=2) only
+    mrds_varpro_scan_init,        # EXPERIMENTAL — fit(_mrds_mode=3) only
 )
 from .calibration.data_driven import (fiber_subtracted_residual,
                                       select_lambdas_data_driven,
@@ -735,7 +737,8 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         conc_mod_c_lo, conc_mod_c_hi, conc_mod_gain,
                         stagec_enabled, iso_forward, iso_gram,
                         stagec_ad_grid, stagec_rd_grid, stagec_aniso_ratio,
-                        data_raw, stagec_iso_grid, stagec_dir_refine):
+                        data_raw, stagec_iso_grid, stagec_dir_refine,
+                        mrds_mode):
     """
     v3 parallel fitting kernel — two-compartment isotropic model (2-ISO).
 
@@ -982,10 +985,72 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                     iso_signal[i] = (f_res * np.exp(-bvals[i] * D_res_c)
                                      + f_nonrf * np.exp(-bvals[i] * D_nonrf_c))
 
+                # EXPERIMENTAL crossing paths (inspection 2026-09-30, private
+                # `fit(_mrds_mode=...)`; 0 = production). 1: tensor on the RAW
+                # signal, as Stage C does for single fibers. 2: RAW + fractions
+                # re-solved jointly with the tensors (mrds_varpro_nfiber), the
+                # crossing analogue of Stage C.
+                sig_mrds = sig_norm
+                if mrds_mode >= 1:
+                    sig_raw_m = data_raw[x, y, z]
+                    s0_m = 0.0
+                    cnt_m = 0
+                    for ii in range(len(bvals)):
+                        if bvals[ii] < b0_thr:
+                            s0_m += sig_raw_m[ii]
+                            cnt_m += 1
+                    if cnt_m > 0:
+                        s0_m /= cnt_m
+                    if s0_m < 1e-6:
+                        s0_m = 1e-6
+                    sig_mrds = (sig_raw_m / s0_m).astype(np.float64)
+
                 AD_out, RD_out = estimate_AD_RD_mrds(
-                    bvals, bvecs, sig_norm, directions, fractions, iso_signal,
+                    bvals, bvecs, sig_mrds, directions, fractions, iso_signal,
                     init_n_iter=_MRDS_INIT_N_ITER, lm_max_iter=_MRDS_LM_MAX_ITER
                 )
+
+                if mrds_mode >= 2:
+                    n_iso_vp = iso_forward.shape[1]
+                    w_vp = np.zeros(n_pop + n_iso_vp)
+                    if mrds_mode == 3:
+                        AD_out, RD_out = mrds_varpro_scan_init(
+                            sig_mrds, bvals, bvecs, directions, AD_out, RD_out,
+                            iso_forward, stagec_ad_grid, stagec_rd_grid,
+                            stagec_aniso_ratio
+                        )
+                    AD_out, RD_out = mrds_varpro_nfiber(
+                        sig_mrds, bvals, bvecs, directions, AD_out, RD_out,
+                        iso_forward, w_vp, _MRDS_LM_MAX_ITER
+                    )
+                    tot_vp = 0.0
+                    for a in range(n_pop + n_iso_vp):
+                        tot_vp += w_vp[a]
+                    if tot_vp > 1e-10:
+                        ff_vp = 0.0
+                        for k in range(n_pop):
+                            fractions[k] = w_vp[k] / tot_vp
+                            ff_vp += fractions[k]
+                        res_vp = 0.0
+                        hin_vp = 0.0
+                        wat_vp = 0.0
+                        wd_vp = 0.0
+                        for j in range(n_iso_vp):
+                            wj = w_vp[n_pop + j]
+                            dj = stagec_iso_grid[j]
+                            if dj <= THRESH_RES:
+                                res_vp += wj
+                            elif dj <= THRESH_WAT:
+                                hin_vp += wj
+                            else:
+                                wat_vp += wj
+                            wd_vp += wj * dj
+                        if ff_vp > 0.0:
+                            out[x, y, z, _C_FF] = ff_vp
+                            out[x, y, z, _C_RF] = res_vp / tot_vp
+                            out[x, y, z, _C_NRF] = (hin_vp + wat_vp) / tot_vp
+                            iso_vp = res_vp + hin_vp + wat_vp
+                            out[x, y, z, _C_ADC_ISO] = wd_vp / iso_vp if iso_vp > 1e-10 else 0.0
 
                 # Dominant population (index 0, highest Stage A weight) ->
                 # legacy channels 5/6/7/9/10 + new DIR1, for backward
@@ -1021,7 +1086,8 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         conc_mod_c_lo, conc_mod_c_hi, conc_mod_gain,
                         stagec_enabled, iso_forward, iso_gram,
                         stagec_ad_grid, stagec_rd_grid, stagec_aniso_ratio,
-                        data_raw, stagec_iso_grid, stagec_dir_refine):
+                        data_raw, stagec_iso_grid, stagec_dir_refine,
+                        mrds_mode):
     """v3 parallel fitting kernel — three-compartment isotropic model
     (3-ISO). Same Stage A / Stage B (+ MRDS multi-fiber) structure as
     `_fit_voxels_2iso_v3`; see that kernel's docstring for the full
@@ -1261,10 +1327,74 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                                      + f_hin * np.exp(-bvals[i] * D_hin_c)
                                      + f_wat * np.exp(-bvals[i] * D_wat_c))
 
+                # EXPERIMENTAL crossing paths (inspection 2026-09-30, private
+                # `fit(_mrds_mode=...)`; 0 = production). 1: tensor on the RAW
+                # signal, as Stage C does for single fibers. 2: RAW + fractions
+                # re-solved jointly with the tensors (mrds_varpro_nfiber), the
+                # crossing analogue of Stage C.
+                sig_mrds = sig_norm
+                if mrds_mode >= 1:
+                    sig_raw_m = data_raw[x, y, z]
+                    s0_m = 0.0
+                    cnt_m = 0
+                    for ii in range(len(bvals)):
+                        if bvals[ii] < b0_thr:
+                            s0_m += sig_raw_m[ii]
+                            cnt_m += 1
+                    if cnt_m > 0:
+                        s0_m /= cnt_m
+                    if s0_m < 1e-6:
+                        s0_m = 1e-6
+                    sig_mrds = (sig_raw_m / s0_m).astype(np.float64)
+
                 AD_out, RD_out = estimate_AD_RD_mrds(
-                    bvals, bvecs, sig_norm, directions, fractions, iso_signal,
+                    bvals, bvecs, sig_mrds, directions, fractions, iso_signal,
                     init_n_iter=_MRDS_INIT_N_ITER, lm_max_iter=_MRDS_LM_MAX_ITER
                 )
+
+                if mrds_mode >= 2:
+                    n_iso_vp = iso_forward.shape[1]
+                    w_vp = np.zeros(n_pop + n_iso_vp)
+                    if mrds_mode == 3:
+                        AD_out, RD_out = mrds_varpro_scan_init(
+                            sig_mrds, bvals, bvecs, directions, AD_out, RD_out,
+                            iso_forward, stagec_ad_grid, stagec_rd_grid,
+                            stagec_aniso_ratio
+                        )
+                    AD_out, RD_out = mrds_varpro_nfiber(
+                        sig_mrds, bvals, bvecs, directions, AD_out, RD_out,
+                        iso_forward, w_vp, _MRDS_LM_MAX_ITER
+                    )
+                    tot_vp = 0.0
+                    for a in range(n_pop + n_iso_vp):
+                        tot_vp += w_vp[a]
+                    if tot_vp > 1e-10:
+                        ff_vp = 0.0
+                        for k in range(n_pop):
+                            fractions[k] = w_vp[k] / tot_vp
+                            ff_vp += fractions[k]
+                        res_vp = 0.0
+                        hin_vp = 0.0
+                        wat_vp = 0.0
+                        wd_vp = 0.0
+                        for j in range(n_iso_vp):
+                            wj = w_vp[n_pop + j]
+                            dj = stagec_iso_grid[j]
+                            if dj <= THRESH_RES:
+                                res_vp += wj
+                            elif dj <= THRESH_WAT:
+                                hin_vp += wj
+                            else:
+                                wat_vp += wj
+                            wd_vp += wj * dj
+                        if ff_vp > 0.0:
+                            out[x, y, z, _C_FF] = ff_vp
+                            out[x, y, z, _C_RF] = res_vp / tot_vp
+                            out[x, y, z, _C_HF] = hin_vp / tot_vp
+                            out[x, y, z, _C_WF] = wat_vp / tot_vp
+                            out[x, y, z, _C_NRF] = (hin_vp + wat_vp) / tot_vp
+                            iso_vp = res_vp + hin_vp + wat_vp
+                            out[x, y, z, _C_ADC_ISO] = wd_vp / iso_vp if iso_vp > 1e-10 else 0.0
 
                 FA0 = compute_fiber_fa(AD_out[0], RD_out[0])
                 out[x, y, z, _C_AD1] = AD_out[0]
@@ -1774,7 +1904,8 @@ class DBSI_Adaptive:
            run_sure_crosscheck=False, sure_crosscheck_n_probes=15,
            calibrate_concentration_gate=False,
            concentration_gate_percentile=_CONCENTRATION_GATE_PERCENTILE,
-           _calibration_only=False, _lambda_aniso_grid=None, _lambda_iso_grid=None):
+           _calibration_only=False, _lambda_aniso_grid=None, _lambda_iso_grid=None,
+           _mrds_mode=0):
         """
         Fit the v3 hybrid two-stage adaptive DBSI model (+ MRDS
         multi-fiber extension) to 4D diffusion MRI data.
@@ -2486,7 +2617,8 @@ class DBSI_Adaptive:
                     float(self.conc_mod_gain),
                     bool(self.stagec_refine), iso_forward, iso_gram,
                     stagec_ad_grid, stagec_rd_grid, float(_STAGEC_ANISO_RATIO),
-                    data, stagec_iso_grid, bool(self.stagec_dir_refine)
+                    data, stagec_iso_grid, bool(self.stagec_dir_refine),
+                    int(_mrds_mode)
                 )
                 pbar.update(end - start)
 

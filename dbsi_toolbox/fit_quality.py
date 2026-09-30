@@ -598,6 +598,33 @@ def format_run_report(report, saved_channels=None):
         add("    (a voxel ON a bound is one whose tensor the data did not")
         add("     determine: report the bound-active fraction, do not average over it)")
 
+    # Test di rilevamento (v1.6.1): era nel dict ma non veniva stampato.
+    block("Fiber detection test", R.get('fiber_detection'))
+
+    un = R.get('uncertainty') or {}
+    if un:
+        add("")
+        add("  Uncertainty maps (toolbox_report/uncertainty_maps/)")
+        add("  " + "-" * 51)
+        if un.get('computed') is False:
+            add(f"    not computed: {un.get('reason', '?')}")
+        else:
+            for k in ('method', 'noise', 'directions', 'bounds', 'n_voxels'):
+                add(f"    {k:<32}{un.get(k)}")
+            add("    median standard error over the mask:")
+            for k, v in (un.get('median_se') or {}).items():
+                txt = (f"{v:.2f} deg" if k.endswith('_deg') else
+                       f"{v * 1e3:.4f} x10^-3 mm^2/s" if 'diffusivity' in k else f"{v:.4f}")
+                add(f"      {k:<30}{txt}")
+            for k, label in (('flag_rd_bound_pct', 'RD on a bound'),
+                             ('flag_ad_bound_pct', 'AD on a bound'),
+                             ('flag_ill_conditioned_pct', 'ill-conditioned Fisher')):
+                v = un.get(k)
+                if v is not None:
+                    add(f"    {label:<32}{v:.1%} of voxels")
+            add(f"    (ill-conditioned: log10 condition > {un.get('ill_conditioned_log10_cond')};")
+            add("     the SE is the Cramer-Rao bound at the estimate: it does NOT include bias)")
+
     fq = R.get('fit_quality') or {}
     if fq:
         add("")
@@ -645,6 +672,10 @@ def save_output_maps(results, channel_names, affine, output_dir,
             design_matrix.png        image of the dictionary A = [A_aniso | A_iso]
             design_matrix.npz        A itself and what generates it
             dictionary_columns.csv   one row per column of A
+            uncertainty_maps/        (v1.7.0) per-voxel standard error of every
+                                     continuous map, NN_<channel>_se.nii.gz, plus
+                                     angular SE, Fisher condition and flags
+                                     (see `dbsi_toolbox.uncertainty`)
                                 (see `dbsi_toolbox.toolbox_report`)
 
     Until v1.3.9 run_report.txt sat next to the maps; it now lives in
@@ -716,8 +747,10 @@ def save_output_maps(results, channel_names, affine, output_dir,
         if stat is not None:
             nib.save(nib.Nifti1Image(np.asarray(stat, np.float32), affine),
                      os.path.join(output_dir, 'fiber_detection_stat.nii.gz'))
-        from .toolbox_report import save_toolbox_report
+        from .toolbox_report import save_toolbox_report, save_uncertainty_maps
         save_toolbox_report(model, output_dir, saved_channels=saved)
+        # Errore standard di ogni mappa continua (v1.7.0), stessa numerazione.
+        save_uncertainty_maps(model, output_dir, affine, saved_channels=saved)
     return saved
 
 

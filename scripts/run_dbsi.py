@@ -101,6 +101,10 @@ def main():
                              "by less than this many noise variances (dRSS/sigma^2). Default: "
                              "off. The statistic is always written to "
                              "fiber_detection_stat.nii.gz. See DBSI_Adaptive.")
+    parser.add_argument("--no-uncertainty", dest="no_uncertainty", action="store_true",
+                        help="Skip the uncertainty maps (per-voxel Fisher standard error of every "
+                             "continuous map, written to toolbox_report/uncertainty_maps/). ON by "
+                             "default; they cost a small fraction of the fit.")
     parser.add_argument("--disable-iso-resolve", dest="disable_iso_resolve", action="store_true",
                         help="Disable the Stage D final constrained iso fraction re-solve. It is "
                              "ON by default: for every voxel it re-estimates the compartment "
@@ -195,6 +199,8 @@ def main():
     print(f"  {len(saved)} channel maps -> {args.out}/NN_<channel>.nii.gz")
     print(f"  fiber-tensor validity mask -> {args.out}/fiber_valid.nii.gz")
     print(f"  toolbox report (run report + dictionary) -> {args.out}/toolbox_report/")
+    if getattr(model, 'uncertainty_', None) is not None:
+        print(f"  uncertainty maps (standard errors) -> {args.out}/toolbox_report/uncertainty_maps/")
     print(f"  Skipped {len(skipped)} channels (invalid in {model_mode}-ISO mode "
           f"or exact duplicates): {', '.join(skipped)}")
 
@@ -207,7 +213,8 @@ def model_kwargs(args):
               enable_direction_refinement=not args.disable_direction_refinement,
               lambda_aniso_conc_mod=not args.disable_conc_modulation,
               stagec_refine=not args.disable_stagec,
-              iso_resolve=not args.disable_iso_resolve)
+              iso_resolve=not args.disable_iso_resolve,
+              uncertainty=not getattr(args, 'no_uncertainty', False))
     opt = ('min_weight_fraction', 'target_angular_resolution_deg', 'fiber_detection_threshold')
     if not args.protocol_calibration:
         opt = opt + ('n_iso', 'lambda_aniso', 'lambda_iso', 'n_dirs') + _DICTIONARY_OPTS

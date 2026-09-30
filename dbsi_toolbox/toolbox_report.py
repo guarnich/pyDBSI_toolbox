@@ -12,6 +12,11 @@ toolbox_report/ — cosa ha prodotto le mappe, in una cartella sola.
                              D isotropa, comparto
     protocol_calibration.json  (solo con `from_calibration`) copia della
                              calibrazione di protocollo usata
+    uncertainty_maps/        (v1.7.0) errore standard di ogni mappa continua:
+                             NN_<canale>_se.nii.gz con la stessa numerazione
+                             delle mappe, l'errore angolare delle direzioni, il
+                             numero di condizionamento e i flag; README.txt
+                             spiega come leggerli (vedi `dbsi_toolbox.uncertainty`)
 
 Perche' anche il dizionario: fino alla 1.3.9 il run report diceva quante colonne
 c'erano ma non QUALI. La matrice dipende dal protocollo (b-values, direzioni),
@@ -219,4 +224,79 @@ def save_toolbox_report(model, output_dir, saved_channels=None):
     if mancano:
         print(f"   [WARNING] toolbox_report incompleto: il modello non ha "
               f"{', '.join(mancano)} (fit non completato?)")
+    return written
+
+
+_UNC_README = """Mappe di incertezza (pyDBSI {ver})
+================================
+
+Ogni file NN_<canale>_se.nii.gz e' l'ERRORE STANDARD per voxel della mappa
+NN_<canale>.nii.gz, nelle stesse unita' (frazioni adimensionali, diffusivita'
+in mm^2/s, FA adimensionale). NaN dove la mappa non esiste.
+
+Come e' calcolato: informazione di Fisher del modello con cui le mappe sono
+riportate (fibre con AD, RD, direzione e peso liberi + centroidi isotropi fissi
+di Stage D), valutata alla stima, rumore gaussiano sigma_raw / S0 del voxel;
+metodo delta per frazioni normalizzate, FA e tensore pesato. E' il limite di
+Cramer-Rao: la precisione che uno stimatore NON distorto potrebbe raggiungere
+con questo protocollo e questo rumore. NON contiene il bias.
+
+Altri file:
+  dir1_angle_se_deg.nii.gz, dir2_angle_se_deg.nii.gz
+        errore angolare RMS della direzione di ciascuna popolazione, in gradi
+  fisher_log10_condition.nii.gz
+        log10 del numero di condizionamento della matrice di Fisher equilibrata:
+        sopra {lc:g} il modello e' quasi non identificabile nel voxel
+  uncertainty_flags.nii.gz   (bitmask, uint8)
+        1  RD di una popolazione su un limite (il pavimento, in pratica)
+        2  AD di una popolazione su un limite
+        4  Fisher mal condizionata (vedi sopra); NaN se singolare
+        8  AD dei crossing imposta, non stimata (SE = NaN)
+
+Uso: per una regione di N voxel l'errore della media scende fino a SE/sqrt(N)
+(meno, con la correlazione spaziale). Voxel con flag 1, 2 o 4: l'errore e' una
+linearizzazione in un punto dove non vale, da escludere o riportare a parte.
+"""
+
+
+def save_uncertainty_maps(model, output_dir, affine, saved_channels=None):
+    """Scrive `output_dir/toolbox_report/uncertainty_maps/` dal `model.uncertainty_`.
+
+    Una mappa `_se` per ogni canale di `uncertainty.SE_CHANNELS` che e' stato
+    anche salvato come mappa (stessa numerazione `NN_`), piu' errore angolare,
+    condizionamento e flag. Non fa nulla se il modello non ha le incertezze.
+    """
+    import nibabel as nib
+    from .uncertainty import SE_CHANNELS, UNCERTAINTY_DIRNAME, _LOG10_COND_FLAG
+    unc = getattr(model, 'uncertainty_', None)
+    report = getattr(model, 'run_report_', None) or {}
+    if unc is None or not report.get('channel_names'):
+        return []
+    names = report['channel_names']
+    keep = set(saved_channels) if saved_channels is not None else set(names)
+    d = os.path.join(output_dir, REPORT_DIRNAME, UNCERTAINTY_DIRNAME)
+    os.makedirs(d, exist_ok=True)
+    written = []
+
+    def _save(arr, fname):
+        f = os.path.join(d, fname)
+        nib.save(nib.Nifti1Image(np.asarray(arr), affine), f)
+        written.append(f)
+
+    for ch in SE_CHANNELS:
+        nm = names[ch]
+        if nm.endswith('_NaN') or nm not in keep:
+            continue
+        _save(unc['se'][..., ch].astype(np.float32), f'{ch:02d}_{nm}_se.nii.gz')
+    for k in (0, 1):
+        if k == 1 and 'axial_diffusivity_pop2' not in keep:
+            continue
+        _save(unc['dir_se_deg'][..., k].astype(np.float32), f'dir{k + 1}_angle_se_deg.nii.gz')
+    _save(unc['log10_cond'].astype(np.float32), 'fisher_log10_condition.nii.gz')
+    _save(unc['flags'].astype(np.uint8), 'uncertainty_flags.nii.gz')
+    f = os.path.join(d, 'README.txt')
+    with open(f, 'w', encoding='utf-8') as fh:
+        fh.write(_UNC_README.format(ver=report.get('toolbox_version', ''),
+                                    lc=_LOG10_COND_FLAG))
+    written.append(f)
     return written

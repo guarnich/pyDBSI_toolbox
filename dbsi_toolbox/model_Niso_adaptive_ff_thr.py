@@ -1803,7 +1803,8 @@ class DBSI_Adaptive:
                  stagec_refine=_DEFAULT_STAGEC_REFINE,
                  stagec_dir_refine=_DEFAULT_STAGEC_DIR_REFINE,
                  iso_resolve=_DEFAULT_ISO_RESOLVE,
-                 lambda_aniso_method='gcv'):
+                 lambda_aniso_method='gcv',
+                 uncertainty=True):
         self.n_iso = n_iso
         self.lambda_aniso = lambda_aniso
         self.lambda_iso = lambda_iso
@@ -1837,6 +1838,7 @@ class DBSI_Adaptive:
             raise ValueError("lambda_aniso_method must be 'discrepancy', 'gcv', or 'lcurve', "
                              f"got {lambda_aniso_method!r}.")
         self.lambda_aniso_method = lambda_aniso_method
+        self.uncertainty = bool(uncertainty)
 
         self.model_mode_ = None
         self.b_max_ = None
@@ -1848,6 +1850,8 @@ class DBSI_Adaptive:
         self.rician_clamp_ = None
         self.fiber_detection_stat_ = None
         self.fiber_detection_ = None
+        self.uncertainty_ = None
+        self.uncertainty_summary_ = None
         self.lambda_edges_ = {}
         self.hemisphere_spacing_deg_ = None
         self.cone_refinement_schedule_ = None
@@ -1969,6 +1973,8 @@ class DBSI_Adaptive:
         self.rician_clamp_ = None
         self.fiber_detection_stat_ = None
         self.fiber_detection_ = None
+        self.uncertainty_ = None
+        self.uncertainty_summary_ = None
         self.dictionary_ = None
         self.calibration_curves_ = None
 
@@ -2748,6 +2754,36 @@ class DBSI_Adaptive:
             iso_centroids=_fq_centroids,
         )
 
+        # ── Uncertainty maps: Fisher SE of every continuous map (v1.7.0) ────
+        # Evaluated at the FINAL reported values, so it runs after every stage
+        # that may revise them. Defined on the Stage D model (fixed iso
+        # centroids): without Stage D the fractions come from the over-complete
+        # spectrum, which has no identifiable Fisher matrix, so nothing is
+        # computed and the run report says why. See `dbsi_toolbox.uncertainty`.
+        if self.uncertainty and self.iso_resolve:
+            from .uncertainty import compute_uncertainty, summarise_uncertainty
+            _t0u = time.time()
+            self.uncertainty_ = compute_uncertainty(
+                data_corr, coords, bvals, bvecs, b0_thr, _iso_d, use_3iso,
+                float(sigma), results)
+            self.uncertainty_summary_ = summarise_uncertainty(
+                self.uncertainty_, results, mask,
+                DBSI_Adaptive.output_map_names(model_mode))
+            _us = self.uncertainty_summary_
+            _m = _us['median_se']
+            print(f"   Uncertainty maps (Fisher SE at the estimate): "
+                  f"{time.time() - _t0u:.1f}s; median SE "
+                  f"FF {_m.get('fiber_fraction', float('nan')):.3f}, "
+                  f"RF {_m.get('restricted_fraction', float('nan')):.3f}, "
+                  f"RD_w {_m.get('radial_diffusivity_weighted', float('nan')) * 1e3:.3f}e-3; "
+                  f"ill-conditioned {(_us['flag_ill_conditioned_pct'] or 0):.1%}")
+        else:
+            self.uncertainty_summary_ = dict(
+                computed=False,
+                reason=('disabled (uncertainty=False)' if not self.uncertainty
+                        else 'needs Stage D (iso_resolve=True): the SE is defined '
+                             'on the Stage D model'))
+
         # ── Run report: what produced these maps ────────────────────────────
         # Built here because `fit` is the only place that has all of it at once
         # — the calibrated hyperparameters, the protocol, the noise estimate and
@@ -2778,6 +2814,7 @@ class DBSI_Adaptive:
             # l'ha raddoppiato correggendo sigma.
             rician_clamp=dict(getattr(self, 'rician_clamp_', {}) or {}),
             fiber_detection=dict(self.fiber_detection_ or {}),
+            uncertainty=dict(self.uncertainty_summary_ or {}),
             protocol_calibration=({} if not self.protocol_calibration_ else dict(
                 name=self.protocol_calibration_.get('name'),
                 sha256=self.protocol_calibration_.get('sha256') or 'not saved to file',
@@ -2848,7 +2885,8 @@ class DBSI_Adaptive:
                          stagec_dir_refine=bool(self.stagec_dir_refine),
                          enable_direction_refinement=bool(self.enable_direction_refinement),
                          lambda_aniso_conc_mod=bool(self.lambda_aniso_conc_mod),
-                         iso_resolve=bool(self.iso_resolve)),
+                         iso_resolve=bool(self.iso_resolve),
+                         uncertainty=bool(self.uncertainty)),
             populations=_population_census(results, mask),
             solver=_solver_diagnostics(results, mask),
             fit_quality=dict(

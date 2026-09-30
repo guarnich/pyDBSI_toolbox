@@ -418,6 +418,12 @@ _DEFAULT_MIN_PEAK_RATIO = 0.35
 # nullo MC e' troppo rado ripiega sul valore del costruttore, che ora e' 0.0 --
 # cioe' "nessun gate"; il messaggio "FELL BACK" lo dichiara.
 _DEFAULT_MIN_DOMINANT_CONCENTRATION = 0.0
+# Ma spegnerlo lascia aperto il problema che il gate doveva risolvere, e lo
+# lascia GRANDE a SNR clinico: sul tessuto isotropo sintetico (P3, SNR 26) il
+# 38-62% dei voxel riceve una fibra falsa, quasi sempre come crossing. Lo
+# strumento giusto non guarda la forma dei pesi di Stage A ma se le fibre
+# spiegano piu' del rumore: `fiber_detection_threshold` (v1.6.1, spento finche'
+# batteria e dati veri non scelgono la soglia), vedi _fiber_detection_pass.
 
 # Plan A (Point 2) — per-voxel concentration-modulated lambda_aniso defaults.
 # ON by default (disable via lambda_aniso_conc_mod=False): when a voxel's
@@ -1395,6 +1401,114 @@ def _iso_resolve_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso, 
             out[x, y, z, _C_WF] = wat
 
 
+@njit(parallel=True, cache=True, fastmath=True)
+def _fiber_detection_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso,
+                          sigma_raw, threshold, out, stat_out):
+    """
+    Detection test for the fiber populations Stage A reported (v1.6.1).
+
+    For every voxel with a fiber, on the Stage D model (fixed iso centroids,
+    fitted tensors and directions, Rician-corrected signal):
+
+        stat = (RSS_iso_only - RSS_fibers+iso) / sigma_voxel^2,
+        sigma_voxel = sigma_raw / S0_voxel
+
+    i.e. how much the fibers reduce the residual, in units of the noise
+    variance. Written to `stat_out` for every such voxel. If `threshold` > 0
+    and stat < threshold, the fiber is REJECTED: n_pop -> NaN, fiber channels
+    -> NaN, FF -> 0 and the iso fractions from the iso-only fit.
+
+    WHY. Measured on synthetic ISOTROPIC tissue (P3 protocol, frozen P3
+    lambdas, gate off): at SNR 26, 38-62% of GM-like / hindered / tumour-like
+    voxels got a fiber, almost all as a CROSSING with FF 0.16-0.18 (Stage A
+    noise spread over two peaks, just above fiber_threshold); 88-90% at SNR 15;
+    ~0 at SNR 40. The concentration gate cannot separate them from true
+    crossings (concentration anti-correlates with resolvability). This
+    statistic can: its null distribution is SNR-invariant (median 4-6, p95
+    11-14 at SNR 15, 26 and 40) because it is noise-normalised, while true
+    fibers score p05 74 (single fiber FF 0.25) and 17.5 (90-degree crossing,
+    FF 0.30) at SNR 26. It is the F-test MRDS uses for model selection, which
+    this toolbox had left out. Off by default until the battery and real data
+    decide the threshold; the statistic is always computed and reported.
+    """
+    n_voxels = coords.shape[0]
+    n_iso = iso_d.shape[0]
+    N = len(bvals)
+    A_iso = np.empty((N, n_iso))
+    for j in range(n_iso):
+        for i in range(N):
+            A_iso[i, j] = np.exp(-bvals[i] * iso_d[j])
+    AtA_iso = A_iso.T @ A_iso
+    for idx in prange(n_voxels):
+        x, y, z = coords[idx]
+        npop = out[x, y, z, _C_NPOP]
+        if np.isnan(npop) or npop < 1 or np.isnan(out[x, y, z, _C_AD1]):
+            continue
+        sig = data_corr[x, y, z]
+        s0 = 0.0
+        cnt = 0
+        for i in range(N):
+            if bvals[i] < b0_thr:
+                s0 += sig[i]
+                cnt += 1
+        if cnt > 0:
+            s0 /= cnt
+        if s0 < 1e-6:
+            continue
+        yv = np.empty(N)
+        for i in range(N):
+            yv[i] = sig[i] / s0
+        n_fib = 2 if (npop >= 2 and not np.isnan(out[x, y, z, _C_AD2])) else 1
+        A = np.empty((N, n_fib + n_iso))
+        for k in range(n_fib):
+            c0 = _C_DIR1 if k == 0 else _C_DIR2
+            ad = out[x, y, z, _C_AD1] if k == 0 else out[x, y, z, _C_AD2]
+            rd = out[x, y, z, _C_RD1] if k == 0 else out[x, y, z, _C_RD2]
+            d0 = out[x, y, z, c0]
+            d1 = out[x, y, z, c0 + 1]
+            d2 = out[x, y, z, c0 + 2]
+            for i in range(N):
+                c = bvecs[i, 0] * d0 + bvecs[i, 1] * d1 + bvecs[i, 2] * d2
+                A[i, k] = np.exp(-bvals[i] * (rd + (ad - rd) * c * c))
+        for j in range(n_iso):
+            for i in range(N):
+                A[i, n_fib + j] = A_iso[i, j]
+        w_f, _ = nnls_coordinate_descent(A.T @ A, A.T @ yv, 0.0)
+        w_i, _ = nnls_coordinate_descent(AtA_iso, A_iso.T @ yv, 0.0)
+        r_f = yv - A @ w_f
+        r_i = yv - A_iso @ w_i
+        sig2 = (sigma_raw / s0) ** 2
+        stat = (np.sum(r_i * r_i) - np.sum(r_f * r_f)) / sig2
+        stat_out[x, y, z] = stat
+        if threshold > 0.0 and stat < threshold:
+            tot = 0.0
+            for j in range(n_iso):
+                tot += w_i[j]
+            if tot < 1e-10:
+                continue
+            res = 0.0
+            hin = 0.0
+            wat = 0.0
+            for j in range(n_iso):
+                dj = iso_d[j]
+                if dj <= THRESH_RES:
+                    res += w_i[j] / tot
+                elif dj < THRESH_WAT:
+                    hin += w_i[j] / tot
+                else:
+                    wat += w_i[j] / tot
+            out[x, y, z, _C_FF] = 0.0
+            out[x, y, z, _C_RF] = res
+            out[x, y, z, _C_NRF] = hin + wat
+            if use_3iso:
+                out[x, y, z, _C_HF] = hin
+                out[x, y, z, _C_WF] = wat
+            out[x, y, z, _C_NPOP] = np.nan
+            for c in (_C_AD1, _C_RD1, _C_FA1, _C_DIR1, _C_DIR1 + 1, _C_DIR1 + 2,
+                      _C_FF2, _C_AD2, _C_RD2, _C_FA2, _C_DIR2, _C_DIR2 + 1, _C_DIR2 + 2):
+                out[x, y, z, c] = np.nan
+
+
 def _package_provenance():
     """Where this code came from: install path, and the git state if the
     package is being run out of a checkout. Everything is best-effort — an
@@ -1661,6 +1775,7 @@ class DBSI_Adaptive:
                  min_separation_deg=_DEFAULT_MIN_SEPARATION_DEG,
                  min_peak_ratio=_DEFAULT_MIN_PEAK_RATIO,
                  min_dominant_concentration=_DEFAULT_MIN_DOMINANT_CONCENTRATION,
+                 fiber_detection_threshold=None,
                  enable_direction_refinement=True,
                  target_angular_resolution_deg=1.0,
                  lambda_aniso_conc_mod=_DEFAULT_LAMBDA_ANISO_CONC_MOD,
@@ -1688,6 +1803,9 @@ class DBSI_Adaptive:
         self.min_separation_deg = min_separation_deg
         self.min_peak_ratio = min_peak_ratio
         self.min_dominant_concentration = min_dominant_concentration
+        if fiber_detection_threshold is not None and not fiber_detection_threshold > 0:
+            raise ValueError('fiber_detection_threshold must be None (off) or > 0')
+        self.fiber_detection_threshold = fiber_detection_threshold
         self.enable_direction_refinement = enable_direction_refinement
         self.target_angular_resolution_deg = target_angular_resolution_deg
         self.lambda_aniso_conc_mod = lambda_aniso_conc_mod
@@ -1710,6 +1828,8 @@ class DBSI_Adaptive:
         self.sure_crosscheck_report_ = None
         self.n_iso_source_ = None
         self.rician_clamp_ = None
+        self.fiber_detection_stat_ = None
+        self.fiber_detection_ = None
         self.lambda_edges_ = {}
         self.hemisphere_spacing_deg_ = None
         self.cone_refinement_schedule_ = None
@@ -1828,6 +1948,8 @@ class DBSI_Adaptive:
         self.n_iso_columns_res_ = None
         self.n_iso_columns_wat_ = None
         self.rician_clamp_ = None
+        self.fiber_detection_stat_ = None
+        self.fiber_detection_ = None
         self.dictionary_ = None
         self.calibration_curves_ = None
 
@@ -2531,6 +2653,41 @@ class DBSI_Adaptive:
                               use_3iso, results)
             print(f"   Stage D completed: {time.time() - _t0d:.1f}s")
 
+            # ── Detection test: do the fibers explain more than noise? ──────
+            # Always computed (it is cheap and it is what tells a reader how
+            # many of the reported fibers the data support); applied only when
+            # fiber_detection_threshold is set. See _fiber_detection_pass.
+            _stat = np.full(results.shape[:3], np.nan, dtype=np.float32)
+            _npop_before = results[..., _C_NPOP].copy()
+            _thr = float(self.fiber_detection_threshold or 0.0)
+            _fiber_detection_pass(data_corr, coords, bvals, bvecs, b0_thr, _iso_d,
+                                  use_3iso, float(sigma), _thr, results, _stat)
+            self.fiber_detection_stat_ = _stat
+            _tested = np.isfinite(_stat) & mask
+            _rej = _tested & np.isnan(results[..., _C_NPOP]) & ~np.isnan(_npop_before)
+            _sv = _stat[_tested]
+            _q = (np.percentile(_sv, [5, 50, 95]).tolist() if _sv.size else [None] * 3)
+            self.fiber_detection_ = dict(
+                threshold=self.fiber_detection_threshold,
+                statistic='(RSS_iso_only - RSS_fibers_plus_iso) / sigma_voxel^2, Stage D model',
+                n_tested=int(_tested.sum()),
+                stat_p05=_q[0], stat_p50=_q[1], stat_p95=_q[2],
+                frac_below_15=(float(np.mean(_sv < 15.0)) if _sv.size else None),
+                n_rejected=int(_rej.sum()),
+                frac_rejected=(float(_rej.sum() / _tested.sum()) if _tested.sum() else 0.0),
+                crossings_among_rejected=(float(np.mean(_npop_before[_rej] >= 2))
+                                          if _rej.any() else None))
+            _fd = self.fiber_detection_
+            print(f"   Detection test on {_fd['n_tested']:,} fiber voxels: "
+                  f"stat p05/p50/p95 = "
+                  + ('/'.join(f'{v:.1f}' for v in _q) if _sv.size else 'n/a')
+                  + f"; below 15: {_fd['frac_below_15'] if _fd['frac_below_15'] is not None else 0:.1%}"
+                  + (f"; REJECTED {_fd['n_rejected']:,} ({_fd['frac_rejected']:.1%}) at "
+                     f"threshold {_thr:g}" if _thr > 0 else " (threshold off: nothing rejected)"))
+        elif self.fiber_detection_threshold is not None:
+            raise ValueError('fiber_detection_threshold needs Stage D (iso_resolve=True): '
+                             'the test is defined on the Stage D model')
+
         # ── Derived channels (pop-1 fraction + FF-weighted tensor) ──────────
         # Last, because every stage above may still revise the fractions.
         _fill_derived_channels(results)
@@ -2593,6 +2750,7 @@ class DBSI_Adaptive:
             # correzione: distorce la RF verso il basso dove morde, e la 1.3.5
             # l'ha raddoppiato correggendo sigma.
             rician_clamp=dict(getattr(self, 'rician_clamp_', {}) or {}),
+            fiber_detection=dict(self.fiber_detection_ or {}),
             protocol_calibration=({} if not self.protocol_calibration_ else dict(
                 name=self.protocol_calibration_.get('name'),
                 sha256=self.protocol_calibration_.get('sha256') or 'not saved to file',

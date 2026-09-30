@@ -95,6 +95,12 @@ def main():
                              "that leaks isotropic signal into fiber_fraction; safe band [2.0, 2.16]).")
     parser.add_argument("--min-weight-fraction", type=float, dest="min_weight_fraction", default=None,
                         help=f"Stage A direction-selection threshold. Default: {_D['min_weight_fraction']}.")
+    parser.add_argument("--fiber-detection-threshold", type=float,
+                        dest="fiber_detection_threshold", default=None,
+                        help="Reject a voxel's fibers when they reduce the Stage D residual "
+                             "by less than this many noise variances (dRSS/sigma^2). Default: "
+                             "off. The statistic is always written to "
+                             "fiber_detection_stat.nii.gz. See DBSI_Adaptive.")
     parser.add_argument("--disable-iso-resolve", dest="disable_iso_resolve", action="store_true",
                         help="Disable the Stage D final constrained iso fraction re-solve. It is "
                              "ON by default: for every voxel it re-estimates the compartment "
@@ -202,7 +208,7 @@ def model_kwargs(args):
               lambda_aniso_conc_mod=not args.disable_conc_modulation,
               stagec_refine=not args.disable_stagec,
               iso_resolve=not args.disable_iso_resolve)
-    opt = ('min_weight_fraction', 'target_angular_resolution_deg')
+    opt = ('min_weight_fraction', 'target_angular_resolution_deg', 'fiber_detection_threshold')
     if not args.protocol_calibration:
         opt = opt + ('n_iso', 'lambda_aniso', 'lambda_iso', 'n_dirs') + _DICTIONARY_OPTS
     for k in opt:

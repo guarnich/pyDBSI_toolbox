@@ -60,6 +60,18 @@ FLAGS (bitmask, `uncertainty_flags`)
     8  AD of the crossing populations was imposed, not estimated: it is not a
        free parameter and its SE is NaN (reserved for the crossing-AD method
        under evaluation; never set in this release).
+   16  the residual is larger than noise explains: residual_over_sigma above
+       the 99.9% quantile of its chi-square null. The model does not describe
+       the voxel, or the local noise is above the global sigma (g-factor); either
+       way the SEs are optimistic by about that ratio.
+
+RESIDUAL / SIGMA (`residual_over_sigma`)
+----------------------------------------
+sqrt(RSS / (N - P)) / sigma_voxel, on the Rician-corrected signal, for the
+reported model (amplitude refitted). ~1 when the model describes the voxel and
+sigma is right. It is NOT fit_rmse / sigma: fit_rmse is taken against the RAW
+signal (see fit_quality), whose Rician floor alone would push the ratio above 1
+at high b, and it has no degrees-of-freedom correction.
 
 WHY THIS AND NOT A BOOTSTRAP
 ----------------------------
@@ -96,6 +108,7 @@ FLAG_RD_BOUND = 1
 FLAG_AD_BOUND = 2
 FLAG_ILL_CONDITIONED = 4
 FLAG_AD_IMPOSED = 8
+FLAG_RESIDUAL = 16
 
 # Condition number of the column-equilibrated Fisher matrix above which the
 # voxel is flagged. Equilibrated, cond ~ 1 / (1 - rho^2) for the worst pair of
@@ -103,6 +116,17 @@ FLAG_AD_IMPOSED = 8
 # description of the likelihood. Singular (SE = NaN) above 1e14.
 _LOG10_COND_FLAG = 6.0
 _LOG10_COND_SINGULAR = 14.0
+
+# Flag 16: residual_over_sigma above the 99.9% quantile of its null distribution,
+# sqrt(chi2_{N-P}(0.999) / (N-P)) (Wilson-Hilferty), so the threshold follows the
+# protocol: 1.22 for P3 (N 91) with one fiber. Measured on synthetic P3 data with
+# the correct model: median 1.00 / p99 1.15-1.24 at SNR 26-40; 1.07-1.12 / p99
+# 1.23-1.34 at SNR 15, where the Rician-corrected signal is no longer Gaussian.
+# Crossings (Stage A FF held fixed): median 1.16 at SNR 26, 1.36 at SNR 40 -- the
+# bias shows up as misfit. Fiber dispersion (sd 20 deg) and iso diffusivities off
+# the Stage D centroids move the median only to 1.01-1.06: the ratio does not see
+# every misfit at these SNRs.
+_RESID_FLAG_Z = 3.090
 
 # Diffusivities enter J in units of 1e-3 mm^2/s so the Fisher matrix is not
 # scaled by 1e6 between blocks (equilibration handles the rest).
@@ -133,7 +157,7 @@ def _quad(g, C):
 @njit(parallel=True, cache=True)
 def _uncertainty_kernel(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso,
                         sigma_raw, out, ad_bounds, rd_bounds, crossing_ad_fixed,
-                        se, dir_se, log10_cond, flags):
+                        resid_flag, se, dir_se, log10_cond, flags, resid_ratio):
     """Fisher SE for every fitted voxel. Writes se[..., ch] for SE_CHANNELS,
     dir_se[..., 0/1] (degrees), log10_cond and flags. See the module docstring."""
     n_voxels = coords.shape[0]
@@ -249,6 +273,38 @@ def _uncertainty_kernel(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso
         for j in range(n_iso):
             for i in range(N):
                 J[i, ib + j] = np.exp(-bvals[i] * iso_d[j])
+
+        # ── residual of the reported model, in units of the noise ────────
+        # sqrt(RSS / (N - P)) / sigma_voxel on the Rician-corrected signal, the
+        # reported model rescaled by its best overall amplitude (the fractions
+        # sum to 1, the measured S0 is noisy). ~1 when the model describes the
+        # voxel and sigma is right; above 1 the SEs are optimistic by about
+        # that factor (misfit, or local noise above the global sigma).
+        pred = np.zeros(N)
+        for k in range(n_fib):
+            for i in range(N):
+                pred[i] += w[k] * J[i, k * n_per]
+        for j in range(n_iso):
+            for i in range(N):
+                pred[i] += u[j] * J[i, ib + j]
+        num = 0.0
+        den = 0.0
+        for i in range(N):
+            num += pred[i] * sig[i] / s0
+            den += pred[i] * pred[i]
+        amp = num / den if den > 0.0 else 1.0
+        rss = 0.0
+        for i in range(N):
+            r = sig[i] / s0 - amp * pred[i]
+            rss += r * r
+        if N > P:
+            dof = N - P
+            rr = np.sqrt(rss / dof / sv2)
+            resid_ratio[x, y, z] = rr
+            h = 2.0 / (9.0 * dof)
+            q = (1.0 - h + resid_flag * np.sqrt(h)) ** 3   # chi2_dof quantile / dof
+            if rr > np.sqrt(q):
+                fl |= 16
 
         # ── Fisher, equilibrated, inverted ───────────────────────────────
         F = J.T @ J
@@ -397,6 +453,7 @@ def compute_uncertainty(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso
     dir_se = np.full(shp + (2,), np.nan, dtype=np.float64)
     lc = np.full(shp, np.nan, dtype=np.float64)
     flags = np.zeros(shp, dtype=np.uint8)
+    rr = np.full(shp, np.nan, dtype=np.float64)
     ad_b = np.array([_TENSOR_AD_FLOOR, _TENSOR_AD_CEIL, _STAGEC_AD_MIN, _STAGEC_AD_MAX])
     rd_b = np.array([_TENSOR_RD_FLOOR, _TENSOR_RD_CEIL, _STAGEC_RD_MIN, _STAGEC_RD_MAX])
     _uncertainty_kernel(np.ascontiguousarray(data_corr, dtype=np.float64),
@@ -404,9 +461,15 @@ def compute_uncertainty(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso
                         np.ascontiguousarray(bvecs, dtype=np.float64), float(b0_thr),
                         np.asarray(iso_d, np.float64), bool(use_3iso), float(sigma_raw),
                         np.ascontiguousarray(results, dtype=np.float64), ad_b, rd_b,
-                        bool(crossing_ad_fixed), se, dir_se, lc, flags)
+                        bool(crossing_ad_fixed), float(_RESID_FLAG_Z), se, dir_se, lc, flags, rr)
     return dict(se=se.astype(np.float32), dir_se_deg=dir_se.astype(np.float32),
-                log10_cond=lc.astype(np.float32), flags=flags)
+                log10_cond=lc.astype(np.float32), flags=flags,
+                residual_over_sigma=rr.astype(np.float32))
+
+
+def _q(v, p):
+    v = v[np.isfinite(v)]
+    return float(np.percentile(v, p)) if v.size else None
 
 
 def summarise_uncertainty(unc, results, mask, channel_names):
@@ -439,4 +502,7 @@ def summarise_uncertainty(unc, results, mask, channel_names):
                 flag_rd_bound_pct=share(FLAG_RD_BOUND),
                 flag_ad_bound_pct=share(FLAG_AD_BOUND),
                 flag_ill_conditioned_pct=share(FLAG_ILL_CONDITIONED),
+                flag_residual_above_noise_pct=share(FLAG_RESIDUAL),
+                residual_over_sigma_median=_q(unc['residual_over_sigma'][mask], 50),
+                residual_over_sigma_p95=_q(unc['residual_over_sigma'][mask], 95),
                 ill_conditioned_log10_cond=_LOG10_COND_FLAG)

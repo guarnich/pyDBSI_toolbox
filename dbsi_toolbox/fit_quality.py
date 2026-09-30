@@ -618,10 +618,14 @@ def format_run_report(report, saved_channels=None):
                 add(f"      {k:<30}{txt}")
             for k, label in (('flag_rd_bound_pct', 'RD on a bound'),
                              ('flag_ad_bound_pct', 'AD on a bound'),
-                             ('flag_ill_conditioned_pct', 'ill-conditioned Fisher')):
+                             ('flag_ill_conditioned_pct', 'ill-conditioned Fisher'),
+                             ('flag_residual_above_noise_pct', 'residual above noise')):
                 v = un.get(k)
                 if v is not None:
                     add(f"    {label:<32}{v:.1%} of voxels")
+            if un.get('residual_over_sigma_median') is not None:
+                add(f"    residual / sigma                median {un['residual_over_sigma_median']:.3f}  "
+                    f"p95 {un['residual_over_sigma_p95']:.3f}  (~1 = model and sigma adequate)")
             add(f"    (ill-conditioned: log10 condition > {un.get('ill_conditioned_log10_cond')};")
             add("     the SE is the Cramer-Rao bound at the estimate: it does NOT include bias)")
 

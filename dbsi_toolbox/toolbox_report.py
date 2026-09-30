@@ -252,6 +252,14 @@ Altri file:
         2  AD di una popolazione su un limite
         4  Fisher mal condizionata (vedi sopra); NaN se singolare
         8  AD dei crossing imposta, non stimata (SE = NaN)
+        16 residuo piu' grande di quanto il rumore spieghi (sopra il quantile
+           99.9% della chi-quadro): errori standard ottimistici di circa quel fattore
+  residual_over_sigma.nii.gz
+        sqrt(RSS / (N - P)) / sigma del voxel, sul segnale corretto per Rician, per
+        il modello riportato. ~1 se il modello descrive il voxel e sigma e' giusta;
+        sopra 1: il modello non basta, o il rumore locale e' piu' alto di sigma
+        globale (fattore g dell'imaging parallelo). Nei crossing sta sopra 1 per
+        costruzione: la FF di Stage A tenuta fissa non e' quella del miglior fit.
 
 Uso: per una regione di N voxel l'errore della media scende fino a SE/sqrt(N)
 (meno, con la correlazione spaziale). Voxel con flag 1, 2 o 4: l'errore e' una
@@ -294,6 +302,7 @@ def save_uncertainty_maps(model, output_dir, affine, saved_channels=None):
         _save(unc['dir_se_deg'][..., k].astype(np.float32), f'dir{k + 1}_angle_se_deg.nii.gz')
     _save(unc['log10_cond'].astype(np.float32), 'fisher_log10_condition.nii.gz')
     _save(unc['flags'].astype(np.uint8), 'uncertainty_flags.nii.gz')
+    _save(unc['residual_over_sigma'].astype(np.float32), 'residual_over_sigma.nii.gz')
     f = os.path.join(d, 'README.txt')
     with open(f, 'w', encoding='utf-8') as fh:
         fh.write(_UNC_README.format(ver=report.get('toolbox_version', ''),

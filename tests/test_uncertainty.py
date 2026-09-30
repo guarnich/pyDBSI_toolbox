@@ -17,6 +17,9 @@ COSA SI PROTEGGE.
   4. Copertura su mono-fibra sana a SNR 26 (P3-like): SE mediana / sd empirica
      fra 0.8 e 1.6 per FF, RD e FA, e verita' entro 1.96 SE in >= 90% dei voxel.
      (Misura completa: experiments/uncertainty/copertura.py.)
+  5. Residuo / sigma: ~1 col modello giusto (mediana fra 0.9 e 1.1, flag 16 su
+     meno del 3% dei voxel); nei crossing, dove la FF di Stage A resta fissa,
+     sopra quello della mono-fibra.
 
     python tests/test_uncertainty.py
 """
@@ -150,7 +153,8 @@ def test_fit_e_salvataggio():
     files = set(os.listdir(ud))
     attesi = {f'{ch:02d}_{NOMI[ch]}_se.nii.gz' for ch in U.SE_CHANNELS if NOMI[ch] in saved}
     attesi |= {'dir1_angle_se_deg.nii.gz', 'dir2_angle_se_deg.nii.gz',
-               'fisher_log10_condition.nii.gz', 'uncertainty_flags.nii.gz', 'README.txt'}
+               'fisher_log10_condition.nii.gz', 'uncertainty_flags.nii.gz', 'README.txt',
+               'residual_over_sigma.nii.gz'}
     print(f"  {len(files)} file in uncertainty_maps/ ({len(attesi)} attesi)")
     assert files == attesi, f'file diversi: mancano {attesi - files}, in piu\' {files - attesi}'
     for ch in U.SE_CHANNELS:
@@ -166,6 +170,9 @@ def test_fit_e_salvataggio():
         ok = (m.uncertainty_['flags'] & U.FLAG_ILL_CONDITIONED) == 0
         assert np.array_equal(np.isfinite(se) & ok, dove & ok), f'{nm}: dominio della SE sbagliato'
         assert np.all(se[np.isfinite(se)] >= 0), f'{nm}: SE negativa'
+    rr = m.uncertainty_['residual_over_sigma'][..., 0]
+    print(f"  residuo/sigma mediano: mono {np.nanmedian(rr[0]):.3f}, crossing {np.nanmedian(rr[1]):.3f}")
+    assert np.nanmedian(rr[1]) > np.nanmedian(rr[0]), 'il residuo dei crossing non supera quello della mono-fibra'
     rep = open(os.path.join(out, 'toolbox_report', 'run_report.txt')).read()
     assert 'Uncertainty maps' in rep and 'median standard error' in rep
     assert m.run_report_['uncertainty']['n_voxels'] == int(np.isfinite(m.uncertainty_['log10_cond']).sum())
@@ -206,6 +213,11 @@ def test_copertura_mono_fibra():
         print(f"  {NOMI[ch]:24s} SE/sd {rap:.2f}  copertura {cop:.2f}  (n {uno.sum()})")
         assert 0.8 <= rap <= 1.6, f'{NOMI[ch]}: SE/sd {rap:.2f} fuori da [0.8, 1.6]'
         assert cop >= 0.90, f'{NOMI[ch]}: copertura {cop:.2f} < 0.90'
+    rr = m.uncertainty_['residual_over_sigma'][uno]
+    f16 = np.mean((m.uncertainty_['flags'][uno] & U.FLAG_RESIDUAL) > 0)
+    print(f"  residuo/sigma mediano {np.median(rr):.3f}, flag 16 su {f16:.1%}")
+    assert 0.9 <= np.median(rr) <= 1.1, f'residuo/sigma {np.median(rr):.3f} col modello giusto'
+    assert f16 < 0.03, f'flag 16 su {f16:.1%} col modello giusto'
 
 
 if __name__ == '__main__':

@@ -1582,6 +1582,24 @@ def _solver_diagnostics(results, mask):
         val = _on(ch, bound)
         if val is not None:
             out[nome] = val
+
+    # The same floor, split by BRANCH (v1.6.1). rd_pop1_at_floor_pct mixes the
+    # single fibers with the dominant population of the crossings, and the two
+    # are different estimators with different failure modes: on real data ~15%
+    # of single fibers sit on the floor against ~49% of crossings, and the
+    # crossing share is an estimator bias (Stage A's crossing FF, biased low and
+    # held fixed -- see core/solvers.py, MRDS section), not tissue.
+    npop = results[..., _C_NPOP]
+    rd1 = results[..., _C_RD1]
+    rd2 = results[..., _C_RD2]
+    at = lambda v: np.abs(v - _TENSOR_RD_FLOOR) <= 1e-6 * _TENSOR_RD_FLOOR
+    mono = mask & (npop == 1) & np.isfinite(rd1)
+    cross = mask & (npop >= 2) & np.isfinite(rd1) & np.isfinite(rd2)
+    if mono.any():
+        out['rd_at_floor_single_fiber_pct'] = round(100.0 * float(np.mean(at(rd1[mono]))), 2)
+    if cross.any():
+        out['rd_at_floor_crossing_any_pop_pct'] = round(
+            100.0 * float(np.mean(at(rd1[cross]) | at(rd2[cross]))), 2)
     out.update(tensor_ad_floor=_TENSOR_AD_FLOOR, tensor_ad_ceil=_TENSOR_AD_CEIL,
                tensor_rd_floor=_TENSOR_RD_FLOOR, tensor_rd_ceil=_TENSOR_RD_CEIL)
     return out
@@ -1901,7 +1919,8 @@ class DBSI_Adaptive:
            run_sure_crosscheck=False, sure_crosscheck_n_probes=15,
            calibrate_concentration_gate=False,
            concentration_gate_percentile=_CONCENTRATION_GATE_PERCENTILE,
-           _calibration_only=False, _lambda_aniso_grid=None, _lambda_iso_grid=None):
+           _calibration_only=False, _lambda_aniso_grid=None, _lambda_iso_grid=None,
+           _rician_correction='clamp'):
         """
         Fit the v3 hybrid two-stage adaptive DBSI model (+ MRDS
         multi-fiber extension) to 4D diffusion MRI data.
@@ -2116,6 +2135,14 @@ class DBSI_Adaptive:
         corrected = np.where(valid_mask,
                              np.sqrt(np.maximum(masked_sq - noise_floor, 0.0)),
                              0.0).astype(np.float32)
+        if _rician_correction == 'signed':
+            # EXPERIMENTAL (inspection 2026-09-30): keep the sign instead of
+            # truncating at zero, so the noise stays symmetric around low values
+            # and the NNLS sees no pile-up at exactly 0.
+            _d = masked_sq - noise_floor
+            corrected = (np.sign(_d) * np.sqrt(np.abs(_d))).astype(np.float32)
+        elif _rician_correction != 'clamp':
+            raise ValueError(f"_rician_correction: 'clamp' or 'signed', not {_rician_correction!r}")
         data_corr[xs, ys, zs] = corrected
 
         # ── Quante misure la correzione AZZERA, e in quanti voxel ───────────
@@ -2953,16 +2980,26 @@ class DBSI_Adaptive:
         no second fiber, which is most of the brain -- so callers must check
         per-voxel rather than assume a channel is entirely present or absent.
 
-        LAYOUT (27 channels)::
+        LAYOUT (28 channels)::
 
             0      fiber_fraction              TOTAL anisotropic fraction
             1-4    restricted/hindered/water/nonrestricted fractions
-            5      mean_iso_adc
+            5      mean_iso_adc                spectral mean, see below
             6      n_fiber_populations         three-state, see below
             7-13   population 1: fraction, AD, RD, FA, dir(x,y,z)
             14-20  population 2: fraction, AD, RD, FA, dir(x,y,z)
             21-23  FF-weighted AD, RD, FA over the populations present
             24-26  diagnostics: dominant_basin_concentration, fit_r2, fit_rmse
+            27     nnls_iterations             Stage A solver iterations (v1.3.3)
+
+        `mean_iso_adc` is the weighted mean of an over-complete isotropic
+        SPECTRUM, and its source depends on the branch: Stage C's spectrum
+        (raw signal) on single fibers, Stage A's everywhere else. Stage D, which
+        sets every reported fraction, does not touch it. Measured (P3, SNR 26,
+        same isotropic composition): true 1.79e-3 -> 1.76 single fiber, 1.61
+        crossing, 2.06 no fiber; sd 0.2-0.45e-3. Not coherent with the reported
+        fractions and not comparable across branches: a diagnostic, not a
+        tissue metric (inspection 2026-09-30).
 
         There is no population 3: the toolbox resolves at most TWO fiber
         populations per voxel (`MAX_FIBER_POPULATIONS`), which is the ceiling

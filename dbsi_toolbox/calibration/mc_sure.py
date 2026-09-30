@@ -183,6 +183,18 @@ def _mc_sure_risk(A, y_voxels, lam, sigma, n_probes=15, eps=None, seed=0):
     return total_risk / len(y_voxels)
 
 
+def _within_flat_tolerance(candidate_risk, min_risk, flat_tolerance):
+    """Is the candidate within `flat_tolerance` of the neighbourhood minimum?
+
+    Measured on |min|, not as `candidate <= min * (1 + tol)`: a SURE estimate
+    can be NEGATIVE (it is -N*sigma^2 + residual + 2*sigma^2*div, unbiased for a
+    non-negative risk but not itself bounded), and with a negative minimum the
+    old form required the candidate to beat the minimum by 15% -- even the
+    minimum itself "disagreed" with itself.
+    """
+    return bool(candidate_risk - min_risk <= flat_tolerance * abs(min_risk))
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # LAMBDA_ISO CROSS-CHECK
 # ─────────────────────────────────────────────────────────────────────────────
@@ -206,8 +218,15 @@ def crosscheck_lambda_iso_sure(bvals, iso_grid, y_voxels, sigma, lambda_candidat
         Isotropic ADC grid — MUST match the grid the candidate lambda
         was actually selected/will be used for.
     y_voxels : array (n_voxels, N)
-        Sampled normalised (S/S0) real voxel signals (e.g. from
-        `sample_calibration_voxels`).
+        What the ISOTROPIC block must explain: the FIBER-SUBTRACTED residual
+        (`calibration.data_driven.fiber_subtracted_residual`), the same signal
+        lambda_iso is selected on. NOT the raw voxel signal. On fibre-containing
+        voxels the iso-only dictionary cannot represent the fibre, and that
+        mismatch dominates the risk: measured on a P3-like phantom, the risk on
+        the raw signal varied by 1.6% across a 16x lambda range (so the 15%
+        tolerance could never report a disagreement) against 73% on the
+        residual. `DBSI_Adaptive.fit(run_sure_crosscheck=True)` passes the
+        residual since v1.6.1; before, it passed the raw signal.
     sigma : float
         Noise standard deviation in normalised units.
     lambda_candidate : float
@@ -268,7 +287,7 @@ def crosscheck_lambda_iso_sure(bvals, iso_grid, y_voxels, sigma, lambda_candidat
     candidate_risk = risks[n_neighbors]
     min_risk = float(np.min(risks))
     best_neighbor_lambda = float(neighbors[np.argmin(risks)])
-    agrees = candidate_risk <= min_risk * (1.0 + flat_tolerance)
+    agrees = _within_flat_tolerance(candidate_risk, min_risk, flat_tolerance)
 
     if verbose:
         for lam, risk in zip(neighbors, risks):
@@ -316,6 +335,10 @@ def crosscheck_n_iso_sure(bvals, y_voxels, sigma, n_iso_candidate,
     ----------
     bvals : array-like (N,)
     y_voxels : array (n_voxels, N)
+        The FIBER-SUBTRACTED residual, as for `crosscheck_lambda_iso_sure`
+        (computed once on a fixed rich grid, so every candidate is scored on
+        the same residual). With the raw signal the risk varied by 0.6% across
+        n_iso 4-8 on a P3-like phantom: no candidate could ever disagree.
     sigma : float
     n_iso_candidate : int
         The n_iso to cross-check.
@@ -370,7 +393,7 @@ def crosscheck_n_iso_sure(bvals, y_voxels, sigma, n_iso_candidate,
     candidate_risk = risks[candidate_idx]
     min_risk = float(np.min(risks))
     best_neighbor_n_iso = n_iso_values[int(np.argmin(risks))]
-    agrees = candidate_risk <= min_risk * (1.0 + flat_tolerance)
+    agrees = _within_flat_tolerance(candidate_risk, min_risk, flat_tolerance)
 
     if verbose:
         if agrees:

@@ -30,50 +30,22 @@ If they are not wanted for synthetic work, this whole module can go.
 """
 
 import numpy as np
-from ..core.basis import (
-    build_design_matrix_exhaustive,
-    generate_exhaustive_diffusivity_pairs,
-    generate_fibonacci_sphere_hemisphere,
-    generate_isotropic_grid,
-)
-from ..core.solvers import (
-    nnls_coordinate_descent,
-    compute_regularization_matrix,
-    select_dominant_directions,
-    build_direction_neighbor_graph,
-    estimate_AD_RD_conditioned,
-)
 
-# Neighbourhood size for select_dominant_directions' local-maxima
-# criterion, matching DBSI_Adaptive's default (see
-# model_Niso_adaptive_ff_thr._DEFAULT_DIRECTION_PEAK_K). Not imported
-# from there to avoid a circular import (that module imports this one).
-_DEFAULT_DIRECTION_PEAK_K = 6
+# Inspection 2026-09-30: eight imports (among them the legacy LINEAR iso-grid
+# constructor, `generate_isotropic_grid`) and the grid-search constants
+# (_DEFAULT_AD/RD/N_*, anisotropy ratio, n_dirs, min weight fraction,
+# direction peak k, THRESH_RESTRICTED) were left behind by the removed Monte
+# Carlo calibration; none was used. Removed. The `weight` / `loss_alpha` fields
+# of the scenarios below scored that removed grid search: kept, as part of the
+# referenced scenario table, but nothing reads them.
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONSTANTS
 # ─────────────────────────────────────────────────────────────────────────────
 
-THRESH_RESTRICTED = 0.3e-3
-
-_DEFAULT_AD_MIN = 0.5e-3
-_DEFAULT_AD_MAX = 2.2e-3
-_DEFAULT_RD_MIN = 0.05e-3
-_DEFAULT_RD_MAX = 1.2e-3
-_DEFAULT_N_AD = 3
-_DEFAULT_N_RD = 3
-_DEFAULT_ANISOTROPY_RATIO = 2.0  # raised 1.15 -> 2.0 (2026-07-27); see
-# model_Niso_adaptive_ff_thr._STAGE_A_DEFAULT_ANISOTROPY_RATIO for the sweep
-# evidence (removes the near-isotropic AD/RD ratio-1.83 column that leaks).
-_DEFAULT_N_DIRS = 30
-_DEFAULT_MIN_WEIGHT_FRACTION = 0.05
-
 _D_AX_NOMINAL = 1.60e-3
 _D_RAD_NOMINAL = 0.40e-3
-_D_AX_STD = 0.10e-3
-_D_RAD_STD = 0.07e-3
-
 _D_CELL = 0.10e-3
 _D_FREE = 3.05e-3
 
@@ -198,9 +170,6 @@ _SCENARIOS = {
 
 }
 
-_TOTAL_WEIGHT = sum(sc['weight'] for sc in _SCENARIOS.values())
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # SIGNAL GENERATION (unchanged from v1/v2)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -247,9 +216,13 @@ def _generate_signal(bvals, bvecs, snr, fiber_dir, f_fiber, f_cell, f_hin, f_fre
     return np.sqrt((s + n1)**2 + n2**2)
 
 
-def generate_synthetic_signal(bvals, bvecs, snr, f_fiber=0.5, f_cell=0.3):
-    """Legacy single-signal generator. Kept for backward compatibility."""
-    rng = np.random.default_rng()
+def generate_synthetic_signal(bvals, bvecs, snr, f_fiber=0.5, f_cell=0.3, seed=None):
+    """Legacy single-signal generator. Kept for backward compatibility.
+
+    `seed` (added 2026-09-30): without it every call draws a new direction and
+    new noise, so no result built on it could be reproduced. None keeps the old
+    behaviour."""
+    rng = np.random.default_rng(seed)
     v = rng.standard_normal(3)
     v /= np.linalg.norm(v)
     if v[2] < 0:
@@ -258,12 +231,3 @@ def generate_synthetic_signal(bvals, bvecs, snr, f_fiber=0.5, f_cell=0.3):
     return _generate_signal(bvals, bvecs, snr, v, f_fiber, f_cell, f_hin, 0.0,
                             d_hin=0.80e-3, d_ax=_D_AX_NOMINAL,
                             d_rad=_D_RAD_NOMINAL, rng=rng)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SHARED PER-SCENARIO EVALUATION (used by both grid search and single-pair cross-check)
-# ─────────────────────────────────────────────────────────────────────────────
-
-# ─────────────────────────────────────────────────────────────────────────────
-# HYPERPARAMETER OPTIMIZATION — v3: end-to-end Stage A + Stage B loss
-# ─────────────────────────────────────────────────────────────────────────────

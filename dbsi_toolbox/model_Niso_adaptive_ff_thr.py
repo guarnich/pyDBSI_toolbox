@@ -2315,9 +2315,9 @@ class DBSI_Adaptive:
             f"NRF (ADC > {THRESH_RES*1e3:.1f}x10^-3 mm^2/s)"
         )
         print(f"   Compartments: {_thresh_str}")
-        print(f"   NOTE: isotropic/fiber FRACTIONS above are Stage A's raw NNLS "
-              f"output regardless of the fiber-population count -- the MRDS extension "
-              f"does not revise them (see module docstring).")
+        print(f"   NOTE: fractions come from Stage A, then are re-solved by Stage C "
+              f"(single fibers) and Stage D (every voxel; crossings keep Stage A's "
+              f"FF, which is biased low -- see core/solvers.py, MRDS section).")
 
         # ── Monte Carlo SURE cross-check (optional) ─────────────────────────
         if run_sure_crosscheck:
@@ -2329,17 +2329,26 @@ class DBSI_Adaptive:
                 print(f"   Sampled {len(y_cal)} calibration voxels for SURE cross-check "
                       f"(sigma_normalised={sigma_cal:.5f})")
 
+            # Scored on what the iso block must explain -- the fibre-subtracted
+            # residual, the signal lambda_iso is SELECTED on -- not the raw
+            # signal. Until v1.6.0 the raw signal went in: the fibre mismatch
+            # dominated the risk (1.6% variation over a 16x lambda range on a
+            # P3-like phantom) and the check could not disagree. Same defect the
+            # n_iso bootstrap had until v1.3.6.
+            y_sure, _ = fiber_subtracted_residual(
+                bvals, bvecs, fiber_dirs, diff_pairs, iso_grid, y_cal, sigma_cal)
             _sure_lambda_agrees, _sure_lambda_report = crosscheck_lambda_iso_sure(
-                bvals, iso_grid, y_cal, sigma_cal, self.lambda_iso,
+                bvals, iso_grid, y_sure, sigma_cal, self.lambda_iso,
                 n_probes=sure_crosscheck_n_probes, verbose=True,
             )
             _sure_n_iso_agrees, _sure_n_iso_report = crosscheck_n_iso_sure(
-                bvals, y_cal, sigma_cal, self.n_iso,
+                bvals, y_sure, sigma_cal, self.n_iso,
                 d_min=max(self.iso_range[0], 0.1e-3),
                 d_max=max(self.iso_range[1], _ISO_GRID_D_MAX_EXTENDED),
                 n_probes=sure_crosscheck_n_probes, verbose=True,
             )
             self.sure_crosscheck_report_ = dict(
+                signal='fiber_subtracted_residual',
                 lambda_iso=_sure_lambda_report, n_iso=_sure_n_iso_report,
                 lambda_iso_agrees=_sure_lambda_agrees, n_iso_agrees=_sure_n_iso_agrees,
             )

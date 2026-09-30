@@ -45,11 +45,21 @@ ad_linear/rd_linear. See `DBSI_Adaptive.output_map_names`.
 """
 
 import argparse
+import inspect
 import os
 
 from dbsi_toolbox import DBSI_Adaptive
 from dbsi_toolbox import load_data
 from dbsi_toolbox import save_output_maps
+
+# Defaults are READ from the constructor, never restated here. Until v1.6.1 this
+# script passed its own copies (n_ad=3, n_rd=3, ratio 2.0, 0.05, 1.0): equal to
+# the constructor's today, but a second source of truth that would have kept the
+# CLI on the old values, silently, the day a default changed. Options left at
+# None are simply not passed.
+_D = {k: v.default for k, v in inspect.signature(DBSI_Adaptive.__init__).parameters.items()}
+_DICTIONARY_OPTS = ('n_ad', 'n_rd', 'anisotropy_ratio')
+
 
 def main():
     parser = argparse.ArgumentParser(description="DBSI Adaptive Pipeline (v3, hybrid two-stage)")
@@ -75,16 +85,16 @@ def main():
                         help="Stage A regularization strength for the isotropic spectrum block.")
     parser.add_argument("--n-dirs", type=int, default=None,
                         help="Number of hemisphere directions for Stage A. Default: protocol-derived.")
-    parser.add_argument("--n-ad", type=int, default=3,
-                        help="Number of AD grid steps for Stage A's detection dictionary. Default: 3 (deliberately coarse).")
-    parser.add_argument("--n-rd", type=int, default=3,
-                        help="Number of RD grid steps for Stage A's detection dictionary. Default: 3 (deliberately coarse).")
-    parser.add_argument("--anisotropy-ratio", type=float, dest="anisotropy_ratio", default=2.0,
-                        help="Minimum AD/RD ratio for admissible Stage A pairs. Default: 2.0 "
+    parser.add_argument("--n-ad", type=int, default=None,
+                        help=f"Number of AD grid steps for Stage A's detection dictionary. Default: {_D['n_ad']} (deliberately coarse).")
+    parser.add_argument("--n-rd", type=int, default=None,
+                        help=f"Number of RD grid steps for Stage A's detection dictionary. Default: {_D['n_rd']} (deliberately coarse).")
+    parser.add_argument("--anisotropy-ratio", type=float, dest="anisotropy_ratio", default=None,
+                        help=f"Minimum AD/RD ratio for admissible Stage A pairs. Default: {_D['anisotropy_ratio']} "
                              "(raised from 1.15: drops the near-isotropic ratio-1.83 grid column "
                              "that leaks isotropic signal into fiber_fraction; safe band [2.0, 2.16]).")
-    parser.add_argument("--min-weight-fraction", type=float, dest="min_weight_fraction", default=0.05,
-                        help="Stage A direction-selection threshold. Default: 0.05.")
+    parser.add_argument("--min-weight-fraction", type=float, dest="min_weight_fraction", default=None,
+                        help=f"Stage A direction-selection threshold. Default: {_D['min_weight_fraction']}.")
     parser.add_argument("--disable-iso-resolve", dest="disable_iso_resolve", action="store_true",
                         help="Disable the Stage D final constrained iso fraction re-solve. It is "
                              "ON by default: for every voxel it re-estimates the compartment "
@@ -134,15 +144,20 @@ def main():
                              "core.solvers module docstring 'MRDS-LITE'. Disable only for "
                              "reproducing pre-refinement results or debugging.")
     parser.add_argument("--target-angular-resolution", type=float, dest="target_angular_resolution_deg",
-                        default=1.0,
+                        default=None,
                         help="Desired final angular precision (degrees) for direction refinement. "
-                             "Default: 1.0. Ignored if --disable-direction-refinement is set.")
+                             f"Default: {_D['target_angular_resolution_deg']}. Ignored if "
+                             "--disable-direction-refinement is set.")
     args = parser.parse_args()
     if args.protocol_calibration:
-        _fissati = [k for k in ('n_iso', 'lambda_aniso', 'lambda_iso', 'n_dirs')
+        _fissati = [k for k in ('n_iso', 'lambda_aniso', 'lambda_iso', 'n_dirs') + _DICTIONARY_OPTS
                     if getattr(args, k) is not None]
         if _fissati:
             parser.error(f"--protocol-calibration fissa gia {_fissati}: non passarli")
+    elif args.skip_calibration and (args.lambda_aniso is None or args.lambda_iso is None):
+        print("WARNING: --skip-calibration without --lambda-aniso AND --lambda-iso (or "
+              "--protocol-calibration): the missing lambda falls back to a fixed built-in "
+              "value that was not derived for these data.")
     os.makedirs(args.out, exist_ok=True)
 
     print("\nDBSI PIPELINE - Adaptive Version (v3, hybrid two-stage)\n")
@@ -151,35 +166,12 @@ def main():
         args.dwi, args.bval, args.bvec, args.mask, verbose=True
     )
 
+    kw = model_kwargs(args)
     if args.protocol_calibration:
-        model = DBSI_Adaptive.from_calibration(
-            args.protocol_calibration,
-            min_weight_fraction=args.min_weight_fraction,
-            force_n_iso=args.force_n_iso,
-            enable_direction_refinement=not args.disable_direction_refinement,
-            target_angular_resolution_deg=args.target_angular_resolution_deg,
-            lambda_aniso_conc_mod=not args.disable_conc_modulation,
-            stagec_refine=not args.disable_stagec,
-            iso_resolve=not args.disable_iso_resolve,
-        )
+        model = DBSI_Adaptive.from_calibration(args.protocol_calibration, **kw)
         print(f"Protocol calibration: {args.protocol_calibration}")
     else:
-        model = DBSI_Adaptive(
-            n_iso=args.n_iso,
-            lambda_aniso=args.lambda_aniso,
-            lambda_iso=args.lambda_iso,
-            n_dirs=args.n_dirs,
-            n_ad=args.n_ad,
-            n_rd=args.n_rd,
-            anisotropy_ratio=args.anisotropy_ratio,
-            min_weight_fraction=args.min_weight_fraction,
-            force_n_iso=args.force_n_iso,
-            enable_direction_refinement=not args.disable_direction_refinement,
-            target_angular_resolution_deg=args.target_angular_resolution_deg,
-            lambda_aniso_conc_mod=not args.disable_conc_modulation,
-            stagec_refine=not args.disable_stagec,
-            iso_resolve=not args.disable_iso_resolve,
-        )
+        model = DBSI_Adaptive(**kw)
 
     results, model_mode = model.fit(
         data, bvals, bvecs, mask,
@@ -201,6 +193,23 @@ def main():
           f"or exact duplicates): {', '.join(skipped)}")
 
     print("\nDone!")
+
+def model_kwargs(args):
+    """Constructor kwargs from the parsed CLI: only what the user set, plus the
+    on/off switches. Anything left out takes the constructor's own default."""
+    kw = dict(force_n_iso=args.force_n_iso,
+              enable_direction_refinement=not args.disable_direction_refinement,
+              lambda_aniso_conc_mod=not args.disable_conc_modulation,
+              stagec_refine=not args.disable_stagec,
+              iso_resolve=not args.disable_iso_resolve)
+    opt = ('min_weight_fraction', 'target_angular_resolution_deg')
+    if not args.protocol_calibration:
+        opt = opt + ('n_iso', 'lambda_aniso', 'lambda_iso', 'n_dirs') + _DICTIONARY_OPTS
+    for k in opt:
+        if getattr(args, k) is not None:
+            kw[k] = getattr(args, k)
+    return kw
+
 
 if __name__ == "__main__":
     main()

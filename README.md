@@ -167,10 +167,17 @@ Optional overrides for Stage A's detection dictionary (default: coarse
 
 ```bash
 python -m scripts.run_dbsi \
-    --dwi data.nii.gz --bval data.bval --bvec data.bvec --out results/ \
+    --dwi data.nii.gz --bval data.bval --bvec data.bvec --mask mask.nii.gz --out results/ \
     --n-dirs 30 --n-ad 3 --n-rd 3 --anisotropy-ratio 2.0 \
     --lambda-aniso 0.6 --lambda-iso 0.005 --min-weight-fraction 0.05
 ```
+
+Options you do not pass take the constructor's own default (the CLI does not
+keep copies of them). **Reproducing a production run:** the CLI with the same
+calibration — `--protocol-calibration <json>`, or `--lambda-aniso`,
+`--lambda-iso` and `--n-iso` — gives maps identical bit for bit to
+`DBSI_Adaptive(...).fit(...)` in Python; `tests/test_cli_matches_production.py`
+checks it on every channel.
 
 ## Algorithm Details
 

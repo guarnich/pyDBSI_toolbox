@@ -84,7 +84,7 @@ between the two is measured instead of assumed.
 """
 
 import numpy as np
-from numba import njit, prange
+from numba import njit
 
 from .model_Niso_adaptive_ff_thr import (
     _C_FF, _C_RF, _C_HF, _C_WF, _C_NRF, _C_NPOP,
@@ -154,7 +154,7 @@ def _quad(g, C):
     return np.sqrt(max(g @ C @ g, 0.0))
 
 
-@njit(parallel=True, cache=True)
+@njit(cache=True)
 def _uncertainty_kernel(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso,
                         sigma_raw, out, ad_bounds, rd_bounds, crossing_ad_fixed,
                         resid_flag, se, dir_se, log10_cond, flags, resid_ratio):
@@ -163,7 +163,10 @@ def _uncertainty_kernel(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso
     n_voxels = coords.shape[0]
     n_iso = iso_d.shape[0]
     N = bvals.shape[0]
-    for idx in prange(n_voxels):
+    # Serial, like _fiber_detection_pass since v1.6.3: an exception state from a
+    # numba parallel region stopped the fit on the workstation where the same
+    # arithmetic in pure Python raised nothing.
+    for idx in range(n_voxels):
         x, y, z = coords[idx]
         sig = data_corr[x, y, z]
         s0 = 0.0

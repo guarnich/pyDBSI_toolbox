@@ -1401,7 +1401,7 @@ def _iso_resolve_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso, 
             out[x, y, z, _C_WF] = wat
 
 
-@njit(parallel=True, cache=True, fastmath=True)
+@njit(cache=True, fastmath=True)
 def _fiber_detection_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso,
                           sigma_raw, threshold, out, stat_out):
     """
@@ -1439,7 +1439,14 @@ def _fiber_detection_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3i
         for i in range(N):
             A_iso[i, j] = np.exp(-bvals[i] * iso_d[j])
     AtA_iso = A_iso.T @ A_iso
-    for idx in prange(n_voxels):
+    # SERIAL since v1.6.3. On the workstation (Linux) the parallel version stopped
+    # the fit with ZeroDivisionError -> SystemError ("returned a result with an
+    # error set"), while the same pass in pure Python on the same data found no
+    # zero divisor at all (2026-10-01): an exception state from the parallel
+    # region, not a bug in the arithmetic. Serial it costs ~0.15 s per 6000
+    # fiber voxels (~4 s on a whole brain), and any real exception surfaces with
+    # its own message.
+    for idx in range(n_voxels):
         x, y, z = coords[idx]
         npop = out[x, y, z, _C_NPOP]
         if np.isnan(npop) or npop < 1 or np.isnan(out[x, y, z, _C_AD1]):

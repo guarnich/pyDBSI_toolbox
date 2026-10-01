@@ -575,6 +575,11 @@ _ISO_RESOLVE_D_3ISO = (0.15e-3, 1.0e-3, 3.0e-3)   # RF, HF, WF centroids
 # measurement. 0.03 on P3's 91 measurements was the balanced value in
 # experiments/crossing_asymmetry/ff_corretta.py (SNR 26).
 _CROSSING_FF_RIDGE_PER_MEAS = 0.03 / 91
+# Default rule since 2026-10-01: ridge = KAPPA * (sigma / S0_voxel)^2. The fine scan
+# (scala_ridge_fine.py) found the ridge that centres healthy crossing FF at ~0.1
+# total at SNR 26 and ~0.2-0.3 at SNR 15 on P3, HCP-like and a 2-shell protocol:
+# constant across protocols, proportional to sigma^2 -- kappa ~45-90.
+_CROSSING_FF_RIDGE_KAPPA = 65.0
 _ISO_RESOLVE_D_2ISO = (0.15e-3, 1.5e-3)            # RF, NRF centroids (single-shell)
 
 # Monte-Carlo null calibration of the concentration gate (see
@@ -753,7 +758,7 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         stagec_ad_grid, stagec_rd_grid, stagec_aniso_ratio,
                         data_raw, stagec_iso_grid, stagec_dir_refine,
                         mrds_mode, crossing_ad_fixed, crossing_ad_map,
-                        crossing_ff_ridge):
+                        crossing_ff_ridge, crossing_ff_kappa, sigma_raw_k):
     """
     v3 parallel fitting kernel — two-compartment isotropic model (2-ISO).
 
@@ -1015,9 +1020,14 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                 # penalised FF and iso signal; see core.solvers.crossing_ff_resolve.
                 if mrds_mode == 10 and f_fib > 1e-10:
                     iso_sig10 = np.empty(len(bvals))
+                    # kappa > 0: ridge = kappa * (sigma / S0_voxel)^2, the noise
+                    # variance of THIS voxel's normalised signal (ridge = sigma^2 /
+                    # tau^2: a fixed prior scale on the weights); else a fixed ridge.
+                    ridge10 = (crossing_ff_kappa * (sigma_raw_k / s0) ** 2
+                               if crossing_ff_kappa > 0.0 else crossing_ff_ridge)
                     ff10 = crossing_ff_resolve(sig_norm, bvals, bvecs, fiber_dirs,
                                                directions, n_pop, diff_pairs, iso_grid,
-                                               crossing_ff_ridge, iso_sig10)
+                                               ridge10, iso_sig10)
                     if not np.isnan(ff10) and ff10 > 1e-6:
                         for k in range(n_pop):
                             fractions[k] = fractions[k] / f_fib * ff10
@@ -1167,7 +1177,7 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         stagec_ad_grid, stagec_rd_grid, stagec_aniso_ratio,
                         data_raw, stagec_iso_grid, stagec_dir_refine,
                         mrds_mode, crossing_ad_fixed, crossing_ad_map,
-                        crossing_ff_ridge):
+                        crossing_ff_ridge, crossing_ff_kappa, sigma_raw_k):
     """v3 parallel fitting kernel — three-compartment isotropic model
     (3-ISO). Same Stage A / Stage B (+ MRDS multi-fiber) structure as
     `_fit_voxels_2iso_v3`; see that kernel's docstring for the full
@@ -1422,9 +1432,14 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                 # penalised FF and iso signal; see core.solvers.crossing_ff_resolve.
                 if mrds_mode == 10 and f_fib > 1e-10:
                     iso_sig10 = np.empty(len(bvals))
+                    # kappa > 0: ridge = kappa * (sigma / S0_voxel)^2, the noise
+                    # variance of THIS voxel's normalised signal (ridge = sigma^2 /
+                    # tau^2: a fixed prior scale on the weights); else a fixed ridge.
+                    ridge10 = (crossing_ff_kappa * (sigma_raw_k / s0) ** 2
+                               if crossing_ff_kappa > 0.0 else crossing_ff_ridge)
                     ff10 = crossing_ff_resolve(sig_norm, bvals, bvecs, fiber_dirs,
                                                directions, n_pop, diff_pairs, iso_grid,
-                                               crossing_ff_ridge, iso_sig10)
+                                               ridge10, iso_sig10)
                     if not np.isnan(ff10) and ff10 > 1e-6:
                         for k in range(n_pop):
                             fractions[k] = fractions[k] / f_fib * ff10
@@ -2230,7 +2245,8 @@ class DBSI_Adaptive:
            concentration_gate_percentile=_CONCENTRATION_GATE_PERCENTILE,
            _calibration_only=False, _lambda_aniso_grid=None, _lambda_iso_grid=None,
            _mrds_mode=0, _rician_correction='clamp', _crossing_ad_map=None,
-            _crossing_ff_ridge_per_meas=_CROSSING_FF_RIDGE_PER_MEAS):
+            _crossing_ff_ridge_per_meas=None,
+            _crossing_ff_ridge_kappa=_CROSSING_FF_RIDGE_KAPPA):
         """
         Fit the v3 hybrid two-stage adaptive DBSI model (+ MRDS
         multi-fiber extension) to 4D diffusion MRI data.
@@ -2969,7 +2985,14 @@ class DBSI_Adaptive:
         # mode 10: ridge of the crossing FF re-solve, per measurement (the Gram
         # matrix grows with N, so a per-measurement ridge is what carries across
         # protocols -- to be verified, see experiments/crossing_asymmetry).
-        self.crossing_ff_ridge_ = float(_crossing_ff_ridge_per_meas) * len(bvals)
+        # Two rules: a fixed ridge per measurement (x N), if given; otherwise the
+        # noise-scaled per-voxel ridge kappa * (sigma / S0)^2 (default).
+        if _crossing_ff_ridge_per_meas is not None:
+            self.crossing_ff_ridge_ = float(_crossing_ff_ridge_per_meas) * len(bvals)
+            self.crossing_ff_kappa_ = 0.0
+        else:
+            self.crossing_ff_ridge_ = 0.0
+            self.crossing_ff_kappa_ = float(_crossing_ff_ridge_kappa)
 
         def _run_kernel(mode_k, ad_fixed_k, ad_map_k=_no_map):
           with tqdm(total=n_voxels, desc="   Progress", unit="vox") as pbar:
@@ -2992,7 +3015,8 @@ class DBSI_Adaptive:
                     stagec_ad_grid, stagec_rd_grid, float(_STAGEC_ANISO_RATIO),
                     data, stagec_iso_grid, bool(self.stagec_dir_refine),
                     int(mode_k), float(ad_fixed_k), ad_map_k,
-                    float(self.crossing_ff_ridge_)
+                    float(self.crossing_ff_ridge_), float(self.crossing_ff_kappa_),
+                    float(sigma)
                 )
                 pbar.update(end - start)
 

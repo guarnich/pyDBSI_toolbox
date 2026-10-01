@@ -174,9 +174,11 @@ def _uncertainty_kernel(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso
                 cnt += 1
         if cnt > 0:
             s0 /= cnt
-        if s0 < 1e-6 or np.isnan(out[x, y, z, _C_RF]):
+        if not (s0 >= 1e-6) or not np.isfinite(s0) or np.isnan(out[x, y, z, _C_RF]):
             continue
         sv2 = (sigma_raw / s0) ** 2
+        if not (sv2 > 0.0):     # see the v1.6.2 fix in _fiber_detection_pass
+            continue
 
         # ── the reported estimate ────────────────────────────────────────
         npop = out[x, y, z, _C_NPOP]

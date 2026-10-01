@@ -579,7 +579,12 @@ _CROSSING_FF_RIDGE_PER_MEAS = 0.03 / 91
 # (scala_ridge_fine.py) found the ridge that centres healthy crossing FF at ~0.1
 # total at SNR 26 and ~0.2-0.3 at SNR 15 on P3, HCP-like and a 2-shell protocol:
 # constant across protocols, proportional to sigma^2 -- kappa ~45-90.
-_CROSSING_FF_RIDGE_KAPPA = 65.0
+# scala_kappa.py confirmed it: kappa 65 centres healthy crossing FF on all three
+# protocols at SNR 26 AND 15 (bias -0.005..+0.011). But the demyelination
+# contrast falls with kappa at SNR 15 (P3: 0.20 / 0.15 / 0.13 for kappa 30 / 65 /
+# 100), so the default is 30: healthy FF +0.04..+0.06 (production -0.11..-0.17),
+# and the best worst-case over protocols at both SNRs.
+_CROSSING_FF_RIDGE_KAPPA = 30.0
 _ISO_RESOLVE_D_2ISO = (0.15e-3, 1.5e-3)            # RF, NRF centroids (single-shell)
 
 # Monte-Carlo null calibration of the concentration gate (see

@@ -1453,7 +1453,7 @@ def _fiber_detection_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3i
                 cnt += 1
         if cnt > 0:
             s0 /= cnt
-        if s0 < 1e-6:
+        if not (s0 >= 1e-6) or not np.isfinite(s0):
             continue
         yv = np.empty(N)
         for i in range(N):
@@ -1478,6 +1478,8 @@ def _fiber_detection_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3i
         r_f = yv - A @ w_f
         r_i = yv - A_iso @ w_i
         sig2 = (sigma_raw / s0) ** 2
+        if not (sig2 > 0.0):      # S0 infinito o sigma nullo: statistica non definita
+            continue
         stat = (np.sum(r_i * r_i) - np.sum(r_f * r_f)) / sig2
         stat_out[x, y, z] = stat
         if threshold > 0.0 and stat < threshold:
@@ -1848,6 +1850,7 @@ class DBSI_Adaptive:
         self.rician_clamp_ = None
         self.fiber_detection_stat_ = None
         self.fiber_detection_ = None
+        self.nonfinite_voxels_excluded_ = None
         self.lambda_edges_ = {}
         self.hemisphere_spacing_deg_ = None
         self.cone_refinement_schedule_ = None
@@ -1969,6 +1972,7 @@ class DBSI_Adaptive:
         self.rician_clamp_ = None
         self.fiber_detection_stat_ = None
         self.fiber_detection_ = None
+        self.nonfinite_voxels_excluded_ = None
         self.dictionary_ = None
         self.calibration_curves_ = None
 
@@ -1982,6 +1986,25 @@ class DBSI_Adaptive:
         norms = np.linalg.norm(bvecs, axis=1, keepdims=True)
         norms[norms == 0] = 1.0
         bvecs = bvecs / norms
+
+        # ── Voxel con valori non finiti: fuori dalla maschera (v1.6.2) ─────────
+        # Un NaN o un inf nel segnale (tipico ai bordi dopo una correzione di bias
+        # N4 con campo ~0) non si propaga come NaN: la NNLS a discesa coordinata
+        # lo trasforma in pesi qualsiasi, e un S0 infinito rende (sigma/S0)^2 = 0 nel
+        # test di rilevamento. Il 2026-10-01 il test si e' fermato su un
+        # ZeroDivisionError sui dati veri (notebook 09); la causa esatta su quei dati
+        # non e' confermata, ma un voxel non finito non ha comunque un fit sensato.
+        # Si escludono qui (valgono come fuori maschera), contati nel run report.
+        mask = np.asarray(mask, dtype=bool)
+        _cm = np.argwhere(mask)
+        _bad = ~np.all(np.isfinite(data[mask]), axis=-1)
+        self.nonfinite_voxels_excluded_ = int(_bad.sum())
+        if _bad.any():
+            mask = mask.copy()
+            _bx = _cm[_bad]
+            mask[_bx[:, 0], _bx[:, 1], _bx[:, 2]] = False
+            print(f"\n  [WARNING] {int(_bad.sum()):,} voxel della maschera hanno valori non "
+                  f"finiti (NaN/inf) nel segnale: esclusi dal fit, come fuori maschera.")
 
         # ── Calibrazione di protocollo: questi dati hanno QUEL protocollo? ─────
         self.protocol_fingerprint_match_ = None
@@ -2799,6 +2822,7 @@ class DBSI_Adaptive:
                 condition_number_regularized=self.dictionary_[
                     'condition_number_regularized'],
             ),
+            input=dict(nonfinite_voxels_excluded=int(self.nonfinite_voxels_excluded_ or 0)),
             noise=dict(snr=float(snr), sigma_raw=float(sigma),
                        n_b0=int(np.sum(np.asarray(bvals) < 50)),
                        sigma_estimator=('legacy_biased'

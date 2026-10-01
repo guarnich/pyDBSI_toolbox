@@ -149,6 +149,7 @@ the (rejected) Stage-C fraction re-fit -- see `core/solvers.py`.
 
 import numpy as np
 from numba import njit, prange
+from ._numba_flags import FASTMATH
 import time
 from tqdm import tqdm
 
@@ -647,7 +648,7 @@ def analyse_protocol(bvals):
 # PARALLEL FITTING KERNELS — v3 + MRDS multi-fiber extension
 # ─────────────────────────────────────────────────────────────────────────────
 
-@njit(cache=True, fastmath=True)
+@njit(cache=True, fastmath=FASTMATH)
 def _apply_conc_modulation(w, AtA_reg, Aty, n_aniso_cols, n_dirs, n_pairs,
                            neighbor_idx, fiber_dirs, lambda_aniso,
                            c_lo, c_hi, gain):
@@ -729,7 +730,7 @@ def _apply_conc_modulation(w, AtA_reg, Aty, n_aniso_cols, n_dirs, n_pairs,
     return w2
 
 
-@njit(parallel=True, cache=True, fastmath=True)
+@njit(parallel=True, cache=True, fastmath=FASTMATH)
 def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         fiber_dirs, diff_pairs, n_dirs, iso_grid, b0_thr,
                         fiber_threshold, min_weight_fraction, min_separation_cos,
@@ -1015,7 +1016,7 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                 out[x, y, z, _C_DIR2 + 2] = directions[1, 2]
 
 
-@njit(parallel=True, cache=True, fastmath=True)
+@njit(parallel=True, cache=True, fastmath=FASTMATH)
 def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         fiber_dirs, diff_pairs, n_dirs, iso_grid, b0_thr,
                         fiber_threshold, min_weight_fraction, min_separation_cos,
@@ -1290,7 +1291,7 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                 out[x, y, z, _C_DIR2 + 2] = directions[1, 2]
 
 
-@njit(parallel=True, cache=True, fastmath=True)
+@njit(parallel=True, cache=True, fastmath=FASTMATH)
 def _iso_resolve_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso, out):
     """
     STAGE D pass — final constrained compartment-fraction re-solve for EVERY
@@ -1401,7 +1402,7 @@ def _iso_resolve_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso, 
             out[x, y, z, _C_WF] = wat
 
 
-@njit(cache=True, fastmath=True)
+@njit(cache=True, fastmath=FASTMATH)
 def _fiber_detection_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso,
                           sigma_raw, threshold, out, stat_out):
     """

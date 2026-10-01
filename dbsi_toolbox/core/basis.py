@@ -60,6 +60,7 @@ stage approach.
 
 import numpy as np
 from numba import njit
+from .._numba_flags import FASTMATH
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -191,7 +192,7 @@ def generate_exhaustive_diffusivity_pairs(ad_min=0.5e-3, ad_max=2.2e-3, n_ad=3,
     return np.array(pairs, dtype=np.float64)
 
 
-@njit(cache=True, fastmath=True)
+@njit(cache=True, fastmath=FASTMATH)
 def build_design_matrix_exhaustive(bvals, bvecs, fiber_dirs, diff_pairs, iso_grid):
     """
     Build the full v2 DBSI design matrix A = [A_aniso | A_iso].
@@ -442,7 +443,7 @@ def generate_anchored_isotropic_grid(d_min=0.1e-3, d_max=3.0e-3, n_steps=12,
     return np.array(np.unique(grid), dtype=np.float64)
 
 
-@njit(cache=True, fastmath=True)
+@njit(cache=True, fastmath=FASTMATH)
 def build_isotropic_dictionary(bvals, iso_grid):
     """
     Build the isotropic block of the design matrix in isolation.

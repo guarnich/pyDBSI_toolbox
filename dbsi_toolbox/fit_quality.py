@@ -55,6 +55,7 @@ Wang Y, et al. (2011). Brain, 134(12):3590-3601.
 
 import numpy as np
 from numba import njit, prange
+from ._numba_flags import FASTMATH
 import time
 from tqdm import tqdm
 
@@ -94,7 +95,7 @@ from .model_Niso_adaptive_ff_thr import (          # noqa: E402
 ISO_CENTROID_MODES = ('stage_d', 'recovered')
 
 
-@njit(cache=True, fastmath=True)
+@njit(cache=True, fastmath=FASTMATH)
 def _recover_iso_adcs_2iso(rf, nrf, adc_iso):
     """Recover D_res and D_nonrf from stored ADC_iso (2-ISO model).
     Unchanged from v1/v2.
@@ -114,7 +115,7 @@ def _recover_iso_adcs_2iso(rf, nrf, adc_iso):
     return D_res, D_nonrf
 
 
-@njit(cache=True, fastmath=True)
+@njit(cache=True, fastmath=FASTMATH)
 def _recover_iso_adcs_3iso(rf, hf, wf, adc_iso):
     """Recover D_res, D_hin, D_wat from stored ADC_iso (3-ISO model).
     Unchanged from v1/v2.

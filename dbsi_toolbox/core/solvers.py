@@ -67,6 +67,7 @@ v2 incorrectly demanded of the same penalty).
 
 import numpy as np
 from numba import njit
+from .._numba_flags import FASTMATH
 
 
 # ─── Bounds on the fiber tensor, single source of truth ──────────────────────
@@ -136,7 +137,7 @@ _ISO_NOMINAL_HIN = 1.0e-3
 _ISO_NOMINAL_WAT = 3.0e-3
 
 
-@njit(cache=True, fastmath=True, nogil=True)
+@njit(cache=True, fastmath=FASTMATH, nogil=True)
 def nnls_coordinate_descent(AtA, Aty, reg_lambda, tol=1e-7,
                             max_iter=_NNLS_MAX_ITER):
     """NNLS via Coordinate Descent with Active Set. Unchanged from v1/v2."""
@@ -319,7 +320,7 @@ def build_direction_neighbor_graph(fiber_dirs, k=6):
     return np.ascontiguousarray(neighbor_idx)
 
 
-@njit(cache=True, fastmath=True)
+@njit(cache=True, fastmath=FASTMATH)
 def select_dominant_directions(w_aniso, n_dirs, n_pairs, neighbor_idx,
                                fiber_dirs, max_directions=2,
                                min_weight_fraction=0.05,
@@ -557,7 +558,7 @@ def select_dominant_directions(w_aniso, n_dirs, n_pairs, neighbor_idx,
     return dir_indices, dir_weights
 
 
-@njit(cache=True, fastmath=True)
+@njit(cache=True, fastmath=FASTMATH)
 def dominant_basin_concentration(w_aniso, n_dirs, n_pairs, neighbor_idx,
                                  fiber_dirs):
     """
@@ -682,7 +683,7 @@ def dominant_basin_concentration(w_aniso, n_dirs, n_pairs, neighbor_idx,
 # STAGE B — Closed-form (AD, RD) estimation conditioned on direction
 # ─────────────────────────────────────────────────────────────────────────────
 
-@njit(cache=True, fastmath=True)
+@njit(cache=True, fastmath=FASTMATH)
 def estimate_AD_RD_conditioned(bvals, bvecs, sig_norm, fiber_dir,
                                f_fib, f_res, f_hin, f_wat,
                                D_res, D_hin, D_wat, use_3iso):
@@ -801,7 +802,7 @@ def estimate_AD_RD_conditioned(bvals, bvecs, sig_norm, fiber_dir,
 # STAGE C — constrained joint (VARPRO) mono-fiber fraction + tensor re-solve
 # ─────────────────────────────────────────────────────────────────────────────
 
-@njit(cache=True, fastmath=True)
+@njit(cache=True, fastmath=FASTMATH)
 def _stagec_scan(sig_norm, bvals, c2, iso_forward, iso_gram, iso_aty, yty,
                  ad_array, rd_array, aniso_ratio,
                  best_res, best_ad, best_rd, w_out):
@@ -857,7 +858,7 @@ def _stagec_scan(sig_norm, bvals, c2, iso_forward, iso_gram, iso_aty, yty,
     return best_res, best_ad, best_rd
 
 
-@njit(cache=True, fastmath=True)
+@njit(cache=True, fastmath=FASTMATH)
 def stagec_varpro_single_fiber(sig_norm, bvals, bvecs, fiber_dir,
                                iso_forward, iso_gram, ad_grid, rd_grid,
                                aniso_ratio, w_out):
@@ -992,7 +993,7 @@ def stagec_varpro_single_fiber(sig_norm, bvals, bvecs, fiber_dir,
     return best_ad, best_rd
 
 
-@njit(cache=True, fastmath=True)
+@njit(cache=True, fastmath=FASTMATH)
 def iso_fraction_resolve(sig_norm, bvals, bvecs, fdirs, fad, frd, n_fib,
                          iso_d, w_out):
     """
@@ -1208,7 +1209,7 @@ def iso_fraction_resolve(sig_norm, bvals, bvecs, fdirs, fad, frd, n_fib,
 #     of individual axon bundle properties by a Multi-Resolution
 #     Discrete-Search method. Medical Image Analysis, 42, 26-43.
 
-@njit(cache=True, fastmath=True)
+@njit(cache=True, fastmath=FASTMATH)
 def compute_cone_refinement_schedule(grid_spacing_rad, target_resolution_rad):
     """
     Derive the two-level cone search schedule (angles + candidate counts)
@@ -1253,7 +1254,7 @@ def compute_cone_refinement_schedule(grid_spacing_rad, target_resolution_rad):
     return cone1_half_angle, n1, cone2_half_angle, n2
 
 
-@njit(cache=True, fastmath=True)
+@njit(cache=True, fastmath=FASTMATH)
 def _fibonacci_cone_point(axis0, axis1, axis2, x0, x1, x2, y0, y1, y2,
                           half_angle, i, n_points):
     """
@@ -1282,7 +1283,7 @@ def _fibonacci_cone_point(axis0, axis1, axis2, x0, x1, x2, y0, y1, y2,
     return d0 / norm, d1 / norm, d2 / norm
 
 
-@njit(cache=True, fastmath=True)
+@njit(cache=True, fastmath=FASTMATH)
 def refine_fiber_direction_cone(bvals, bvecs, sig_norm, coarse_dir,
                                 f_fib, f_res, f_hin, f_wat,
                                 D_res, D_hin, D_wat, use_3iso,
@@ -1495,7 +1496,7 @@ def measure_hemisphere_spacing(fiber_dirs):
 
 
 
-@njit(cache=True, fastmath=True)
+@njit(cache=True, fastmath=FASTMATH)
 def compute_weighted_centroids(w_iso, iso_grid):
     """Compute weighted centroids for isotropic components. Unchanged
     from v1/v2 — the isotropic block's centroid extraction is correct
@@ -1533,7 +1534,7 @@ def compute_weighted_centroids(w_iso, iso_grid):
     return D_res, D_hin, D_wat
 
 
-@njit(cache=True, fastmath=True)
+@njit(cache=True, fastmath=FASTMATH)
 def compute_fiber_fa(AD, RD):
     """
     Compute FA for cylindrically symmetric tensor. Unchanged from v1/v2.
@@ -1695,7 +1696,7 @@ def compute_fiber_fa(AD, RD):
 # ────────────────────────────────────────────────────────────────────────────
 
 
-@njit(cache=True, fastmath=True)
+@njit(cache=True, fastmath=FASTMATH)
 def _cos2_matrix(bvecs, directions):
     """cos^2 between every gradient direction and every candidate fiber
     population direction. Shape (N, n_pop)."""
@@ -1711,7 +1712,7 @@ def _cos2_matrix(bvecs, directions):
     return out
 
 
-@njit(cache=True, fastmath=True)
+@njit(cache=True, fastmath=FASTMATH)
 def _stageB_single_given_residual(bvals, bvecs, direction, f_fib,
                                   other_signal, sig_norm):
     """Same closed-form log-linear WLS as `estimate_AD_RD_conditioned`,
@@ -1765,7 +1766,7 @@ def _stageB_single_given_residual(bvals, bvecs, direction, f_fib,
     return AD, RD
 
 
-@njit(cache=True, fastmath=True)
+@njit(cache=True, fastmath=FASTMATH)
 def alternating_init_nfiber(bvals, bvecs, directions, fractions, iso_signal,
                             sig_norm, n_iter=3, AD0=1.6e-3, RD0=0.4e-3):
     """Cheap per-population initial guess for `estimate_AD_RD_nfiber_joint`,
@@ -1824,7 +1825,7 @@ def alternating_init_nfiber(bvals, bvecs, directions, fractions, iso_signal,
     return AD, RD
 
 
-@njit(cache=True, fastmath=True)
+@njit(cache=True, fastmath=FASTMATH)
 def estimate_AD_RD_nfiber_joint(bvals, bvecs, sig_norm, directions, fractions,
                                 iso_signal, AD_init, RD_init, max_iter=25):
     """
@@ -1957,7 +1958,7 @@ def estimate_AD_RD_nfiber_joint(bvals, bvecs, sig_norm, directions, fractions,
     return AD_out, RD_out
 
 
-@njit(cache=True, fastmath=True)
+@njit(cache=True, fastmath=FASTMATH)
 def estimate_AD_RD_mrds(bvals, bvecs, sig_norm, directions, fractions,
                         iso_signal, init_n_iter=3, lm_max_iter=25,
                         AD0=1.6e-3, RD0=0.4e-3):

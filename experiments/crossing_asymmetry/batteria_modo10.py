@@ -1,11 +1,12 @@
 """Modo 10 (FF dei crossing ri-stimata prima dell'LM) sulla batteria a 13 scenari di luglio.
 
-Protocollo HCP-like (6 b0 + 3x60 a 1000/2000/3000), calibrazione sui dati del fantoccio come in un
-uso reale, SNR 30 e 15, produzione contro modo 10, test di rilevamento spento e a soglia 15.
+Protocollo HCP-like (6 b0 + 3x60 a 1000/2000/3000), lambda congelati al P3 (con 'cal' come secondo
+argomento: calibrati sui dati del fantoccio, ma il 2026-10-01 la calibrazione data-driven su questo
+fantoccio non e' finita in 12 minuti -- da indagare a parte), SNR 30 e 15, produzione contro modo 10, test di rilevamento spento e a soglia 15.
 Domanda: il modo 10 migliora i tensori dei crossing senza peggiorare frazioni e scenari non-crossing?
 (Il modo 10 tocca solo i voxel con 2 popolazioni: gli altri devono restare identici.)
 
-    python batteria_modo10.py [NEACH]
+    python batteria_modo10.py [NEACH] [cal]
 """
 import io, sys, contextlib, numpy as np, pandas as pd
 from pathlib import Path
@@ -13,6 +14,8 @@ from dbsi_toolbox import DBSI_Adaptive
 from dbsi_toolbox.core.solvers import _TENSOR_RD_FLOOR
 HERE = Path(__file__).parent
 NEACH = int(sys.argv[1]) if len(sys.argv) > 1 else 20
+CAL = len(sys.argv) > 2 and sys.argv[2] == 'cal'
+LAM = {} if CAL else dict(lambda_aniso=8.376776400682925, lambda_iso=0.017012542798525893)
 NM = DBSI_Adaptive.output_map_names(3); IX = {n: i for i, n in enumerate(NM)}
 
 def build_protocol(n_b0=6, dps=(60, 60, 60), bsh=(1000, 2000, 3000)):
@@ -62,9 +65,9 @@ for snr in (30, 15):
         mk[i // Wd, i % Wd, 0] = True
     for mode in (0, 10):
         for soglia in (None, 15.0):
-            m = DBSI_Adaptive(n_iso=6, fiber_detection_threshold=soglia)
+            m = DBSI_Adaptive(n_iso=6, fiber_detection_threshold=soglia, **LAM)
             with contextlib.redirect_stdout(io.StringIO()):
-                res, _ = m.fit(data, bv, bc, mk, run_calibration=True, _mrds_mode=mode)
+                res, _ = m.fit(data, bv, bc, mk, run_calibration=CAL, _mrds_mode=mode)
             P = res.reshape(-1, len(NM))[:V]
             for n in BATT:
                 s = lab == n; v = VER[np.where(s)[0][0]]
@@ -83,7 +86,7 @@ for snr in (30, 15):
                 righe.append(r)
             print(f'SNR {snr} modo {mode} soglia {soglia}: lambda_aniso {m.lambda_aniso:.3g}', flush=True)
 T = pd.DataFrame(righe)
-T.to_csv(HERE / 'esito_batteria_modo10.csv', index=False)
+T.to_csv(HERE / ('esito_batteria_modo10' + ('_cal' if CAL else '_lamP3') + '.csv'), index=False)
 pd.set_option('display.width', 250); pd.set_option('display.max_rows', 300)
 cols = ['err_FF', 'err_RF', 'err_HF', 'err_WF']
 print('\nMAE su tutti gli scenari'); print(T.groupby(['SNR', 'soglia', 'modo'])[cols].mean().round(4).to_string())

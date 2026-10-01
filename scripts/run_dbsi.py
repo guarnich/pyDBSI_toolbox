@@ -101,6 +101,11 @@ def main():
                              "by less than this many noise variances (dRSS/sigma^2). Default: "
                              "off. The statistic is always written to "
                              "fiber_detection_stat.nii.gz. See DBSI_Adaptive.")
+    parser.add_argument("--crossing-ff-kappa", type=float, dest="crossing_ff_kappa", default=None,
+                        help=f"Crossing fiber fraction re-solved before the crossing tensors are "
+                             f"fitted, with ridge kappa x (sigma/S0)^2. Default: {_D['crossing_ff_kappa']}. "
+                             "0 restores the 1.6.x path (Stage A's fraction held fixed, which put "
+                             "~75%% of real crossings on the RD floor).")
     parser.add_argument("--no-uncertainty", dest="no_uncertainty", action="store_true",
                         help="Skip the uncertainty maps (per-voxel Fisher standard error of every "
                              "continuous map, written to toolbox_report/uncertainty_maps/). ON by "
@@ -215,7 +220,8 @@ def model_kwargs(args):
               stagec_refine=not args.disable_stagec,
               iso_resolve=not args.disable_iso_resolve,
               uncertainty=not getattr(args, 'no_uncertainty', False))
-    opt = ('min_weight_fraction', 'target_angular_resolution_deg', 'fiber_detection_threshold')
+    opt = ('min_weight_fraction', 'target_angular_resolution_deg', 'fiber_detection_threshold',
+           'crossing_ff_kappa')
     if not args.protocol_calibration:
         opt = opt + ('n_iso', 'lambda_aniso', 'lambda_iso', 'n_dirs') + _DICTIONARY_OPTS
     for k in opt:

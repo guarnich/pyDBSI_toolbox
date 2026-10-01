@@ -17,3 +17,8 @@ Esito a SNR 26 (`esito_copertura_snr26.csv`, `esito_copertura_snr26_ril15.csv`):
 La SE è il limite di Cramér-Rao alla stima: non contiene il bias. Dove lo stimatore è corretto
 descrive la dispersione vera; dove è distorto (crossing) è la misura onesta di quanto il dato
 sostiene, e la precisione apparente della stima è falsa precisione.
+
+**v1.7.0** (`esito_copertura_snr26_v170.csv`), con la FF dei crossing ri-stimata prima dell'LM: nei
+crossing a 90 gradi bias FF −0.146 → +0.027, bias RD pesata −0.179 → +0.024, RD sul limite 70% → 5%;
+la dispersione empirica della FF sale da 0.037 a 0.117 (la falsa precisione sparisce) e la SE resta
+2–3 volte la dispersione (stimatore ancora regolarizzato), copertura 100%. Mono-fibra invariate.

@@ -36,9 +36,19 @@ STAGE B — diffusivity estimation (conditioned on Stage A's direction(s)):
 
 WHAT THE MRDS EXTENSION DOES **NOT** DO — READ BEFORE INTERPRETING OUTPUT
 -----------------------------------------------------------------------------
+UPDATE v1.7.0 — read this first. The paragraph below describes the design up
+to 1.6.x and is kept as history. Since then single fibers get their fractions
+from Stage C/D, and since 1.7.0 crossings do too: the crossing FF is re-solved
+on the detected support BEFORE the MRDS LM (core.solvers.crossing_ff_resolve)
+and Stage D re-solves the final crossing fractions with the fitted tensors.
+Held fixed at Stage A's shrunk value, the crossing FF had pushed 75% of real
+crossings onto the RD floor. Per-population AD in crossings is still NOT
+quantitative (fiber/hindered and AD/RD trade-offs, Cramer-Rao sd ~0.6e-3):
+report the FF-weighted AD there, not the per-population one.
+
 The MRDS extension refines AD/RD/FA/direction reporting for fiber
 populations Stage A already detected. It does NOT retroactively correct
-Stage A's own fraction estimates (FF/RF/HF/WF/NRF/mean_iso_adc), which
+Stage A's own fraction estimates (FF/RF/HF/WF/NRF), which
 are computed and frozen from Stage A's NNLS weights BEFORE Stage B (single-
 or multi-fiber) ever runs. A synthetic validation specifically testing
 whether a small unregularized "Stage C" re-fit (using MRDS's refined
@@ -97,34 +107,39 @@ Model Selection Criterion (unchanged from v1/v2)
 2-ISO vs 3-ISO selection based on b_max / shell count is unaffected by
 the MRDS extension -- it governs the isotropic block only.
 
-Output Channels (27 total)
+Output Channels (27, v1.7.0)
 -------------------------------------------------------------------------
     0  : FF   — TOTAL fibre fraction (summed over all detected populations)
     1  : RF   — Restricted fraction  (ADC <= 0.3e-3)      (always valid)
     2  : HF   — Hindered fraction    (0.3e-3 < ADC <= 3.0e-3) (NaN in 2-ISO)
     3  : WF   — Free-water fraction  (ADC > 3.0e-3)       (NaN in 2-ISO)
     4  : NRF  — Non-Restricted fraction = HF + WF         (always valid)
-    5  : ADC_iso — Mean isotropic ADC                     (always valid)
-    6  : N_POP   — number of fiber populations resolved in this voxel.
+    5  : N_POP   — number of fiber populations resolved in this voxel.
                    THREE-STATE (NaN / 0 / 1-2): see `output_map_names`.
     ── population 1 (dominant), NaN if N_POP < 1 ──
-    7  : FF_POP1 — this population's share of FF
-    8  : AD_POP1 — axial diffusivity  (Stage B closed-form / MRDS joint)
-    9  : RD_POP1 — radial diffusivity
-    10 : FA_POP1 — intrinsic fibre FA
-    11-13 : DIR1_XYZ — unit direction vector
+    6  : FF_POP1 — this population's share of FF
+    7  : AD_POP1 — axial diffusivity  (Stage C / MRDS joint)
+    8  : RD_POP1 — radial diffusivity
+    9  : FA_POP1 — intrinsic fibre FA
+    10-12 : DIR1_XYZ — unit direction vector
     ── population 2, NaN if N_POP < 2 ──
-    14 : FF_POP2, 15: AD_POP2, 16: RD_POP2, 17: FA_POP2
-    18-20 : DIR2_XYZ
+    13 : FF_POP2, 14: AD_POP2, 15: RD_POP2, 16: FA_POP2
+    17-19 : DIR2_XYZ
     ── FF-weighted over the populations present, NaN if no fiber tensor ──
-    21 : AD_W, 22: RD_W — fraction-weighted fibre diffusivities
-    23 : FA_W  — FA OF the weighted tensor (intrinsic per-fibre anisotropy,
+    20 : AD_W, 21: RD_W — fraction-weighted fibre diffusivities
+    22 : FA_W  — FA OF the weighted tensor (intrinsic per-fibre anisotropy,
                  NOT the mean of FA_POP1 and FA_POP2)
     ── diagnostics ──
-    24 : CONC  — dominant-basin angular concentration
-    25 : R2    — goodness of fit of the reconstructed signal, all
+    23 : CONC  — dominant-basin angular concentration
+    24 : R2    — goodness of fit of the reconstructed signal, all
                  compartments and both populations (fit_quality.py)
-    26 : RMSE  — residual RMSE as a fraction of S0
+    25 : RMSE  — residual RMSE as a fraction of S0
+    26 : NNLS_IT — Stage A solver iterations
+
+v1.7.0 removed channel 5 `mean_iso_adc` (the mean of Stage A's iso spectrum,
+which Stage D does not use): every later channel moved down by one. Per-voxel
+standard errors of the continuous channels are written separately, to
+toolbox_report/uncertainty_maps/ (see `dbsi_toolbox.uncertainty`).
 
 There is no population 3 (see MULTI-FIBER SCOPE), and no AD_lin/RD_lin:
 those were byte-identical copies of AD_POP1/RD_POP1. The `_C_*` module
@@ -174,6 +189,7 @@ from .core.solvers import (
     compute_cone_refinement_schedule,
     measure_hemisphere_spacing,
     estimate_AD_RD_mrds,          # NEW — MRDS multi-fiber Stage B
+    crossing_ff_resolve,          # v1.7.0 — crossing FF re-solved before the LM
 )
 from .calibration.data_driven import (fiber_subtracted_residual,
                                       select_lambdas_data_driven,
@@ -296,36 +312,43 @@ MAX_FIBER_POPULATIONS = 2
 # NaN/0 CONVENTION, by block:
 #   0-4   compartment fractions   -- 0 means "compartment absent" (0 is the
 #                                    correct physical value; they stay summable)
-#   5     mean isotropic ADC      -- 0 where no isotropic signal
-#   6     n_fiber_populations     -- THREE-STATE, see `output_map_names`
-#   7-20  per-population block    -- NaN means "this population is absent"
-#   21-23 FF-weighted aggregates  -- NaN where no fiber tensor was estimated
-#   24-26 diagnostics             -- NaN outside fitted voxels
+#   5     n_fiber_populations     -- THREE-STATE, see `output_map_names`
+#   6-19  per-population block    -- NaN means "this population is absent"
+#   20-22 FF-weighted aggregates  -- NaN where no fiber tensor was estimated
+#   23-26 diagnostics             -- NaN outside fitted voxels
+#
+# v1.7.0: `mean_iso_adc` is no longer an output. It was the mean of Stage A's
+# over-complete iso spectrum, which Stage D does not use: not coherent with the
+# reported fractions and not comparable between branches (inspection
+# 2026-09-30). It survives as an INTERNAL scratch channel (_C_ADC_ISO, after the
+# public ones) because the 'recovered' fit-quality reconstruction -- used only
+# when Stage D is off -- needs it; `fit` drops it before returning.
 _C_FF = 0             # fiber_fraction -- TOTAL anisotropic fraction (pop1+pop2)
 _C_RF = 1             # restricted_fraction
 _C_HF = 2             # hindered_fraction      (NaN in 2-ISO)
 _C_WF = 3             # water_fraction         (NaN in 2-ISO)
 _C_NRF = 4            # nonrestricted_fraction (== HF+WF in 3-ISO)
-_C_ADC_ISO = 5        # mean_iso_adc
-_C_NPOP = 6           # n_fiber_populations
-_C_FF1 = 7            # ── population 1 (dominant) ──
-_C_AD1 = 8
-_C_RD1 = 9
-_C_FA1 = 10
-_C_DIR1 = 11          # dir1_x, dir1_y, dir1_z = 11, 12, 13
-_C_FF2 = 14           # ── population 2 ──
-_C_AD2 = 15
-_C_RD2 = 16
-_C_FA2 = 17
-_C_DIR2 = 18          # dir2_x, dir2_y, dir2_z = 18, 19, 20
-_C_ADW = 21           # ── FF-weighted over the populations present ──
-_C_RDW = 22
-_C_FAW = 23
-_C_CONC = 24          # dominant_basin_concentration (diagnostic)
-_C_R2 = 25            # fit_r2   -- goodness of fit of the reconstructed signal
-_C_RMSE = 26          # fit_rmse -- residual RMSE, as a fraction of S0
-_C_NNLS_IT = 27       # nnls_iterations -- Stage A solver iterations (diagnostic)
-_N_CHANNELS = 28
+_C_NPOP = 5           # n_fiber_populations
+_C_FF1 = 6            # ── population 1 (dominant) ──
+_C_AD1 = 7
+_C_RD1 = 8
+_C_FA1 = 9
+_C_DIR1 = 10          # dir1_x, dir1_y, dir1_z = 10, 11, 12
+_C_FF2 = 13           # ── population 2 ──
+_C_AD2 = 14
+_C_RD2 = 15
+_C_FA2 = 16
+_C_DIR2 = 17          # dir2_x, dir2_y, dir2_z = 17, 18, 19
+_C_ADW = 20           # ── FF-weighted over the populations present ──
+_C_RDW = 21
+_C_FAW = 22
+_C_CONC = 23          # dominant_basin_concentration (diagnostic)
+_C_R2 = 24            # fit_r2   -- goodness of fit of the reconstructed signal
+_C_RMSE = 25          # fit_rmse -- residual RMSE, as a fraction of S0
+_C_NNLS_IT = 26       # nnls_iterations -- Stage A solver iterations (diagnostic)
+_N_CHANNELS = 27      # PUBLIC channels: what `fit` returns and what is saved
+_C_ADC_ISO = 27       # INTERNAL scratch: mean of Stage A's iso spectrum (see above)
+_N_CHANNELS_INTERNAL = 28
 
 # MRDS multi-fiber Stage B defaults (see core.solvers.estimate_AD_RD_mrds).
 _MRDS_INIT_N_ITER = 3        # short, deliberately non-converged alternating warm start
@@ -565,6 +588,15 @@ _STAGEC_ANISO_RATIO = 1.1
 # noise floor mimics -> corrected de-confounds it. Iso centroids: RF/HF/WF for
 # 3-ISO, RF/NRF for the (single-shell) 2-ISO fallback.
 _DEFAULT_ISO_RESOLVE = True
+
+# v1.7.0 — crossing FF re-solved before the MRDS LM (see core.solvers,
+# crossing_ff_resolve). Ridge = kappa * (sigma / S0_voxel)^2. kappa 65 centres
+# healthy crossing FF on P3, HCP-like and a 2-shell protocol at SNR 26 and 15;
+# 30 keeps more demyelination contrast at SNR 15 (P3: 0.20 vs 0.15 of a true
+# 0.40) for healthy-crossing FF +0.04..+0.06 (1.6.x: -0.11..-0.17) and has the
+# best worst case across protocols. 0 restores the 1.6.x path (Stage A's FF held
+# fixed; Stage D keeps it). Needs Stage D: without it kappa is ignored.
+_DEFAULT_CROSSING_FF_KAPPA = 30.0
 _ISO_RESOLVE_D_3ISO = (0.15e-3, 1.0e-3, 3.0e-3)   # RF, HF, WF centroids
 _ISO_RESOLVE_D_2ISO = (0.15e-3, 1.5e-3)            # RF, NRF centroids (single-shell)
 
@@ -742,7 +774,8 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         conc_mod_c_lo, conc_mod_c_hi, conc_mod_gain,
                         stagec_enabled, iso_forward, iso_gram,
                         stagec_ad_grid, stagec_rd_grid, stagec_aniso_ratio,
-                        data_raw, stagec_iso_grid, stagec_dir_refine):
+                        data_raw, stagec_iso_grid, stagec_dir_refine,
+                        crossing_ff_kappa, sigma_raw):
     """
     v3 parallel fitting kernel — two-compartment isotropic model (2-ISO).
 
@@ -989,6 +1022,24 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                     iso_signal[i] = (f_res * np.exp(-bvals[i] * D_res_c)
                                      + f_nonrf * np.exp(-bvals[i] * D_nonrf_c))
 
+                # v1.7.0: crossing FF re-solved on the detected support (light ridge
+                # kappa * (sigma/S0)^2) BEFORE the LM, instead of holding Stage A's
+                # heavily penalised FF fixed -- see core.solvers.crossing_ff_resolve.
+                # The population shares keep Stage A's split; Stage D re-solves the
+                # final fractions with the tensors fitted here.
+                if crossing_ff_kappa > 0.0 and f_fib > 1e-10:
+                    iso_sig_r = np.empty(len(bvals))
+                    ff_r = crossing_ff_resolve(sig_norm, bvals, bvecs, fiber_dirs,
+                                               directions, n_pop, diff_pairs, iso_grid,
+                                               crossing_ff_kappa * (sigma_raw / s0) ** 2,
+                                               iso_sig_r)
+                    if not np.isnan(ff_r) and ff_r > 1e-6:
+                        for k in range(n_pop):
+                            fractions[k] = fractions[k] / f_fib * ff_r
+                        for i in range(len(bvals)):
+                            iso_signal[i] = iso_sig_r[i]
+                        out[x, y, z, _C_FF] = ff_r
+
                 AD_out, RD_out = estimate_AD_RD_mrds(
                     bvals, bvecs, sig_norm, directions, fractions, iso_signal,
                     init_n_iter=_MRDS_INIT_N_ITER, lm_max_iter=_MRDS_LM_MAX_ITER
@@ -1028,7 +1079,8 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         conc_mod_c_lo, conc_mod_c_hi, conc_mod_gain,
                         stagec_enabled, iso_forward, iso_gram,
                         stagec_ad_grid, stagec_rd_grid, stagec_aniso_ratio,
-                        data_raw, stagec_iso_grid, stagec_dir_refine):
+                        data_raw, stagec_iso_grid, stagec_dir_refine,
+                        crossing_ff_kappa, sigma_raw):
     """v3 parallel fitting kernel — three-compartment isotropic model
     (3-ISO). Same Stage A / Stage B (+ MRDS multi-fiber) structure as
     `_fit_voxels_2iso_v3`; see that kernel's docstring for the full
@@ -1268,6 +1320,24 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                                      + f_hin * np.exp(-bvals[i] * D_hin_c)
                                      + f_wat * np.exp(-bvals[i] * D_wat_c))
 
+                # v1.7.0: crossing FF re-solved on the detected support (light ridge
+                # kappa * (sigma/S0)^2) BEFORE the LM, instead of holding Stage A's
+                # heavily penalised FF fixed -- see core.solvers.crossing_ff_resolve.
+                # The population shares keep Stage A's split; Stage D re-solves the
+                # final fractions with the tensors fitted here.
+                if crossing_ff_kappa > 0.0 and f_fib > 1e-10:
+                    iso_sig_r = np.empty(len(bvals))
+                    ff_r = crossing_ff_resolve(sig_norm, bvals, bvecs, fiber_dirs,
+                                               directions, n_pop, diff_pairs, iso_grid,
+                                               crossing_ff_kappa * (sigma_raw / s0) ** 2,
+                                               iso_sig_r)
+                    if not np.isnan(ff_r) and ff_r > 1e-6:
+                        for k in range(n_pop):
+                            fractions[k] = fractions[k] / f_fib * ff_r
+                        for i in range(len(bvals)):
+                            iso_signal[i] = iso_sig_r[i]
+                        out[x, y, z, _C_FF] = ff_r
+
                 AD_out, RD_out = estimate_AD_RD_mrds(
                     bvals, bvecs, sig_norm, directions, fractions, iso_signal,
                     init_n_iter=_MRDS_INIT_N_ITER, lm_max_iter=_MRDS_LM_MAX_ITER
@@ -1292,7 +1362,8 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
 
 
 @njit(parallel=True, cache=True, fastmath=FASTMATH)
-def _iso_resolve_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso, out):
+def _iso_resolve_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso, out,
+                      crossing_resolve):
     """
     STAGE D pass — final constrained compartment-fraction re-solve for EVERY
     fitted voxel, on the RICIAN-CORRECTED signal. Reads the detected structure
@@ -1369,8 +1440,15 @@ def _iso_resolve_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso, 
             else:
                 wat += wj
 
-        if n_fib >= 2:
-            # CROSSINGS: keep the MRDS fiber_fraction (the over-complete Stage A
+        if n_fib >= 2 and crossing_resolve:
+            # v1.7.0 (crossing_ff_kappa > 0): the crossing tensors were fitted with
+            # a re-solved FF, not Stage A's shrunk one, so Stage D re-solves the
+            # crossing fractions too (total and pop-2), as for single fibers. The
+            # comment below describes the 1.6.x path (crossing_ff_kappa = 0).
+            out[x, y, z, _C_FF] = f_fib
+            out[x, y, z, _C_FF2] = w_out[1] / tot
+        elif n_fib >= 2:
+            # CROSSINGS (1.6.x path): keep the MRDS fiber_fraction (the over-complete Stage A
             # captures the total anisotropic mass well; a reduced 2-column
             # re-solve, sensitive to the imperfect crossing tensors, sheds fiber
             # mass to iso and under-estimates FF_total -- validated). Use Stage D
@@ -1429,8 +1507,18 @@ def _fiber_detection_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3i
     11-14 at SNR 15, 26 and 40) because it is noise-normalised, while true
     fibers score p05 74 (single fiber FF 0.25) and 17.5 (90-degree crossing,
     FF 0.30) at SNR 26. It is the F-test MRDS uses for model selection, which
-    this toolbox had left out. Off by default until the battery and real data
-    decide the threshold; the statistic is always computed and reported.
+    this toolbox had left out. The statistic is always computed and written
+    (fiber_detection_stat.nii.gz); the threshold is OFF by default.
+
+    DECIDED OFF for v1.7.0 (2026-10-01). Battery 05 (synthetic, v1.6.2): threshold
+    15 adoptable at SNR 30 and 15 (false fibers 0.067 -> 0.044 / 0.22 -> 0.20, no
+    true fiber lost, FF MAE 0.053 -> 0.047). Notebook 09 (healthy-tissue mix of a
+    real P3 subject, v1.6.4): threshold 15 would remove 15% of fiber voxels (2.9%
+    of single fibers, 28.5% of crossings, mostly FF 0.15-0.3), but failed its
+    pre-declared control (73% < 80% of the voxels the old gate rejected kept;
+    weak premise: that control rested on a residual inflated by the pre-1.5.2
+    reconstruction). And the crossing FF re-solve of 1.7.0 changes the crossing
+    tensors, hence this statistic: the threshold is to be decided on 1.7.0 output.
     """
     n_voxels = coords.shape[0]
     n_iso = iso_d.shape[0]
@@ -1814,7 +1902,8 @@ class DBSI_Adaptive:
                  stagec_dir_refine=_DEFAULT_STAGEC_DIR_REFINE,
                  iso_resolve=_DEFAULT_ISO_RESOLVE,
                  lambda_aniso_method='gcv',
-                 uncertainty=True):
+                 uncertainty=True,
+                 crossing_ff_kappa=_DEFAULT_CROSSING_FF_KAPPA):
         self.n_iso = n_iso
         self.lambda_aniso = lambda_aniso
         self.lambda_iso = lambda_iso
@@ -1849,6 +1938,9 @@ class DBSI_Adaptive:
                              f"got {lambda_aniso_method!r}.")
         self.lambda_aniso_method = lambda_aniso_method
         self.uncertainty = bool(uncertainty)
+        if crossing_ff_kappa is None or not crossing_ff_kappa >= 0:
+            raise ValueError('crossing_ff_kappa must be >= 0 (0 = 1.6.x crossing path)')
+        self.crossing_ff_kappa = float(crossing_ff_kappa)
 
         self.model_mode_ = None
         self.b_max_ = None
@@ -2618,7 +2710,9 @@ class DBSI_Adaptive:
                 calibrate_concentration_gate)
 
         # ── Allocate output (27 channels — see module docstring) ────────────
-        results = np.zeros(data.shape[:3] + (self.N_CHANNELS,), dtype=np.float32)
+        # Internal layout: the public channels + the mean_iso_adc scratch channel,
+        # dropped before returning (see the channel layout block).
+        results = np.zeros(data.shape[:3] + (_N_CHANNELS_INTERNAL,), dtype=np.float32)
         # NaN defaults: N_POP (NaN outside fiber_threshold, NOT 0 -- the two
         # states mean different things, see `output_map_names`), the whole
         # per-population block, the FF-weighted aggregates, and the diagnostic.
@@ -2666,6 +2760,12 @@ class DBSI_Adaptive:
 
         _min_separation_cos = float(np.cos(np.radians(self.min_separation_deg)))
         _kernel = _fit_voxels_3iso_v3 if use_3iso else _fit_voxels_2iso_v3
+        # The crossing FF re-solve needs Stage D to turn the re-solved FF and the
+        # new tensors into consistent final fractions; without it, 1.6.x path.
+        _kappa = self.crossing_ff_kappa if self.iso_resolve else 0.0
+        print(f"   Crossing FF: " + (f"RE-SOLVED on the detected support before the LM "
+              f"(ridge = {_kappa:g} x (sigma/S0)^2), then Stage D" if _kappa > 0 else
+              "Stage A's, held fixed (1.6.x path" + (", needs Stage D" if self.crossing_ff_kappa > 0 else "") + ")"))
 
         b0_thr = 100.0
 
@@ -2688,7 +2788,8 @@ class DBSI_Adaptive:
                     float(self.conc_mod_gain),
                     bool(self.stagec_refine), iso_forward, iso_gram,
                     stagec_ad_grid, stagec_rd_grid, float(_STAGEC_ANISO_RATIO),
-                    data, stagec_iso_grid, bool(self.stagec_dir_refine)
+                    data, stagec_iso_grid, bool(self.stagec_dir_refine),
+                    float(_kappa), float(sigma)
                 )
                 pbar.update(end - start)
 
@@ -2714,7 +2815,7 @@ class DBSI_Adaptive:
                   f"{'3-ISO' if use_3iso else '2-ISO'}]")
             _t0d = time.time()
             _iso_resolve_pass(data_corr, coords, bvals, bvecs, b0_thr, _iso_d,
-                              use_3iso, results)
+                              use_3iso, results, bool(_kappa > 0))
             print(f"   Stage D completed: {time.time() - _t0d:.1f}s")
 
             # ── Detection test: do the fibers explain more than noise? ──────
@@ -2918,7 +3019,8 @@ class DBSI_Adaptive:
                          enable_direction_refinement=bool(self.enable_direction_refinement),
                          lambda_aniso_conc_mod=bool(self.lambda_aniso_conc_mod),
                          iso_resolve=bool(self.iso_resolve),
-                         uncertainty=bool(self.uncertainty)),
+                         uncertainty=bool(self.uncertainty),
+                         crossing_ff_kappa=float(_kappa)),
             populations=_population_census(results, mask),
             solver=_solver_diagnostics(results, mask),
             fit_quality=dict(
@@ -2929,7 +3031,7 @@ class DBSI_Adaptive:
 
         print(f"\n{'='*70}\n")
 
-        return results, model_mode
+        return np.ascontiguousarray(results[..., :_N_CHANNELS]), model_mode
 
     # ------------------------------------------------------------------
     def calibrate(self, data, bvals, bvecs, mask, n_calibration_voxels=1000,
@@ -3050,26 +3152,29 @@ class DBSI_Adaptive:
         no second fiber, which is most of the brain -- so callers must check
         per-voxel rather than assume a channel is entirely present or absent.
 
-        LAYOUT (28 channels)::
+        LAYOUT (27 channels, v1.7.0)::
 
             0      fiber_fraction              TOTAL anisotropic fraction
             1-4    restricted/hindered/water/nonrestricted fractions
-            5      mean_iso_adc                spectral mean, see below
-            6      n_fiber_populations         three-state, see below
-            7-13   population 1: fraction, AD, RD, FA, dir(x,y,z)
-            14-20  population 2: fraction, AD, RD, FA, dir(x,y,z)
-            21-23  FF-weighted AD, RD, FA over the populations present
-            24-26  diagnostics: dominant_basin_concentration, fit_r2, fit_rmse
-            27     nnls_iterations             Stage A solver iterations (v1.3.3)
+            5      n_fiber_populations         three-state, see below
+            6-12   population 1: fraction, AD, RD, FA, dir(x,y,z)
+            13-19  population 2: fraction, AD, RD, FA, dir(x,y,z)
+            20-22  FF-weighted AD, RD, FA over the populations present
+            23-25  diagnostics: dominant_basin_concentration, fit_r2, fit_rmse
+            26     nnls_iterations             Stage A solver iterations (v1.3.3)
 
-        `mean_iso_adc` is the weighted mean of an over-complete isotropic
-        SPECTRUM, and its source depends on the branch: Stage C's spectrum
-        (raw signal) on single fibers, Stage A's everywhere else. Stage D, which
-        sets every reported fraction, does not touch it. Measured (P3, SNR 26,
-        same isotropic composition): true 1.79e-3 -> 1.76 single fiber, 1.61
+        `mean_iso_adc` (channel 5 until 1.6.x) is gone: the weighted mean of
+        Stage A's over-complete isotropic SPECTRUM, which Stage D -- the source
+        of every reported fraction -- does not use. Measured (P3, SNR 26, same
+        isotropic composition): true 1.79e-3 -> 1.76 single fiber, 1.61
         crossing, 2.06 no fiber; sd 0.2-0.45e-3. Not coherent with the reported
-        fractions and not comparable across branches: a diagnostic, not a
-        tissue metric (inspection 2026-09-30).
+        fractions and not comparable across branches (inspection 2026-09-30).
+        Every channel after it moved down by one.
+
+        Per-population AD in CROSSINGS is not quantitative (Cramer-Rao sd
+        ~0.6e-3; it trades with RD and with the hindered compartment): use
+        `axial_diffusivity_weighted` there. Per-population RD in crossings is
+        reliable since 1.7.0 (crossing FF re-solved before the LM).
 
         There is no population 3: the toolbox resolves at most TWO fiber
         populations per voxel (`MAX_FIBER_POPULATIONS`), which is the ceiling
@@ -3116,7 +3221,6 @@ class DBSI_Adaptive:
             'hindered_fraction',
             'water_fraction',
             'nonrestricted_fraction',
-            'mean_iso_adc',
         ]
         base_2iso = [
             'fiber_fraction',
@@ -3124,7 +3228,6 @@ class DBSI_Adaptive:
             'hindered_fraction_NaN',
             'water_fraction_NaN',
             'nonrestricted_fraction',
-            'mean_iso_adc',
         ]
         fiber_block = [
             'n_fiber_populations',

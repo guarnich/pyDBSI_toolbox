@@ -364,6 +364,12 @@ def compute_fit_quality(data, bvals, bvecs, mask, results, model_mode,
             raise ValueError(f"{len(cents)} centroids for a {model_mode}-ISO model")
         fixed = True
     cents = tuple(cents) + (0.0,) * (3 - len(cents))
+    if not fixed and results.shape[-1] <= _CH_ADC_ISO:
+        # v1.7.0: mean_iso_adc is no longer an output channel; it lives only in
+        # the internal array that `fit` passes here before dropping it.
+        raise ValueError("iso_centroids='recovered' needs the mean isotropic ADC, which "
+                         "is no longer an output channel (v1.7.0): it is available only "
+                         "inside fit(). Use 'stage_d' or explicit centroids.")
     if verbose:
         print(f"  Isotropic centroids: "
               + (f"FIXED {[round(c * 1e3, 4) for c in cents if c]} x1e-3 (Stage D)"

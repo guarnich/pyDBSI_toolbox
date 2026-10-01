@@ -48,13 +48,14 @@ def test_segnale_esatto_di_stage_d():
     casi = [dict(ff=0.0, rf=0.2, hf=0.5, wf=0.3),            # senza fibra
             dict(ff=0.5, rf=0.1, hf=0.3, wf=0.1)]            # mono-fibra
     data = np.zeros((len(casi), 1, 1, len(bvals)), np.float32)
-    res = np.full((len(casi), 1, 1, len(NOMI)), np.nan, np.float32)
+    # array INTERNO (v1.7.0): i canali pubblici + mean_iso_adc come canale di lavoro
+    res = np.full((len(casi), 1, 1, M._N_CHANNELS_INTERNAL), np.nan, np.float32)
     for i, c in enumerate(casi):
         S = c['rf'] * np.exp(-bvals * Dr) + c['hf'] * np.exp(-bvals * Dh) + c['wf'] * np.exp(-bvals * Dw)
         r = res[i, 0, 0]
         r[IX['fiber_fraction']] = c['ff']; r[IX['restricted_fraction']] = c['rf']
         r[IX['hindered_fraction']] = c['hf']; r[IX['water_fraction']] = c['wf']
-        r[IX['mean_iso_adc']] = 0.6e-3          # spettro di Stage A: NON coerente coi centroidi
+        r[M._C_ADC_ISO] = 0.6e-3                # spettro di Stage A: NON coerente coi centroidi
         if c['ff'] > 0:
             S = S + c['ff'] * np.exp(-bvals * (0.3e-3 + 1.4e-3 * c2))
             r[IX['n_fiber_populations']] = 1
@@ -84,7 +85,7 @@ def test_fibra_sotto_soglia_dopo_stage_d():
     data = (1000 * S)[None, None, None, :].astype(np.float32)
     res = np.full((1, 1, 1, len(NOMI)), np.nan, np.float32); r = res[0, 0, 0]
     r[IX['fiber_fraction']] = ff; r[IX['restricted_fraction']] = rf
-    r[IX['hindered_fraction']] = hf; r[IX['water_fraction']] = wf; r[IX['mean_iso_adc']] = 1e-3
+    r[IX['hindered_fraction']] = hf; r[IX['water_fraction']] = wf
     r[IX['n_fiber_populations']] = 1; r[IX['fiber_fraction_pop1']] = ff
     r[IX['axial_diffusivity_pop1']] = 1.7e-3; r[IX['radial_diffusivity_pop1']] = 0.3e-3
     r[IX['dir1_x']], r[IX['dir1_y']], r[IX['dir1_z']] = u
@@ -113,17 +114,27 @@ def _fit(iso_resolve):
 
 
 def test_fit_vero():
-    for iso_resolve, modo, atteso in ((True, M._ISO_RESOLVE_D_3ISO, 'stage_d_fixed'),
-                                      (False, 'recovered', 'recovered_from_mean_iso_adc')):
-        m, res, mode, d, bvals, bvecs, mk = _fit(iso_resolve)
+    m, res, mode, d, bvals, bvecs, mk = _fit(True)
+    with contextlib.redirect_stdout(io.StringIO()):
+        _, rm = compute_fit_quality(d, bvals, bvecs, mk, res, mode, iso_centroids=M._ISO_RESOLVE_D_3ISO)
+    diff = np.nanmax(np.abs(rm - res[..., IX['fit_rmse']]))
+    rep = m.run_report_['fit_quality_reference']['iso_centroids']
+    print(f'  iso_resolve=True: canale vs ricostruzione Stage D: max |diff| {diff:.1e}   report: {rep}')
+    assert diff < 1e-6, 'fit_rmse non e la ricostruzione attesa'
+    assert rep == 'stage_d_fixed'
+    # Senza Stage D la ricostruzione usa mean_iso_adc, che dalla 1.7.0 non e' piu' un
+    # canale di uscita: il fit la calcola al suo interno, da fuori si rifiuta.
+    m, res, mode, d, bvals, bvecs, mk = _fit(False)
+    assert res.shape[-1] == M._N_CHANNELS
+    assert m.run_report_['fit_quality_reference']['iso_centroids'] == 'recovered_from_mean_iso_adc'
+    assert np.all(np.isfinite(res[..., IX['fit_rmse']][mk]))
+    try:
         with contextlib.redirect_stdout(io.StringIO()):
-            _, rm = compute_fit_quality(d, bvals, bvecs, mk, res, mode, iso_centroids=modo)
-        diff = np.nanmax(np.abs(rm - res[..., IX['fit_rmse']]))
-        rep = m.run_report_['fit_quality_reference']['iso_centroids']
-        print(f'  iso_resolve={iso_resolve}: canale vs ricostruzione {modo!r}: max |diff| '
-              f'{diff:.1e}   report: {rep}')
-        assert diff < 1e-6, 'fit_rmse non e la ricostruzione attesa'
-        assert rep == atteso
+            compute_fit_quality(d, bvals, bvecs, mk, res, mode, iso_centroids='recovered')
+    except ValueError as e:
+        print(f"  iso_resolve=False: fit_rmse calcolato dentro il fit; da fuori 'recovered' rifiutato ({str(e)[:50]}...)")
+    else:
+        raise AssertionError("'recovered' su un array senza mean_iso_adc non e' stato rifiutato")
 
 
 def test_rifiuti():

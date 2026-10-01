@@ -32,9 +32,11 @@ WHAT THE NUMBER MEANS -- READ BEFORE USING THE MAPS
   floor, demyelinated RD under-estimated, see core/solvers.py) the maps can be
   confidently wrong. The coverage check in the dossier measures how far the
   two diverge on synthetic data.
-* Crossings report the Stage A total FF and pop-2 fraction, not the fit of
-  the model above; their SE is the information the data carry about FF under
-  this model, not the spread of the Stage A estimator.
+* Since v1.7.0 crossings report the Stage D fit of the model above, like
+  single fibers. With crossing_ff_kappa = 0 (the 1.6.x path) they report
+  Stage A's total FF instead: the SE is then the information the data carry
+  about FF under this model, not the spread of the Stage A estimator (which
+  on synthetic crossings was 5-9x smaller, with a bias inside the SE).
 * It is LOCAL: a linearisation at the estimate. It is exact to first order
   where the likelihood is close to Gaussian, which fails near a bound and
   where the model is barely identifiable. Both cases are flagged.
@@ -97,8 +99,7 @@ UNCERTAINTY_DIRNAME = 'uncertainty_maps'
 
 # Channels that get an SE map. Everything else is either discrete
 # (n_fiber_populations), a unit vector (directions: see the angular map), a
-# diagnostic, or `mean_iso_adc`, which no model here produces (it is a mean of
-# the Stage A spectrum that Stage D does not use).
+# diagnostic.
 SE_CHANNELS = (_C_FF, _C_RF, _C_HF, _C_WF, _C_NRF,
                _C_FF1, _C_AD1, _C_RD1, _C_FA1,
                _C_FF2, _C_AD2, _C_RD2, _C_FA2,
@@ -212,6 +213,20 @@ def _uncertainty_kernel(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso
         else:
             u[1] = out[x, y, z, _C_NRF]
 
+        # A reported estimate with a NaN in it (e.g. a single fiber whose FF
+        # Stage D set to 0: tensor present, population fraction NaN) has no
+        # Fisher matrix at that point: leave the voxel NaN.
+        bad = False
+        for k in range(n_fib):
+            if not (np.isfinite(w[k]) and np.isfinite(ad[k]) and np.isfinite(rd[k])
+                    and np.isfinite(d[k, 0]) and np.isfinite(d[k, 1]) and np.isfinite(d[k, 2])):
+                bad = True
+        for j in range(n_iso):
+            if not np.isfinite(u[j]):
+                bad = True
+        if bad:
+            continue
+
         # ── which parameters are free ────────────────────────────────────
         # Per population: w, AD, RD, alpha, beta (AD dropped when imposed).
         fix_ad = crossing_ad_fixed and n_fib == 2
@@ -316,7 +331,7 @@ def _uncertainty_kernel(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso
         sc = np.empty(P)
         ok = True
         for p in range(P):
-            if F[p, p] <= 0.0:
+            if not (F[p, p] > 0.0):
                 ok = False
                 break
             sc[p] = np.sqrt(F[p, p])

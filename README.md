@@ -61,28 +61,33 @@ and number of shells):
 
 ## Outputs
 
-27 channels. `DBSI_Adaptive.output_map_names(mode)` returns them in
+27 channels (v1.7.0). `DBSI_Adaptive.output_map_names(mode)` returns them in
 order; the `_C_*` constants in `model_Niso_adaptive_ff_thr.py` are the
-single source of truth for the indices.
+single source of truth for the indices. Read maps by NAME: v1.7.0 removed
+`mean_iso_adc` (channel 5 until 1.6.x) and every later channel moved down by one.
 
-**Isotropic block and total fiber fraction (0-5)**
+**Isotropic block and total fiber fraction (0-4)**
 
 1. **fiber_fraction (FF)**: apparent axonal density — the TOTAL over both populations.
 2. **restricted_fraction (RF)**: cellularity marker (inflammation).
 3. **hindered_fraction (HF)**: vasogenic edema *(NaN in 2-ISO mode)*.
 4. **water_fraction (WF)**: CSF / free water *(NaN in 2-ISO mode)*.
 5. **nonrestricted_fraction (NRF)**: HF + WF combined.
-6. **mean_iso_adc**: mean isotropic ADC.
 
-**Fiber block (6-23)** — at most TWO populations per voxel, each with its
+**Fiber block (5-22)** — at most TWO populations per voxel, each with its
 own fraction, tensor and direction:
 
 - **n_fiber_populations**: three-state (NaN = no fiber compartment attempted,
   0 = fiber present but no direction resolved, 1-2 = populations found).
 - **fiber_fraction_pop1 / _pop2**: each population's share of FF.
-- **axial_diffusivity_pop1 / _pop2**: axonal integrity — Stage B closed-form
-  (single fiber) or MRDS joint estimate (crossing).
-- **radial_diffusivity_pop1 / _pop2**: demyelination marker.
+- **axial_diffusivity_pop1 / _pop2**: axonal integrity — Stage C (single
+  fiber) or MRDS joint estimate (crossing). **In crossings the per-population
+  AD is not quantitative** (it trades with RD and with the hindered
+  compartment): use `axial_diffusivity_weighted` there.
+- **radial_diffusivity_pop1 / _pop2**: demyelination marker. Since v1.7.0 the
+  crossing fiber fraction is re-solved before the crossing tensors are fitted
+  (`crossing_ff_kappa`, default 30): with Stage A's shrunk fraction held fixed,
+  75% of real crossings had their RD on the floor.
 - **fiber_fa_pop1 / _pop2**: intrinsic fiber fractional anisotropy.
 - **dir1_x/y/z, dir2_x/y/z**: unit direction vectors.
 - **axial_/radial_diffusivity_weighted, fiber_fa_weighted**: the fiber tensor
@@ -99,19 +104,27 @@ when the fitted model is passed to `save_output_maps`:
 | `design_matrix.png` | image of the Stage A dictionary A = [A_aniso \| A_iso], rows sorted by b-value |
 | `design_matrix.npz` | A itself plus the b-values, directions, (AD, RD) pairs and isotropic grid that generate it |
 | `dictionary_columns.csv` | one row per column of A: block, direction, AD/RD or isotropic D, compartment |
+| `uncertainty_maps/` | (v1.7.0) per-voxel standard error of every continuous map, `NN_<channel>_se.nii.gz`, plus angular SE of the directions, Fisher condition number, residual / sigma and a flag bitmask; see its `README.txt` |
 
 A folder of NIfTI files with no record of what produced them is not
 reproducible, and neither the toolbox version nor the dictionary can be
 recovered from the maps afterwards. Up to v1.3.9 `run_report.txt` sat next to
 the maps; `find_run_report(output_dir)` reads either layout.
 
-**Diagnostics (24-26)**
+**Diagnostics (23-26)**
 
 - **dominant_basin_concentration**: angular concentration of the dominant basin.
 - **fit_r2 / fit_rmse**: voxel-wise goodness of fit of the reconstructed signal
   (all compartments, both populations) and the residual RMSE as a fraction of
   S0. Computed by the fit itself — the maps always ship with the means to judge
   them.
+- **nnls_iterations**: Stage A solver iterations.
+
+The standard errors in `uncertainty_maps/` are the Cramer-Rao bound at the
+estimate (Fisher information of the reported model, delta method for derived
+maps): the precision the data and protocol allow, NOT the bias. Validated on
+synthetic data: calibrated for single fibers and isotropic tissue (SE / empirical
+sd 0.95-1.35, coverage 93-100%).
 
 The fiber block is NaN wherever the population is absent, while the
 compartment fractions use 0. `save_output_maps` writes `fiber_valid.nii.gz`

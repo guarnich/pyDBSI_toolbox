@@ -96,11 +96,15 @@ def test_nessun_punto_di_chiamata_scarta_il_contatore_nei_kernel():
 def test_contratto_dei_canali():
     n3 = DBSI_Adaptive.output_map_names(3)
     n2 = DBSI_Adaptive.output_map_names(2)
-    assert len(n3) == len(n2) == M._N_CHANNELS == 28, (len(n3), len(n2), M._N_CHANNELS)
-    assert n3.index('nnls_iterations') == M._C_NNLS_IT == 27
+    assert len(n3) == len(n2) == M._N_CHANNELS == 27, (len(n3), len(n2), M._N_CHANNELS)
+    assert n3.index('nnls_iterations') == M._C_NNLS_IT == 26
     assert DBSI_Adaptive.N_CHANNELS == M._N_CHANNELS, (
-        'N_CHANNELS della classe e _N_CHANNELS del modulo devono coincidere: '
-        'se divergono i kernel scrivono FUORI dall array, in njit, senza errore')
+        'N_CHANNELS della classe e _N_CHANNELS del modulo devono coincidere')
+    # v1.7.0: mean_iso_adc e' un canale di lavoro INTERNO, dopo quelli pubblici; il
+    # fit alloca _N_CHANNELS_INTERNAL, altrimenti i kernel scriverebbero FUORI
+    # dall'array, in njit, senza errore.
+    assert 'mean_iso_adc' not in n3 and 'mean_iso_adc' not in n2
+    assert M._C_ADC_ISO == M._N_CHANNELS and M._N_CHANNELS_INTERNAL == M._N_CHANNELS + 1
     print(f'  {len(n3)} canali, nnls_iterations all indice {M._C_NNLS_IT}')
 
 

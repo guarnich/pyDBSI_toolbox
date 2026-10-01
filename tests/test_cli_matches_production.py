@@ -103,7 +103,7 @@ def test_nessun_default_copiato():
                             min_weight_fraction=None, target_angular_resolution_deg=None,
                             n_iso=None, lambda_aniso=None, lambda_iso=None, n_dirs=None,
                             n_ad=None, n_rd=None, anisotropy_ratio=None,
-                            fiber_detection_threshold=None)
+                            fiber_detection_threshold=None, crossing_ff_kappa=None)
     kw = mod.model_kwargs(ns)
     copiati = [k for k in ('n_ad', 'n_rd', 'anisotropy_ratio', 'min_weight_fraction',
                            'target_angular_resolution_deg') if k in kw]

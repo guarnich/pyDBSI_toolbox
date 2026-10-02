@@ -1446,7 +1446,28 @@ def _iso_resolve_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso, 
             # crossing fractions too (total and pop-2), as for single fibers. The
             # comment below describes the 1.6.x path (crossing_ff_kappa = 0).
             out[x, y, z, _C_FF] = f_fib
-            out[x, y, z, _C_FF2] = w_out[1] / tot
+            w1n = w_out[0] / tot
+            w2n = w_out[1] / tot
+            if w1n > 1e-6 and w2n > 1e-6:
+                out[x, y, z, _C_FF2] = w2n
+            else:
+                # v1.7.1: the re-solve gave one population NO weight (0.7% of real
+                # crossings, notebook 11). Reporting n_pop=2 with a zero-weight
+                # population would put a tensor and a direction the data do not
+                # support into the pop-2 maps: the voxel becomes a single fiber.
+                # If it is population 1 that vanished, population 2 moves into its
+                # slot. The surviving tensor is the one fitted jointly with the
+                # other population (no Stage C re-fit).
+                if w1n <= 1e-6 and w2n > 1e-6:
+                    out[x, y, z, _C_AD1] = out[x, y, z, _C_AD2]
+                    out[x, y, z, _C_RD1] = out[x, y, z, _C_RD2]
+                    out[x, y, z, _C_FA1] = out[x, y, z, _C_FA2]
+                    out[x, y, z, _C_DIR1] = out[x, y, z, _C_DIR2]
+                    out[x, y, z, _C_DIR1 + 1] = out[x, y, z, _C_DIR2 + 1]
+                    out[x, y, z, _C_DIR1 + 2] = out[x, y, z, _C_DIR2 + 2]
+                out[x, y, z, _C_NPOP] = 1.0
+                for c in (_C_FF2, _C_AD2, _C_RD2, _C_FA2, _C_DIR2, _C_DIR2 + 1, _C_DIR2 + 2):
+                    out[x, y, z, c] = np.nan
         elif n_fib >= 2:
             # CROSSINGS (1.6.x path): keep the MRDS fiber_fraction (the over-complete Stage A
             # captures the total anisotropic mass well; a reduced 2-column

@@ -14,6 +14,8 @@ COSA SI PROTEGGE.
   2. Le mono-fibra sono IDENTICHE fra i due percorsi (la ri-stima tocca solo i crossing).
   3. Nei crossing le frazioni sommano a 1 e FF_pop1 + FF_pop2 = FF.
   4. kappa < 0 rifiutato; senza Stage D la ri-stima e' spenta e il run report lo dice.
+  5. (v1.7.1) Se Stage D da' peso zero a una popolazione di un crossing, il voxel diventa una
+     mono-fibra: n_pop 1, blocco pop2 NaN, e se a sparire e' la pop1 la pop2 prende il suo posto.
 
     python tests/test_crossing_ff_resolve.py
 """
@@ -109,6 +111,29 @@ def test_rifiuti_e_senza_stage_d():
     assert k == 0.0
     m, _ = _fit()
     assert m.run_report_['options']['crossing_ff_kappa'] == 30.0
+
+
+def test_popolazione_a_peso_zero_diventa_mono():
+    import dbsi_toolbox.model_Niso_adaptive_ff_thr as M
+    d, bv, bc = _dati(n=1)
+    u = np.array([1.0, 0.0, 0.0]); v = np.array([0.0, 1.0, 0.0])
+    iso = 0.1 * np.exp(-bv * 0.15e-3) + 0.3 * np.exp(-bv * 1.0e-3) + 0.1 * np.exp(-bv * 3.0e-3)
+    S = iso + 0.5 * np.exp(-bv * (0.4e-3 + 1.3e-3 * (bc @ u) ** 2))     # UNA fibra, lungo u
+    for vera, finta in ((0, 1), (1, 0)):                               # la fibra vera in pop1, poi in pop2
+        out = np.full((1, 1, 1, M._N_CHANNELS_INTERNAL), np.nan, np.float32)
+        out[0, 0, 0, M._C_NPOP] = 2; out[0, 0, 0, M._C_FF] = 0.5; out[0, 0, 0, M._C_FF2] = 0.25
+        for k, (dd, ad, rd) in enumerate(((u, 1.7e-3, 0.4e-3), (v, 2.5e-3, 0.3e-3)) if vera == 0
+                                         else ((v, 2.5e-3, 0.3e-3), (u, 1.7e-3, 0.4e-3))):
+            ca, cr, cf, cd = (M._C_AD1, M._C_RD1, M._C_FA1, M._C_DIR1) if k == 0 else (M._C_AD2, M._C_RD2, M._C_FA2, M._C_DIR2)
+            out[0, 0, 0, ca] = ad; out[0, 0, 0, cr] = rd; out[0, 0, 0, cf] = 0.7; out[0, 0, 0, cd:cd + 3] = dd
+        dc = (1000 * S)[None, None, None, :].astype(np.float32)
+        M._iso_resolve_pass(dc, np.array([[0, 0, 0]]), bv, bc, 100.0, np.array(M._ISO_RESOLVE_D_3ISO),
+                            True, out, True)
+        o = out[0, 0, 0]
+        print(f"  fibra vera in pop{vera + 1}: n_pop {o[M._C_NPOP]:.0f}, pop2 NaN {bool(np.isnan(o[M._C_AD2]))}, "
+              f"pop1 AD {o[M._C_AD1] * 1e3:.2f}e-3, dir1 {np.round(o[M._C_DIR1:M._C_DIR1 + 3], 2)}, FF {o[M._C_FF]:.3f}")
+        assert o[M._C_NPOP] == 1 and np.isnan(o[M._C_FF2]) and np.isnan(o[M._C_AD2])
+        assert abs(o[M._C_AD1] - 1.7e-3) < 1e-9 and abs(abs(o[M._C_DIR1]) - 1) < 1e-6, 'nel posto della pop1 non c e la fibra vera'
 
 
 if __name__ == '__main__':

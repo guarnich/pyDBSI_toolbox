@@ -11,7 +11,8 @@ from the Fisher information of the signal model the maps were reported under:
 
 with D_j the fixed Stage D centroids (RF / HF / WF, or RF / NRF in 2-ISO), up
 to two fiber populations k, and Gaussian noise of standard deviation
-sigma_voxel = sigma_raw / S0_voxel on the Rician-corrected signal. The free
+sigma_voxel = sigma / S0_voxel on the Rician-corrected signal (sigma = the thermal
+noise map since v1.7.1, the b=0 temporal sigma without it). The free
 parameters are, per population, the weight w_k, AD_k, RD_k and two tangent
 angles of the direction d_k, plus the iso weights u_j. With J the Jacobian at
 the reported estimate,
@@ -157,7 +158,7 @@ def _quad(g, C):
 
 @njit(cache=True)
 def _uncertainty_kernel(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso,
-                        sigma_raw, out, ad_bounds, rd_bounds, crossing_ad_fixed,
+                        sigma_map, out, ad_bounds, rd_bounds, crossing_ad_fixed,
                         resid_flag, se, dir_se, log10_cond, flags, resid_ratio):
     """Fisher SE for every fitted voxel. Writes se[..., ch] for SE_CHANNELS,
     dir_se[..., 0/1] (degrees), log10_cond and flags. See the module docstring."""
@@ -180,7 +181,7 @@ def _uncertainty_kernel(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso
             s0 /= cnt
         if not (s0 >= 1e-6) or not np.isfinite(s0) or np.isnan(out[x, y, z, _C_RF]):
             continue
-        sv2 = (sigma_raw / s0) ** 2
+        sv2 = (sigma_map[x, y, z] / s0) ** 2
         if not (sv2 > 0.0):     # see the v1.6.2 fix in _fiber_detection_pass
             continue
 
@@ -459,6 +460,7 @@ def _uncertainty_kernel(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso
 
 def compute_uncertainty(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso,
                         sigma_raw, results, crossing_ad_fixed=False):
+    # sigma_raw: a scalar or a per-voxel map (X, Y, Z) in the data's units
     """Run the kernel and return a dict of arrays + a summary for the run report.
 
     `results` must be final (after Stage D, the detection test and
@@ -479,7 +481,8 @@ def compute_uncertainty(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso
     _uncertainty_kernel(np.ascontiguousarray(data_corr, dtype=np.float64),
                         np.ascontiguousarray(coords), np.asarray(bvals, np.float64),
                         np.ascontiguousarray(bvecs, dtype=np.float64), float(b0_thr),
-                        np.asarray(iso_d, np.float64), bool(use_3iso), float(sigma_raw),
+                        np.asarray(iso_d, np.float64), bool(use_3iso),
+                        np.ascontiguousarray(np.broadcast_to(np.asarray(sigma_raw, np.float64), shp)),
                         np.ascontiguousarray(results, dtype=np.float64), ad_b, rd_b,
                         bool(crossing_ad_fixed), float(_RESID_FLAG_Z), se, dir_se, lc, flags, rr)
     return dict(se=se.astype(np.float32), dir_se_deg=dir_se.astype(np.float32),
@@ -514,7 +517,7 @@ def summarise_uncertainty(unc, results, mask, channel_names):
     n = int(fitted.sum())
     share = (lambda b: float(np.mean((fl[fitted] & b) > 0)) if n else None)
     return dict(method='fisher_crlb_at_estimate_delta_method',
-                noise='sigma_raw / S0_voxel, Gaussian, rician-corrected signal',
+                noise='sigma / S0_voxel (thermal noise map if given), Gaussian, rician-corrected signal',
                 directions='free (2 tangent angles per population)',
                 bounds='not imposed (unconstrained local information)',
                 n_voxels=n,

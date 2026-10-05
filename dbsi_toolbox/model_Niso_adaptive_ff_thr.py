@@ -775,7 +775,7 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         stagec_enabled, iso_forward, iso_gram,
                         stagec_ad_grid, stagec_rd_grid, stagec_aniso_ratio,
                         data_raw, stagec_iso_grid, stagec_dir_refine,
-                        crossing_ff_kappa, sigma_raw):
+                        crossing_ff_kappa, sigma_map):
     """
     v3 parallel fitting kernel — two-compartment isotropic model (2-ISO).
 
@@ -1031,7 +1031,7 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                     iso_sig_r = np.empty(len(bvals))
                     ff_r = crossing_ff_resolve(sig_norm, bvals, bvecs, fiber_dirs,
                                                directions, n_pop, diff_pairs, iso_grid,
-                                               crossing_ff_kappa * (sigma_raw / s0) ** 2,
+                                               crossing_ff_kappa * (sigma_map[x, y, z] / s0) ** 2,
                                                iso_sig_r)
                     if not np.isnan(ff_r) and ff_r > 1e-6:
                         for k in range(n_pop):
@@ -1080,7 +1080,7 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         stagec_enabled, iso_forward, iso_gram,
                         stagec_ad_grid, stagec_rd_grid, stagec_aniso_ratio,
                         data_raw, stagec_iso_grid, stagec_dir_refine,
-                        crossing_ff_kappa, sigma_raw):
+                        crossing_ff_kappa, sigma_map):
     """v3 parallel fitting kernel — three-compartment isotropic model
     (3-ISO). Same Stage A / Stage B (+ MRDS multi-fiber) structure as
     `_fit_voxels_2iso_v3`; see that kernel's docstring for the full
@@ -1329,7 +1329,7 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                     iso_sig_r = np.empty(len(bvals))
                     ff_r = crossing_ff_resolve(sig_norm, bvals, bvecs, fiber_dirs,
                                                directions, n_pop, diff_pairs, iso_grid,
-                                               crossing_ff_kappa * (sigma_raw / s0) ** 2,
+                                               crossing_ff_kappa * (sigma_map[x, y, z] / s0) ** 2,
                                                iso_sig_r)
                     if not np.isnan(ff_r) and ff_r > 1e-6:
                         for k in range(n_pop):
@@ -1503,7 +1503,7 @@ def _iso_resolve_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso, 
 
 @njit(cache=True, fastmath=FASTMATH)
 def _fiber_detection_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso,
-                          sigma_raw, threshold, out, stat_out):
+                          sigma_map, threshold, out, stat_out):
     """
     Detection test for the fiber populations Stage A reported (v1.6.1).
 
@@ -1511,7 +1511,7 @@ def _fiber_detection_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3i
     fitted tensors and directions, Rician-corrected signal):
 
         stat = (RSS_iso_only - RSS_fibers+iso) / sigma_voxel^2,
-        sigma_voxel = sigma_raw / S0_voxel
+        sigma_voxel = sigma_map[x, y, z] / S0_voxel   (thermal sigma map since v1.7.1)
 
     i.e. how much the fibers reduce the residual, in units of the noise
     variance. Written to `stat_out` for every such voxel. If `threshold` > 0
@@ -1594,7 +1594,7 @@ def _fiber_detection_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3i
         w_i, _ = nnls_coordinate_descent(AtA_iso, A_iso.T @ yv, 0.0)
         r_f = yv - A @ w_f
         r_i = yv - A_iso @ w_i
-        sig2 = (sigma_raw / s0) ** 2
+        sig2 = (sigma_map[x, y, z] / s0) ** 2
         if not (sig2 > 0.0):      # S0 infinito o sigma nullo: statistica non definita
             continue
         stat = (np.sum(r_i * r_i) - np.sum(r_f * r_f)) / sig2
@@ -1976,6 +1976,7 @@ class DBSI_Adaptive:
         self.uncertainty_ = None
         self.uncertainty_summary_ = None
         self.nonfinite_voxels_excluded_ = None
+        self.noise_ = None
         self.lambda_edges_ = {}
         self.hemisphere_spacing_deg_ = None
         self.cone_refinement_schedule_ = None
@@ -2048,7 +2049,7 @@ class DBSI_Adaptive:
            calibrate_concentration_gate=False,
            concentration_gate_percentile=_CONCENTRATION_GATE_PERCENTILE,
            _calibration_only=False, _lambda_aniso_grid=None, _lambda_iso_grid=None,
-           _rician_correction='clamp'):
+           _rician_correction='clamp', noise_map=None):
         """
         Fit the v3 hybrid two-stage adaptive DBSI model (+ MRDS
         multi-fiber extension) to 4D diffusion MRI data.
@@ -2100,6 +2101,7 @@ class DBSI_Adaptive:
         self.uncertainty_ = None
         self.uncertainty_summary_ = None
         self.nonfinite_voxels_excluded_ = None
+        self.noise_ = None
         self.dictionary_ = None
         self.calibration_curves_ = None
 
@@ -2271,15 +2273,61 @@ class DBSI_Adaptive:
 
         # ── SNR estimation ─────────────────────────────────────────────────
         print("\n2. Estimating SNR...")
-        snr, sigma = estimate_snr_robust(data, bvals, mask, verbose=True)
+        # tSNR: media temporale dei b=0 / deviazione standard temporale dei b=0
+        # (de-biased, v1.3.5). E' l'indicatore di QUALITA' dell'acquisizione e si
+        # riporta sempre. Come sigma del MODELLO serve invece il rumore TERMICO:
+        # la variabilita' dei b=0 contiene anche pulsazione e movimento, e sui
+        # dati veri e' 1.3-2.2 volte il termico, in misura diversa per soggetto
+        # (notebook 12, 2026-10-02). Il termico viene dalla mappa di rumore di
+        # dwidenoise (MP-PCA), portata nella scala dei dati (divisa per il campo
+        # di bias di N4): `noise_map`. Senza mappa, sigma resta quello dei b=0.
+        tsnr, sigma_b0 = estimate_snr_robust(data, bvals, mask, verbose=True)
+        coords = np.argwhere(mask)
+        xs, ys, zs = coords[:, 0], coords[:, 1], coords[:, 2]
+        self.noise_ = dict(tsnr=float(tsnr), sigma_b0_temporal=float(sigma_b0))
+        if noise_map is not None:
+            noise_map = np.asarray(noise_map, dtype=np.float64)
+            if noise_map.ndim == 4 and noise_map.shape[3] == 1:
+                noise_map = noise_map[..., 0]
+            if noise_map.shape != data.shape[:3]:
+                raise ValueError(f"noise_map {noise_map.shape} non ha la griglia dei dati "
+                                 f"{data.shape[:3]}")
+            _nm = noise_map[xs, ys, zs]
+            _ok = np.isfinite(_nm) & (_nm > 0)
+            if _ok.mean() < 0.5:
+                raise ValueError(f"noise_map: solo {_ok.mean():.0%} dei voxel della maschera "
+                                 f"ha un valore finito > 0. E' la mappa giusta, nella scala "
+                                 f"dei dati (divisa per il bias di N4)?")
+            sigma_map = np.zeros(data.shape[:3], dtype=np.float64)
+            sigma_map[xs, ys, zs] = np.where(_ok, _nm, np.median(_nm[_ok]))
+            sigma = float(np.median(_nm[_ok]))
+            _b0 = np.asarray(bvals) < 100
+            _s0 = data[xs, ys, zs][:, _b0].astype(np.float64).mean(axis=1)
+            _snr_t = float(np.median(_s0[_ok] / _nm[_ok]))
+            self.noise_.update(
+                sigma_source='noise_map', sigma_thermal_median=sigma,
+                snr_thermal=_snr_t,
+                sigma_b0_over_thermal=float(sigma_b0 / sigma),
+                noise_map_filled_voxels=int((~_ok).sum()),
+                noise_map_filled_fraction=round(float((~_ok).mean()), 6))
+            snr = _snr_t
+            print(f"   Noise map (thermal sigma): median {sigma:.4f}, SNR (S0/sigma) {_snr_t:.2f}; "
+                  f"tSNR {tsnr:.2f}, sigma_b0/sigma_thermal {sigma_b0 / sigma:.2f}"
+                  + (f"; {int((~_ok).sum()):,} mask voxels with no valid value filled with "
+                     f"the median" if (~_ok).any() else ""))
+        else:
+            sigma = float(sigma_b0)
+            sigma_map = np.full(data.shape[:3], sigma, dtype=np.float64)
+            snr = tsnr
+            self.noise_.update(sigma_source='b0_temporal')
+            print("   [NOTE] no noise_map: the model uses the b=0 temporal sigma, which also "
+                  "contains physiological variability (overestimates the thermal noise).")
 
         # ── Rician bias correction (unchanged from v1/v2) ──────────────────
         print("\n3. Applying Rician Bias Correction...")
-        coords = np.argwhere(mask)
-
-        xs, ys, zs = coords[:, 0], coords[:, 1], coords[:, 2]
         data_corr = np.zeros_like(data, dtype=np.float32)
-        noise_floor = 2.0 * sigma**2
+        # per voxel (v1.7.1): 2 sigma^2 col sigma del voxel; costante senza mappa
+        noise_floor = (2.0 * sigma_map[xs, ys, zs] ** 2)[:, None]
         masked_sq = data[xs, ys, zs].astype(np.float64)**2
         valid_mask = masked_sq > noise_floor
         corrected = np.where(valid_mask,
@@ -2368,6 +2416,7 @@ class DBSI_Adaptive:
                                 (self.lambda_aniso is None or self.lambda_iso is None)):
             y_cal, sigma_cal = sample_calibration_voxels(
                 data_corr, mask, bvals, n_voxels=n_calibration_voxels, seed=0,
+                noise_map=noise_map,
             )
             print(f"\n   Sampled {len(y_cal)} calibration voxels from the brain mask "
                   f"(sigma_normalised={sigma_cal:.5f})")
@@ -2525,7 +2574,7 @@ class DBSI_Adaptive:
             if y_cal is None:
                 y_cal, sigma_cal = sample_calibration_voxels(
                     data_corr, mask, bvals, n_voxels=n_calibration_voxels,
-                    seed=0,
+                    seed=0, noise_map=noise_map,
                 )
                 print(f"   Sampled {len(y_cal)} calibration voxels from the "
                       f"brain mask (sigma_normalised={sigma_cal:.5f})")
@@ -2624,6 +2673,7 @@ class DBSI_Adaptive:
             if y_cal is None:
                 y_cal, sigma_cal = sample_calibration_voxels(
                     data_corr, mask, bvals, n_voxels=n_calibration_voxels, seed=0,
+                    noise_map=noise_map,
                 )
                 print(f"   Sampled {len(y_cal)} calibration voxels for SURE cross-check "
                       f"(sigma_normalised={sigma_cal:.5f})")
@@ -2696,7 +2746,8 @@ class DBSI_Adaptive:
         if sigma_cal is None and run_calibration and (
                 calibrate_concentration_gate):
             _yc_tmp, sigma_cal = sample_calibration_voxels(
-                data_corr, mask, bvals, n_voxels=n_calibration_voxels, seed=0)
+                data_corr, mask, bvals, n_voxels=n_calibration_voxels, seed=0,
+                noise_map=noise_map)
             del _yc_tmp
 
         # ── Data-driven fiber-detection concentration gate (MC null) ────────
@@ -2810,7 +2861,7 @@ class DBSI_Adaptive:
                     bool(self.stagec_refine), iso_forward, iso_gram,
                     stagec_ad_grid, stagec_rd_grid, float(_STAGEC_ANISO_RATIO),
                     data, stagec_iso_grid, bool(self.stagec_dir_refine),
-                    float(_kappa), float(sigma)
+                    float(_kappa), sigma_map
                 )
                 pbar.update(end - start)
 
@@ -2847,7 +2898,7 @@ class DBSI_Adaptive:
             _npop_before = results[..., _C_NPOP].copy()
             _thr = float(self.fiber_detection_threshold or 0.0)
             _fiber_detection_pass(data_corr, coords, bvals, bvecs, b0_thr, _iso_d,
-                                  use_3iso, float(sigma), _thr, results, _stat)
+                                  use_3iso, sigma_map, _thr, results, _stat)
             self.fiber_detection_stat_ = _stat
             _tested = np.isfinite(_stat) & mask
             _rej = _tested & np.isnan(results[..., _C_NPOP]) & ~np.isnan(_npop_before)
@@ -2918,7 +2969,7 @@ class DBSI_Adaptive:
             _t0u = time.time()
             self.uncertainty_ = compute_uncertainty(
                 data_corr, coords, bvals, bvecs, b0_thr, _iso_d, use_3iso,
-                float(sigma), results)
+                sigma_map, results)
             self.uncertainty_summary_ = summarise_uncertainty(
                 self.uncertainty_, results, mask,
                 DBSI_Adaptive.output_map_names(model_mode))
@@ -2990,7 +3041,7 @@ class DBSI_Adaptive:
                     'condition_number_regularized'],
             ),
             input=dict(nonfinite_voxels_excluded=int(self.nonfinite_voxels_excluded_ or 0)),
-            noise=dict(snr=float(snr), sigma_raw=float(sigma),
+            noise=dict(**(self.noise_ or {}), snr=float(snr), sigma_raw=float(sigma),
                        n_b0=int(np.sum(np.asarray(bvals) < 50)),
                        sigma_estimator=('legacy_biased'
                                         if _tools._SNR_LEGACY_BIASED else
@@ -3057,7 +3108,8 @@ class DBSI_Adaptive:
     # ------------------------------------------------------------------
     def calibrate(self, data, bvals, bvecs, mask, n_calibration_voxels=1000,
                   lambda_aniso_grid=None, lambda_iso_grid=None,
-                  n_iso_method='quadrature', calibrate_concentration_gate=False):
+                  n_iso_method='quadrature', calibrate_concentration_gate=False,
+                  noise_map=None):
         """
         Calibra UNA acquisizione senza fittarla: esegue la parte di `fit()` che
         sceglie gli iperparametri e si ferma prima del fit voxel per voxel.
@@ -3077,7 +3129,7 @@ class DBSI_Adaptive:
             Griglie di ricerca. Default: quelle di `fit()` (logspace(-4, 4, 40)
             e logspace(-5, 1, 40)). Una griglia piu' fine ha senso qui, perche'
             la calibrazione di protocollo si paga una volta sola.
-        n_iso_method, calibrate_concentration_gate
+        n_iso_method, calibrate_concentration_gate, noise_map
             Come in `fit()`. Il gate e' spento di default dalla 1.4.0.
 
         Returns
@@ -3097,7 +3149,8 @@ class DBSI_Adaptive:
                      calibrate_concentration_gate=calibrate_concentration_gate,
                      _calibration_only=True,
                      _lambda_aniso_grid=lambda_aniso_grid,
-                     _lambda_iso_grid=lambda_iso_grid)
+                     _lambda_iso_grid=lambda_iso_grid,
+                     noise_map=noise_map)
 
     def _calibration_record(self, bvals, snr, sigma, sigma_cal, y_cal, iso_grid,
                             run_calibration, calibrate_concentration_gate):
@@ -3128,7 +3181,7 @@ class DBSI_Adaptive:
             run_utc=_dt.datetime.now(_dt.timezone.utc).isoformat(timespec='seconds'),
             **_package_provenance(),
             protocol=protocol_fingerprint(bvals),
-            noise=dict(snr=snr, sigma_raw=sigma, sigma_normalised=sigma_cal,
+            noise=dict(**(self.noise_ or {}), snr=snr, sigma_raw=sigma, sigma_normalised=sigma_cal,
                        n_b0=int(np.sum(np.asarray(bvals).ravel() < 50))),
             n_calibration_voxels=(0 if y_cal is None else int(len(y_cal))),
             hyperparameters=dict(

@@ -131,6 +131,28 @@ compartment fractions use 0. `save_output_maps` writes `fiber_valid.nii.gz`
 alongside the maps: resample `value * valid` and `valid` together and divide,
 or linear interpolation will turn those NaNs into 0 and depress the result.
 
+## Noise: the thermal noise map (v1.7.1)
+
+The Rician correction subtracts 2 sigma^2 from the squared signal, so sigma must be the THERMAL
+noise of the magnitude images. The temporal spread of the b=0 volumes is not: it also contains
+pulsation and motion, and on real data it was 1.3-2.2x the thermal noise, differently for every
+subject. Pass the thermal noise map:
+
+```bash
+dwidenoise dwi.nii.gz dwi_denoised.nii.gz -noise noise.nii.gz          # MP-PCA noise map
+dwibiascorrect ants dwi_pre.nii.gz dwi_N4.nii.gz -bias bias.nii.gz ...  # keep the N4 field
+mrcalc noise.nii.gz bias.nii.gz -div -finite noise.nii.gz bias.nii.gz -div 0 -if noise_N4.nii.gz
+python scripts/run_dbsi.py --dwi dwi_N4.nii.gz ... --noise noise_N4.nii.gz
+```
+
+(`fit(..., noise_map=array)` from Python.) The map must be on the same grid and in the same
+intensity scale as the DWI the toolbox reads, hence the division by the N4 bias field. It is used
+for the Rician correction and for every sigma-normalised quantity (crossing ridge, detection
+statistic, uncertainty maps, lambda calibration). Without it the toolbox falls back to the b=0
+temporal sigma and says so in the run report. The run report always gives the **tSNR** (temporal
+mean / temporal sd of the b=0 volumes: the acquisition-quality figure) and, with the map, the
+thermal SNR (S0 / sigma) and the ratio between the two sigmas.
+
 ## Installation
 
 ```bash

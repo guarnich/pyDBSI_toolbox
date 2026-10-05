@@ -70,6 +70,12 @@ def main():
                         help="Brain mask. REQUIRED: it defines both the fitted voxels "
                              "and the voxels sampled for calibration, so it changes the "
                              "calibrated lambda/n_iso/gate, not just the field of view.")
+    parser.add_argument("--noise", default=None,
+                        help="Thermal noise map (sigma per voxel) in the SAME scale and grid as --dwi: "
+                             "the dwidenoise -noise map divided by the N4 bias field (dwibiascorrect "
+                             "-bias). Used for the Rician correction and every sigma-normalised "
+                             "quantity. Without it the model falls back to the b=0 temporal sigma, "
+                             "which also contains physiological variability.")
     parser.add_argument("--out", required=True)
     parser.add_argument("--skip-calibration", action="store_true")
     parser.add_argument("--protocol-calibration", dest="protocol_calibration", default=None,
@@ -194,6 +200,7 @@ def main():
         n_calibration_voxels=args.n_calibration_voxels,
         n_iso_method=args.n_iso_method,
         n_bootstrap=args.n_bootstrap,
+        noise_map=_load_noise(args.noise, data.shape[:3], affine),
     )
 
     names = DBSI_Adaptive.output_map_names(model_mode)
@@ -210,6 +217,23 @@ def main():
           f"or exact duplicates): {', '.join(skipped)}")
 
     print("\nDone!")
+
+def _load_noise(path, shape3d, affine):
+    """The --noise map as an array on the data grid, or None."""
+    if not path:
+        return None
+    import nibabel as nib
+    import numpy as np
+    img = nib.load(path)
+    arr = np.asarray(img.dataobj, dtype=np.float64)
+    if arr.ndim == 4 and arr.shape[3] == 1:
+        arr = arr[..., 0]
+    if arr.shape != tuple(shape3d):
+        raise SystemExit(f"--noise {path}: grid {arr.shape} differs from the DWI {tuple(shape3d)}")
+    if not np.allclose(img.affine, affine, atol=1e-3):
+        print(f"WARNING: --noise {path} has a different orientation matrix than the DWI")
+    return arr
+
 
 def model_kwargs(args):
     """Constructor kwargs from the parsed CLI: only what the user set, plus the

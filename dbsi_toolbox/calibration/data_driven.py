@@ -908,7 +908,7 @@ def select_lambda_aniso_gcv_lcurve(AtA, At, y_voxels, n_aniso_cols,
 
 def sample_calibration_voxels(data, mask, bvals, b0_thr=100.0,
                               n_voxels=500, min_signal_fraction=0.05,
-                              seed=None):
+                              seed=None, noise_map=None):
     """
     Sample a representative set of S0-normalised voxel signals from the
     actual brain volume being processed, for use as `y_voxels` in
@@ -951,6 +951,11 @@ def sample_calibration_voxels(data, mask, bvals, b0_thr=100.0,
         GCV/discrepancy criteria).
     seed : int or None
         Random seed for reproducible sampling.
+    noise_map : ndarray (X, Y, Z) or None
+        Thermal noise sigma per voxel, in the data's units (v1.7.1). If given,
+        sigma_normalised is the median of noise_map / S0 over the sampled
+        voxels instead of the b=0 temporal spread, which also contains
+        physiological variability (1.3-2.2x the thermal noise on real data).
 
     Returns
     -------
@@ -1007,7 +1012,11 @@ def sample_calibration_voxels(data, mask, bvals, b0_thr=100.0,
     # themselves (already S0-normalised) as a simple, direct estimate
     # consistent with the temporal method in estimate_snr_robust, but
     # expressed in the normalised-signal space used here.
-    if len(b0_idx) >= 2:
+    if noise_map is not None:
+        nm = np.asarray(noise_map, dtype=np.float64)[xs, ys, zs]
+        ok = np.isfinite(nm) & (nm > 0)
+        sigma_normalised = float(np.median(nm[ok] / sampled_s0[ok])) if ok.any() else float('nan')
+    elif len(b0_idx) >= 2:
         # De-biased exactly as `estimate_snr_robust` (v1.3.5): the median of the
         # per-voxel sample standard deviation is sigma * sqrt(median(chi2_k)/k),
         # k = n_b0 - 1, i.e. x0.6745 at the 2-b0 minimum. Until v1.3.4 the raw

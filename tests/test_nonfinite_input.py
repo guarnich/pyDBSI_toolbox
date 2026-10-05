@@ -77,7 +77,7 @@ def test_rilevamento_non_divide_per_zero():
     out[0, 0, 0, M._C_DIR1:M._C_DIR1 + 3] = (1.0, 0.0, 0.0); out[0, 0, 0, M._C_FF] = 0.5
     stat = np.full((1, 1, 1), np.nan, np.float32)
     M._fiber_detection_pass(dc, np.array([[0, 0, 0]]), bvals, bvecs, 100.0,
-                            np.array(M._ISO_RESOLVE_D_3ISO), True, 30.0, 0.0, out, stat)
+                            np.array(M._ISO_RESOLVE_D_3ISO), True, np.full((1, 1, 1), 30.0), 0.0, out, stat)
     print(f"  S0 infinito: statistica {stat[0, 0, 0]} (nessuna eccezione)")
     assert np.isnan(stat[0, 0, 0])
 

@@ -1,0 +1,106 @@
+#!/usr/bin/env python
+"""
+Mappa di rumore termico in ingresso (v1.7.1, `fit(noise_map=...)`, CLI `--noise`).
+
+IL PROBLEMA (notebook 12, 2026-10-02). Il sigma del modello veniva dalla variabilita' temporale dei
+b=0, che contiene anche pulsazione e movimento: sui dati veri 1.3-2.2 volte il rumore termico, in
+misura diversa per soggetto. La correzione Rician sottrae 2 sigma^2: con sigma gonfiato sottrae
+troppo e abbassa RF. Il rumore termico viene dalla mappa di dwidenoise (MP-PCA), divisa per il campo
+di bias di N4; il tSNR (b=0 / b=0) resta come indicatore di qualita'.
+
+COSA SI PROTEGGE.
+  1. Senza mappa, oppure con una mappa COSTANTE pari al sigma dei b=0, le uscite sono identiche.
+  2. Su un fantoccio con b=0 piu' rumorosi (sigma_b0 = 1.6 x termico), con la mappa giusta il run
+     report trova il rapporto 1.6 e la RF e' piu' vicina al vero che senza mappa.
+  3. Mappa con griglia sbagliata o quasi tutta non valida: rifiutata. Pochi voxel non validi:
+     riempiti con la mediana e contati.
+
+    python tests/test_noise_map.py
+"""
+import io, sys, contextlib
+from pathlib import Path
+import numpy as np
+
+import dbsi_toolbox
+from dbsi_toolbox import DBSI_Adaptive
+
+NOMI = DBSI_Adaptive.output_map_names(3); IX = {n: i for i, n in enumerate(NOMI)}
+LAM = dict(lambda_aniso=9.805121767832382, lambda_iso=0.015117750706156615, n_iso=6)
+EXP = Path(__file__).resolve().parents[1] / 'experiments' / 'uncertainty'
+S0, SIG_T, FATT_B0 = 1500.0, 1500.0 / 20, 1.6       # SNR termico 20, b=0 piu' rumorosi di 1.6x
+
+
+def _dati(seed=5, n=120):
+    bv = np.loadtxt(EXP / 'p3_like.bval').ravel(); bc = np.loadtxt(EXP / 'p3_like.bvec')
+    bc = bc.T if bc.shape[0] == 3 else bc
+    nb = np.linalg.norm(bc, axis=1, keepdims=True); nb[nb == 0] = 1; bc = bc / nb
+    rng = np.random.default_rng(seed); b0 = bv < 100
+    d = np.zeros((n, 2, 1, bv.size), np.float32)
+    for i in range(n):
+        for j in range(2):
+            S = 0.25 * np.exp(-bv * 0.15e-3) + 0.55 * np.exp(-bv * 1.0e-3) + 0.20 * np.exp(-bv * 3.0e-3)
+            S = S0 * S
+            fisio = np.where(b0, rng.normal(0, SIG_T * np.sqrt(FATT_B0 ** 2 - 1), bv.size), 0.0)
+            d[i, j, 0] = np.sqrt((S + fisio + rng.normal(0, SIG_T, bv.size)) ** 2 + rng.normal(0, SIG_T, bv.size) ** 2)
+    return d, bv, bc
+
+
+def _fit(d, bv, bc, **kw):
+    m = DBSI_Adaptive(**LAM)
+    with contextlib.redirect_stdout(io.StringIO()):
+        res, _ = m.fit(d, bv, bc, np.ones(d.shape[:3], bool), run_calibration=False, **kw)
+    return m, res
+
+
+def test_mappa_costante_identica():
+    d, bv, bc = _dati(n=40)
+    m0, r0 = _fit(d, bv, bc)
+    sb0 = m0.noise_['sigma_b0_temporal']
+    m1, r1 = _fit(d, bv, bc, noise_map=np.full(d.shape[:3], sb0))
+    same = np.array_equal(np.isnan(r0), np.isnan(r1)) and np.allclose(r0, r1, rtol=0, atol=0, equal_nan=True)
+    st = np.allclose(m0.fiber_detection_stat_, m1.fiber_detection_stat_, rtol=0, atol=0, equal_nan=True)
+    print(f"  senza mappa: sorgente {m0.noise_['sigma_source']}; mappa costante = sigma_b0: uscite identiche {same}, "
+          f"statistica identica {st}")
+    assert m0.noise_['sigma_source'] == 'b0_temporal' and m1.noise_['sigma_source'] == 'noise_map'
+    assert same and st
+
+
+def test_rf_con_sigma_termico():
+    d, bv, bc = _dati()
+    m0, r0 = _fit(d, bv, bc)
+    m1, r1 = _fit(d, bv, bc, noise_map=np.full(d.shape[:3], SIG_T))
+    rf0 = np.median(r0[..., IX['restricted_fraction']]); rf1 = np.median(r1[..., IX['restricted_fraction']])
+    rap = m1.noise_['sigma_b0_over_thermal']
+    print(f"  sigma_b0 / termico misurato {rap:.2f} (vero {FATT_B0}); tSNR {m1.noise_['tsnr']:.1f}, "
+          f"SNR termico {m1.noise_['snr_thermal']:.1f}")
+    print(f"  RF mediana (vera 0.25): sigma dei b=0 {rf0:.3f}, mappa termica {rf1:.3f}")
+    assert abs(rap - FATT_B0) < 0.15
+    assert abs(rf1 - 0.25) < abs(rf0 - 0.25), 'la mappa termica non avvicina la RF al vero'
+    assert m1.run_report_['noise']['sigma_source'] == 'noise_map'
+
+
+def test_mappa_sbagliata():
+    d, bv, bc = _dati(n=10)
+    for nome, nm in (('griglia', np.ones((3, 3, 3))), ('quasi tutta nulla', np.zeros(d.shape[:3]))):
+        try:
+            _fit(d, bv, bc, noise_map=nm)
+        except ValueError as e:
+            print(f"  {nome}: rifiutata ({str(e)[:60]}...)")
+            continue
+        raise AssertionError(f'mappa sbagliata ({nome}) accettata')
+    nm = np.full(d.shape[:3], SIG_T); nm[0, 0, 0] = np.nan; nm[1, 0, 0] = 0
+    m, _ = _fit(d, bv, bc, noise_map=nm)
+    print(f"  2 voxel non validi: riempiti {m.noise_['noise_map_filled_voxels']}")
+    assert m.noise_['noise_map_filled_voxels'] == 2
+
+
+if __name__ == '__main__':
+    print(f"dbsi_toolbox {dbsi_toolbox.__version__}")
+    fails = 0
+    for name, fn in list(globals().items()):
+        if name.startswith('test_') and callable(fn):
+            try:
+                fn(); print(f"PASS  {name}")
+            except AssertionError as e:
+                fails += 1; print(f"FAIL  {name}: {e}")
+    sys.exit(1 if fails else 0)

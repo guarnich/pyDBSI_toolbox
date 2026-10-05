@@ -46,8 +46,13 @@ if sys.argv[1] == '--confronta':
 import dbsi_toolbox
 from dbsi_toolbox import DBSI_Adaptive, load_data
 sess, out = Path(sys.argv[1]), sys.argv[2]
-prep = sess / 'prep'
-mk = sorted(prep.glob('*_preprocessed_brain_mask.nii.gz')); assert len(mk) == 1
+prep = sess if sess.name == 'prep' else sess / 'prep'      # accetta la sessione o direttamente prep/
+if not prep.is_dir():
+    sys.exit(f'cartella non trovata: {prep}')
+mk = sorted(prep.glob('*_preprocessed_brain_mask.nii.gz'))
+if len(mk) != 1:
+    sys.exit(f'in {prep} serve UNA maschera *_preprocessed_brain_mask.nii.gz, trovate {len(mk)}: '
+             f'{[m.name for m in mk]}\ncontenuto: {sorted(p.name for p in prep.iterdir())[:30]}')
 base = mk[0].name[:-len('_preprocessed_brain_mask.nii.gz')]
 data, affine, bvals, bvecs, mask_full = load_data(
     str(prep / f'{base}_preprocessed_N4.nii.gz'), str(prep / f'{base}_corrected.bval'),

@@ -185,9 +185,17 @@ def calibrate_protocol(records, name=None, ids=None, rule='geomean',
     n = len(records)
     if n < 2:
         raise ValueError('servono almeno 2 acquisizioni per una calibrazione di protocollo')
+    from ..model_Niso_adaptive_ff_thr import _ALLOW_B0_SIGMA
     for i, r in enumerate(records):
         if r.get('kind') != 'pydbsi_acquisition_calibration':
             raise ValueError(f'record #{i} non e un record di calibrate()')
+        # v1.7.1: la calibrazione di una popolazione di studio usa il rumore TERMICO
+        # (mappa di dwidenoise); un record calibrato col sigma dei b=0 porterebbe
+        # nei lambda la variabilita' fisiologica, diversa per soggetto.
+        src = (r.get('noise') or {}).get('sigma_source', 'b0_temporal')
+        if src != 'noise_map' and not _ALLOW_B0_SIGMA:
+            raise ValueError(f'record #{i}: calibrato senza mappa di rumore (sigma_source={src!r}). '
+                             f'Rifare calibrate(..., noise_map=...) con la mappa di dwidenoise.')
     ids = [str(x) for x in ids] if ids is not None else [f'acq{i:03d}' for i in range(n)]
     if len(ids) != n:
         raise ValueError('ids e records hanno lunghezze diverse')

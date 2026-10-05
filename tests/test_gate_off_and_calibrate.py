@@ -19,6 +19,8 @@ import io, json, contextlib, sys
 import numpy as np
 
 import dbsi_toolbox
+import dbsi_toolbox.model_Niso_adaptive_ff_thr as _MOD
+_MOD._ALLOW_B0_SIGMA = True   # test sintetici: sigma dei b=0 consentito (v1.7.1, solo test)
 from dbsi_toolbox import DBSI_Adaptive
 import dbsi_toolbox.model_Niso_adaptive_ff_thr as M
 

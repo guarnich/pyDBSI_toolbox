@@ -30,6 +30,8 @@ import numpy as np
 import nibabel as nib
 
 import dbsi_toolbox
+import dbsi_toolbox.model_Niso_adaptive_ff_thr as _MOD
+_MOD._ALLOW_B0_SIGMA = True   # test sintetici: sigma dei b=0 consentito (v1.7.1, solo test)
 from dbsi_toolbox import DBSI_Adaptive, load_data
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -66,9 +68,13 @@ def _cli_module():
 def test_cli_uguale_alla_produzione():
     with tempfile.TemporaryDirectory() as t:
         d = Path(t); _scrivi_fantoccio(d)
+        # v1.7.1: la mappa di rumore e' obbligatoria; qui costante (l'uguaglianza non dipende dal valore)
+        _img = nib.load(str(d / 'dwi.nii.gz'))
+        nib.save(nib.Nifti1Image(np.full(_img.shape[:3], 20.0, np.float32), _img.affine), str(d / 'noise.nii.gz'))
         r = subprocess.run([sys.executable, str(CLI), '--dwi', str(d / 'dwi.nii.gz'),
                             '--bval', str(d / 'dwi.bval'), '--bvec', str(d / 'dwi.bvec'),
                             '--mask', str(d / 'mask.nii.gz'), '--out', str(d / 'cli'),
+                            '--noise', str(d / 'noise.nii.gz'),
                             '--lambda-aniso', repr(LA), '--lambda-iso', repr(LI), '--n-iso', '6'],
                            capture_output=True, text=True)
         assert r.returncode == 0, r.stderr[-2000:]
@@ -79,7 +85,8 @@ def test_cli_uguale_alla_produzione():
                           lambda_aniso_method='gcv', stagec_dir_refine=True)
         with contextlib.redirect_stdout(io.StringIO()):
             res, mode = m.fit(data, bvals, bvecs, mask, run_calibration=True,
-                              calibrate_concentration_gate=False)
+                              calibrate_concentration_gate=False,
+                              noise_map=np.full(data.shape[:3], 20.0))
         nomi = DBSI_Adaptive.output_map_names(mode)
         files = sorted((d / 'cli').glob('[0-9][0-9]_*.nii.gz'))
         assert len(files) >= 20, f'solo {len(files)} mappe scritte dalla CLI'

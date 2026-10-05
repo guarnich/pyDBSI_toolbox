@@ -1,389 +1,272 @@
-# pyDBSI Toolbox (v1.2.0 — hybrid two-stage architecture)
+# pyDBSI Toolbox — v1.7.1
 
-**Diffusion Basis Spectrum Imaging (DBSI) - Adaptive Implementation with Numba Acceleration**
+**Diffusion Basis Spectrum Imaging (DBSI): adaptive implementation with Numba acceleration**
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-## What changed in v3
+DBSI decomposes the diffusion-weighted signal of each voxel into **anisotropic fiber
+compartments** (up to two populations, each with its own fraction, tensor and direction) and an
+**isotropic spectrum** split into restricted (cellularity, inflammation), hindered (vasogenic
+edema, extracellular water) and free water (CSF). This toolbox is built for clinical multi-shell
+protocols and for multiple sclerosis studies: every default below was chosen on synthetic data
+with known ground truth and checked on real acquisitions.
 
-v2 attempted to estimate fiber orientation **and** (AD, RD) simultaneously
-from a single linear NNLS solve over an exhaustive (direction × AD/RD-pair)
-dictionary, taking AD/RD as a weighted centroid over the activated
-columns. Systematic synthetic recovery validation (55 swept
-configurations) showed this is **not numerically identifiable**: median
-AD/RD relative errors ranged from ~20% to over 150% across every tested
-dictionary density, getting *worse* with finer grids rather than better,
-because the centroid increasingly averages over an uninformative span of
-the grid as more columns become simultaneously active.
+- [Inputs](#inputs) — including the **required thermal noise map**
+- [Quick start](#quick-start)
+- [How a voxel is fitted](#how-a-voxel-is-fitted)
+- [Outputs](#outputs)
+- [Protocol calibration for a cohort](#protocol-calibration-for-a-cohort)
+- [Key parameters](#key-parameters)
+- [What the numbers mean — known limits](#what-the-numbers-mean--known-limits)
+- [Version history](#version-history)
 
-v3 separates the two questions into two appropriately-sized stages:
+## Inputs
 
-- **Stage A (detection)**: a coarse exhaustive (direction × AD/RD-pair)
-  dictionary is fit via heavily-regularized NNLS — used **only** to
-  detect which hemisphere direction(s) carry fiber signal. We trust
-  *which direction* was selected, not the (AD, RD) breakdown that comes
-  with it.
-- **Stage B (estimation)**: given Stage A's detected direction, a small
-  closed-form weighted-least-squares regression (2 free parameters: AD
-  and RD) — the same analytical construction validated as the v1/v2
-  linear AD/RD initialisation — produces the final diffusivities.
+| input | notes |
+|---|---|
+| preprocessed DWI (4D NIfTI) | denoised, Gibbs- and eddy/distortion-corrected, bias-corrected |
+| b-values, b-vectors (FSL format) | the gradient table matching the preprocessed volumes |
+| brain mask | defines the fitted voxels **and** the calibration sample |
+| **thermal noise map** (3D NIfTI) | **required since v1.7.1**, see below |
 
-This preserves the design intent that motivated v2 (the dictionary must
-"know" that pathology changes AD/RD, not just orientation — credited to
-feedback from Alonso Ramirez-Manzanares) while resolving the
-identifiability failure: Stage B's conditioning no longer depends on
-Stage A's dictionary density, because direction is fixed before Stage B
-runs.
+**3-ISO vs 2-ISO.** With `b_max >= 2000` s/mm² and at least two distinct non-zero shells the
+isotropic block is split into RF / HF / WF (3-ISO); otherwise HF and WF are merged into a single
+non-restricted fraction NRF (2-ISO).
 
-**Synthetic validation summary** (coarse Stage A dictionary, ~30
-directions × 3×3 AD/RD pairs, `lambda_base ≈ 0.005`): direction recovery
-cosine similarity ≈ 1.0 across randomized ground truth; median AD
-relative error ~10–20%, median RD relative error ~15–25% — a substantial
-improvement over v2, though RD precision (the demyelination marker) still
-warrants caution before being reported as a precise quantitative
-biomarker without further protocol-specific validation.
+### The thermal noise map (required)
 
-Stage B's closed-form estimate is no longer the last word, though. Two
-further stages, both ON by default, sit on top of it — see *Algorithm
-details* below.
+The Rician correction subtracts 2σ² from the squared magnitude signal, so σ must be the
+**thermal** noise of the magnitude images. The temporal spread of the b=0 volumes is not: it also
+contains pulsation and motion. On four real acquisitions it was **1.3–2.2× the thermal noise, by a
+different factor for every subject**, and correcting with it shifted the restricted fraction by up
+to 0.04, a subject-dependent bias a cohort study cannot afford. The toolbox therefore requires the
+noise map of MP-PCA denoising (Veraart et al. 2016), brought into the intensity scale of the DWI
+it reads:
 
-## Overview
+```bash
+dwidenoise dwi.nii.gz dwi_denoised.nii.gz -noise noise.nii.gz            # MP-PCA noise map
+# ... mrdegibbs, dwifslpreproc (topup + eddy) ...
+dwibiascorrect ants dwi_pre.nii.gz dwi_N4.nii.gz -bias bias.nii.gz ...    # keep the N4 field
+mrcalc noise.nii.gz bias.nii.gz -div -finite noise.nii.gz bias.nii.gz -div 0 -if noise_N4.nii.gz
+```
 
-DBSI is an advanced diffusion MRI technique that decomposes the
-diffusion-weighted signal into multiple components. This toolbox includes
-an **Adaptive Model** that automatically selects the optimal isotropic
-compartmentalization based on the acquisition protocol (maximum b-value
-and number of shells):
+N4 divides the signal by the bias field, so the noise is divided by it too. The map is computed
+before topup/eddy on the same voxel grid: motion and distortion displace it by a few millimetres,
+negligible for a field that varies over centimetres; the intensity modulation that topup/eddy
+apply in distorted regions is not followed. The map is used for the Rician correction and for
+every σ-normalised quantity (crossing ridge, detection statistic, uncertainty maps, λ
+calibration). Mask voxels with no valid value are filled with the median and counted in the run
+report; a map with less than 50% valid mask voxels, or on another grid, is rejected.
 
-- **3-ISO**: separates Restricted (inflammation/cellularity), Hindered (vasogenic edema) and Free Water (CSF). Activated when $b_{max} \ge 2000 \text{ s/mm}^2$ **and** there are $\ge 2$ distinct non-zero shells (`B_THRESH_3ISO`, `MIN_SHELLS_3ISO`).
-- **2-ISO**: merges Hindered and Free Water into a single Non-Restricted fraction, for numerical stability when the free-water signal sits near the noise floor. Selected whenever either 3-ISO condition fails.
+The run report gives both noise figures: the **tSNR** (temporal mean / temporal SD of the b=0
+volumes, de-biased: the acquisition-quality figure to report and to exclude subjects on) and the
+**thermal SNR** (S0 / σ), with the ratio between the two σ.
+
+## Quick start
+
+### Command line
+
+```bash
+python scripts/run_dbsi.py \
+    --dwi dwi_N4.nii.gz --bval dwi.bval --bvec dwi.bvec \
+    --mask brain_mask.nii.gz --noise noise_N4.nii.gz \
+    --protocol-calibration P3_calibration.json \
+    --out results/
+```
+
+Without `--protocol-calibration` the hyperparameters are calibrated on the acquisition itself
+(fine for a single scan, not for a cohort: see below). Options you do not pass take the
+constructor's own default; the CLI gives maps identical bit for bit to the Python call
+(`tests/test_cli_matches_production.py`).
+
+### Python
+
+```python
+import nibabel as nib
+from dbsi_toolbox import DBSI_Adaptive, load_data, save_output_maps
+
+data, affine, bvals, bvecs, mask = load_data('dwi_N4.nii.gz', 'dwi.bval', 'dwi.bvec',
+                                             'brain_mask.nii.gz')
+noise = nib.load('noise_N4.nii.gz').get_fdata()
+
+model = DBSI_Adaptive.from_calibration('P3_calibration.json')    # or DBSI_Adaptive()
+results, mode = model.fit(data, bvals, bvecs, mask, noise_map=noise)
+save_output_maps(results, DBSI_Adaptive.output_map_names(mode), affine, 'results/', model=model)
+```
+
+Passing the model to `save_output_maps` writes `toolbox_report/` next to the maps (provenance,
+dictionary, uncertainty maps).
+
+## How a voxel is fitted
+
+1. **Rician correction** with the thermal noise map, voxel by voxel: `sqrt(max(S² − 2σ², 0))`.
+   The fraction of measurements truncated to 0 is reported.
+2. **Stage A — direction detection.** Regularised NNLS over a coarse exhaustive dictionary
+   (hemisphere directions × a 3×3 (AD, RD) grid with AD/RD ≥ 2, plus an anchored isotropic grid).
+   Heavy sparsity on the anisotropic block: Stage A is trusted for *which directions* carry fiber
+   signal, not for their diffusivities. Where the anisotropic weight is angularly diffuse
+   (isotropic leakage), the anisotropic penalty is boosted and the voxel re-solved
+   (concentration modulation).
+3. **Populations.** Local maxima on an axial direction graph, basin masses, greedy selection with
+   angular non-maximum suppression: 0, 1 or at most 2 populations. The angular-concentration gate
+   is off by default (since 1.4.0): it rejected exactly the wide-angle crossings the dictionary can
+   resolve.
+4. **Single fiber.** The direction is refined inside a cone tied to the dictionary spacing, then
+   **Stage C** re-solves the fiber tensor and the compartment fractions jointly (variable
+   projection over a 14×12 (AD, RD) grid with local refinement) on the raw normalised signal.
+5. **Crossing (v1.7.0).** The fiber fraction is **re-solved on the detected support** (the
+   detected directions' grid nodes and their neighbours, every admissible (AD, RD) pair, plus the
+   isotropic grid) with a light ridge κ·(σ/S0)², then both tensors are fitted jointly by a bounded
+   Levenberg–Marquardt with fractions and directions fixed. Before 1.7.0 the crossing fraction was
+   Stage A's, shrunk by its sparsity penalty and held fixed: the tensors compensated by turning more
+   anisotropic, and 75% of real crossings had their RD on the floor.
+6. **Stage D.** For every fitted voxel the final compartment fractions are re-estimated by NNLS
+   over `[fitted fibers | three fixed isotropic centroids (0.15, 1.0, 3.0)×10⁻³ mm²/s]` on the
+   Rician-corrected signal (RF/NRF centroids in 2-ISO). Since 1.7.0 this includes crossings; a
+   crossing whose population Stage D gives no weight becomes a single fiber (1.7.1).
+7. **Fiber detection statistic.** `(RSS_iso_only − RSS_fibers+iso) / σ_voxel²` on the Stage D
+   model, always computed and written; the rejection threshold is off by default (see
+   `fiber_detection_threshold`).
+8. **Derived channels, fit quality and uncertainty.** Population-1 fraction, FF-weighted tensor,
+   R²/RMSE of the reconstructed signal, and the per-voxel standard errors.
 
 ## Outputs
 
-27 channels (v1.7.0). `DBSI_Adaptive.output_map_names(mode)` returns them in
-order; the `_C_*` constants in `model_Niso_adaptive_ff_thr.py` are the
-single source of truth for the indices. Read maps by NAME: v1.7.0 removed
+27 channels; read them **by name** (`DBSI_Adaptive.output_map_names(mode)`), v1.7.0 removed
 `mean_iso_adc` (channel 5 until 1.6.x) and every later channel moved down by one.
 
-**Isotropic block and total fiber fraction (0-4)**
+| # | channel | |
+|---|---|---|
+| 0 | `fiber_fraction` | total fiber fraction, both populations |
+| 1–4 | `restricted_fraction`, `hindered_fraction`, `water_fraction`, `nonrestricted_fraction` | HF/WF are NaN in 2-ISO |
+| 5 | `n_fiber_populations` | NaN = no fiber compartment, 0 = fiber without a resolved direction, 1–2 |
+| 6–12 | `fiber_fraction_pop1`, `axial_/radial_diffusivity_pop1`, `fiber_fa_pop1`, `dir1_x/y/z` | NaN if absent |
+| 13–19 | same for population 2 | NaN if absent |
+| 20–22 | `axial_/radial_diffusivity_weighted`, `fiber_fa_weighted` | tensor averaged over the populations, weighted by their fractions; FA of that tensor |
+| 23–26 | `dominant_basin_concentration`, `fit_r2`, `fit_rmse`, `nnls_iterations` | diagnostics |
 
-1. **fiber_fraction (FF)**: apparent axonal density — the TOTAL over both populations.
-2. **restricted_fraction (RF)**: cellularity marker (inflammation).
-3. **hindered_fraction (HF)**: vasogenic edema *(NaN in 2-ISO mode)*.
-4. **water_fraction (WF)**: CSF / free water *(NaN in 2-ISO mode)*.
-5. **nonrestricted_fraction (NRF)**: HF + WF combined.
-
-**Fiber block (5-22)** — at most TWO populations per voxel, each with its
-own fraction, tensor and direction:
-
-- **n_fiber_populations**: three-state (NaN = no fiber compartment attempted,
-  0 = fiber present but no direction resolved, 1-2 = populations found).
-- **fiber_fraction_pop1 / _pop2**: each population's share of FF.
-- **axial_diffusivity_pop1 / _pop2**: axonal integrity — Stage C (single
-  fiber) or MRDS joint estimate (crossing). **In crossings the per-population
-  AD is not quantitative** (it trades with RD and with the hindered
-  compartment): use `axial_diffusivity_weighted` there.
-- **radial_diffusivity_pop1 / _pop2**: demyelination marker. Since v1.7.0 the
-  crossing fiber fraction is re-solved before the crossing tensors are fitted
-  (`crossing_ff_kappa`, default 30): with Stage A's shrunk fraction held fixed,
-  75% of real crossings had their RD on the floor.
-- **fiber_fa_pop1 / _pop2**: intrinsic fiber fractional anisotropy.
-- **dir1_x/y/z, dir2_x/y/z**: unit direction vectors.
-- **axial_/radial_diffusivity_weighted, fiber_fa_weighted**: the fiber tensor
-  averaged over the populations present, weighted by their fractions. Use
-  these for a single per-voxel fiber number; `fiber_fa_weighted` is the FA
-  OF the weighted tensor, not the mean of the two FAs.
-
-Every run also writes a `toolbox_report/` folder into the output directory
-when the fitted model is passed to `save_output_maps`:
+Fractions use 0 for "compartment absent"; the per-population block and the weighted tensor use
+NaN. `save_output_maps` writes `NN_<channel>.nii.gz`, the validity masks `fiber_valid.nii.gz` /
+`fiber_valid_pop2.nii.gz` (resample `value × valid` and `valid` together and divide, or
+interpolation turns NaN into 0), `fiber_detection_stat.nii.gz`, and `toolbox_report/`:
 
 | file | content |
 |---|---|
-| `run_report.txt` | version, git commit, hyperparameters, noise, options, population census, dictionary size |
-| `design_matrix.png` | image of the Stage A dictionary A = [A_aniso \| A_iso], rows sorted by b-value |
-| `design_matrix.npz` | A itself plus the b-values, directions, (AD, RD) pairs and isotropic grid that generate it |
-| `dictionary_columns.csv` | one row per column of A: block, direction, AD/RD or isotropic D, compartment |
-| `uncertainty_maps/` | (v1.7.0) per-voxel standard error of every continuous map, `NN_<channel>_se.nii.gz`, plus angular SE of the directions, Fisher condition number, residual / sigma and a flag bitmask; see its `README.txt` |
+| `run_report.txt` | version, git commit, noise (tSNR, thermal SNR, σ source), Rician truncation, calibration and its source, options, population census, solver diagnostics, detection statistic, uncertainty summary |
+| `design_matrix.png/.npz`, `dictionary_columns.csv` | the Stage A dictionary actually used |
+| `protocol_calibration.json` | copy of the protocol calibration, when used |
+| `uncertainty_maps/` | `NN_<channel>_se.nii.gz` for every continuous channel, `dir1/2_angle_se_deg`, `fisher_log10_condition`, `residual_over_sigma`, `uncertainty_flags`, `README.txt` |
 
-A folder of NIfTI files with no record of what produced them is not
-reproducible, and neither the toolbox version nor the dictionary can be
-recovered from the maps afterwards. Up to v1.3.9 `run_report.txt` sat next to
-the maps; `find_run_report(output_dir)` reads either layout.
+**Uncertainty maps (v1.7.0).** The standard error of each continuous map is the Cramér–Rao bound
+at the estimate: Fisher information of the reported model (fibers with weight, AD, RD and
+direction free; fixed isotropic centroids), delta method for normalised fractions, FA and the
+weighted tensor. It is the precision the data and protocol allow, **not the bias**. On synthetic
+data it is calibrated for single fibers and isotropic tissue (SE / empirical SD 0.95–1.35,
+coverage 93–100%) and conservative for crossings. Flags: 1 RD on a bound, 2 AD on a bound,
+4 ill-conditioned Fisher matrix, 16 residual larger than the noise explains. For a region of N
+voxels the error of the mean shrinks by up to √N.
 
-**Diagnostics (23-26)**
+## Protocol calibration for a cohort
 
-- **dominant_basin_concentration**: angular concentration of the dominant basin.
-- **fit_r2 / fit_rmse**: voxel-wise goodness of fit of the reconstructed signal
-  (all compartments, both populations) and the residual RMSE as a fraction of
-  S0. Computed by the fit itself — the maps always ship with the means to judge
-  them.
-- **nnls_iterations**: Stage A solver iterations.
+Hyperparameters calibrated per acquisition follow that acquisition's noise (on 40 acquisitions of
+one protocol, Spearman with SNR −0.75 for `lambda_aniso`, −0.72 for `lambda_iso`): in a group
+comparison the pipeline would manufacture differences. Calibrate **once per protocol**, on a
+group-balanced sample, **with the noise maps**:
 
-The standard errors in `uncertainty_maps/` are the Cramer-Rao bound at the
-estimate (Fisher information of the reported model, delta method for derived
-maps): the precision the data and protocol allow, NOT the bias. Validated on
-synthetic data: calibrated for single fibers and isotropic tissue (SE / empirical
-sd 0.95-1.35, coverage 93-100%).
+```python
+from dbsi_toolbox import DBSI_Adaptive, calibrate_protocol, save_protocol_calibration
 
-The fiber block is NaN wherever the population is absent, while the
-compartment fractions use 0. `save_output_maps` writes `fiber_valid.nii.gz`
-alongside the maps: resample `value * valid` and `valid` together and divide,
-or linear interpolation will turn those NaNs into 0 and depress the result.
+records = [DBSI_Adaptive().calibrate(data, bvals, bvecs, mask, noise_map=noise)   # no voxel fit
+           for data, bvals, bvecs, mask, noise in sample]
+cal = calibrate_protocol(records, name='P3', ids=subject_ids)      # rule='geomean'
+save_protocol_calibration(cal, 'P3_calibration.json')              # returns the sha256
 
-## Noise: the thermal noise map (v1.7.1)
-
-The Rician correction subtracts 2 sigma^2 from the squared signal, so sigma must be the THERMAL
-noise of the magnitude images. The temporal spread of the b=0 volumes is not: it also contains
-pulsation and motion, and on real data it was 1.3-2.2x the thermal noise, differently for every
-subject. Pass the thermal noise map:
-
-```bash
-dwidenoise dwi.nii.gz dwi_denoised.nii.gz -noise noise.nii.gz          # MP-PCA noise map
-dwibiascorrect ants dwi_pre.nii.gz dwi_N4.nii.gz -bias bias.nii.gz ...  # keep the N4 field
-mrcalc noise.nii.gz bias.nii.gz -div -finite noise.nii.gz bias.nii.gz -div 0 -if noise_N4.nii.gz
-python scripts/run_dbsi.py --dwi dwi_N4.nii.gz ... --noise noise_N4.nii.gz
+model = DBSI_Adaptive.from_calibration('P3_calibration.json')      # every acquisition
 ```
 
-(`fit(..., noise_map=array)` from Python.) The map must be on the same grid and in the same
-intensity scale as the DWI the toolbox reads, hence the division by the N4 bias field. It is used
-for the Rician correction and for every sigma-normalised quantity (crossing ridge, detection
-statistic, uncertainty maps, lambda calibration). Without it the toolbox falls back to the b=0
-temporal sigma and says so in the run report. The run report always gives the **tSNR** (temporal
-mean / temporal sd of the b=0 volumes: the acquisition-quality figure) and, with the map, the
-thermal SNR (S0 / sigma) and the ratio between the two sigmas.
+`calibrate_protocol` refuses records calibrated without a noise map. `from_calibration` imposes
+the λ, `n_iso`, the gate and the dictionary options, refuses data with a different protocol
+fingerprint (`strict=True`) and refuses overrides of calibrated parameters; the run report states
+`calibration_source: protocol` with the file's sha256. Aggregation: `'geomean'` minimises the mean
+of the log GCV curves (scale-invariant, so a noisier acquisition does not outvote a cleaner one);
+`'median_index'` is also reported, with bootstrap stability and each acquisition's distance from
+its own optimum. `lambda_iso` is capped by the acquisitions' discrepancy ceilings.
+
+## Key parameters
+
+| parameter | default | |
+|---|---|---|
+| `crossing_ff_kappa` | 30 | ridge of the crossing fraction re-solve, × (σ/S0)²; 0 restores the 1.6.x path. 65 centres healthy crossing FF on three protocols at SNR 15 and 26; 30 keeps more demyelination contrast at low SNR |
+| `fiber_detection_threshold` | `None` (off) | reject fibers whose detection statistic is below it. Off by decision (Oct 2026): adoptable on the synthetic battery (threshold 15), but its real-data control failed and the 1.7.0 crossing path changes the statistic |
+| `uncertainty` | `True` | write the uncertainty maps |
+| `iso_resolve` | `True` | Stage D; the crossing re-solve and the uncertainty maps need it |
+| `stagec_refine`, `stagec_dir_refine`, `lambda_aniso_conc_mod` | `True` | Stage C, cone refinement before it, concentration modulation |
+| `lambda_aniso`, `lambda_iso` | calibrated | Stage A penalties: GCV (`lambda_aniso_method='gcv'`) and residual GCV with a discrepancy cap; impose them from a protocol calibration in a cohort |
+| `n_iso` | 6 | density of the anchored isotropic grid (11 columns); a quadrature parameter, not a model order: Stage D reports fractions on three fixed centroids |
+| `min_dominant_concentration` | 0.0 (off) | angular-concentration gate |
+| `anisotropy_ratio` | 2.0 | minimum AD/RD of Stage A's fiber atoms (drops the near-isotropic column that leaked into FF) |
+| `n_dirs`, `n_ad`, `n_rd` | auto, 3, 3 | Stage A dictionary; directions from the protocol |
+| `fiber_threshold` | 0.15 | minimum fiber fraction for a tensor to be estimated |
+| `force_n_iso` | `None` | force 2-ISO or 3-ISO |
+
+## What the numbers mean — known limits
+
+- **Fiber vs hindered water.** As a fiber loses anisotropy it becomes indistinguishable from
+  hindered water: at fiber FA 0.4 the Cramér–Rao SD of FF is 0.45 at SNR 26, while FF+HF and RF
+  stay determined (0.07 and 0.04). In advanced lesions trust RF, WF and FF+HF before the FF/HF
+  split; the uncertainty maps say voxel by voxel when the split is lost.
+- **Demyelination contrast is compressed.** RD of a demyelinated fiber is under-estimated
+  (≈ −0.1×10⁻³ mm²/s for a single fiber at SNR 26): the sign of a lesion contrast is preserved,
+  its magnitude is not. Report contrasts, not absolute RD, and average over regions.
+- **Per-population AD in crossings is not quantitative** (Cramér–Rao SD ≈ 0.6×10⁻³): use
+  `axial_diffusivity_weighted` there. Per-population RD in crossings is reliable since 1.7.0.
+- **Perfusion is not modelled.** Fine in white matter (pseudo-diffusion fraction ≈ 0 on real data);
+  in grey matter the free-water fraction includes ≈ 0.03 of perfusion signal, more in CSF-adjacent
+  voxels.
+- **Three populations** are out of scope (`MAX_FIBER_POPULATIONS = 2`).
+
+## Version history
+
+| version | |
+|---|---|
+| **1.7.1** | thermal noise map **required** (`noise_map` / `--noise`), tSNR reported apart; crossings whose population Stage D zeroes become single fibers |
+| 1.7.0 | crossing fiber fraction re-solved before the tensor fit; uncertainty maps; `mean_iso_adc` removed (27 channels); detection threshold kept off |
+| 1.6.4 | numba kernels no longer use `fastmath` NaN/inf assumptions (they made NaN checks platform-dependent: x86 vs arm64) |
+| 1.6.2–1.6.3 | non-finite input voxels excluded; detection statistic computed serially |
+| 1.6.1 | fiber detection statistic; SURE cross-check on the fiber-subtracted residual; CLI aligned to production |
+| 1.6.0 | restricted-fraction Monte Carlo correction removed (Stages C/D fix RF at the source) |
+| 1.5.x | protocol calibration; axial direction graph; fit quality on the Stage D model |
+| ≤ 1.4.0 | Stage C/D, concentration modulation, gate off, `toolbox_report/`, unbiased noise estimator |
 
 ## Installation
 
 ```bash
 git clone https://github.com/guarnich/pyDBSI_toolbox
 cd pyDBSI_toolbox
-pip install .
+pip install -e .
+python tests/test_noise_map.py        # every tests/test_*.py runs as a plain script
 ```
 
-## Quick Start
-
-### Python API
-
-```python
-from dbsi_toolbox import DBSI_Adaptive, load_data, save_output_maps
-
-data, affine, bvals, bvecs, mask = load_data(
-    'dwi.nii.gz', 'dwi.bval', 'dwi.bvec', 'mask.nii.gz'
-)
-
-# The defaults are the validated configuration: n_dirs is protocol-derived,
-# Stage A uses a coarse 3x3 (AD, RD) grid because it only needs to detect the
-# fiber direction, and Stages C/D plus the concentration modulation are on.
-model = DBSI_Adaptive()
-results, model_mode = model.fit(data, bvals, bvecs, mask, run_calibration=True)
-
-names = DBSI_Adaptive.output_map_names(model_mode)
-# Passing the model writes toolbox_report/ next to the maps: run_report.txt
-# (version, git commit, hyperparameters, noise, options, population census,
-# channel list) and the dictionary A as image, .npz and column table.
-save_output_maps(results, names, affine, 'results/', model=model)
-```
-
-### Command Line
-
-```bash
-python -m scripts.run_dbsi \
-    --dwi data.nii.gz \
-    --bval data.bval \
-    --bvec data.bvec \
-    --mask mask.nii.gz \
-    --out results/ \
-    --force-n-iso 3  # Optional: override automatic isotropic-model selection (2 or 3)
-```
-
-Optional overrides for Stage A's detection dictionary (default: coarse
-3×3 grid, protocol-derived direction count):
-
-```bash
-python -m scripts.run_dbsi \
-    --dwi data.nii.gz --bval data.bval --bvec data.bvec --mask mask.nii.gz --out results/ \
-    --n-dirs 30 --n-ad 3 --n-rd 3 --anisotropy-ratio 2.0 \
-    --lambda-aniso 0.6 --lambda-iso 0.005 --min-weight-fraction 0.05
-```
-
-Options you do not pass take the constructor's own default (the CLI does not
-keep copies of them). **Reproducing a production run:** the CLI with the same
-calibration — `--protocol-calibration <json>`, or `--lambda-aniso`,
-`--lambda-iso` and `--n-iso` — gives maps identical bit for bit to
-`DBSI_Adaptive(...).fit(...)` in Python; `tests/test_cli_matches_production.py`
-checks it on every channel.
-
-## Algorithm Details
-
-The stages below run in this order. Stages C and D and the concentration
-modulation are **on by default**; the full per-voxel walkthrough with formulas
-is in `voxel_journey_report`.
-
-1. **Stage A — direction detection**: regularized NNLS over a coarse
-   exhaustive (direction × AD/RD-pair) detection dictionary, with heavy
-   sparsity regularization (`lambda_aniso`) on the anisotropic block. Raw
-   fractions (FF, RF, HF, WF) are sums of NNLS weights within each
-   compartment's columns; the isotropic diffusivities are weighted
-   centroids. The fiber direction(s) are found by collapsing the
-   anisotropic block's per-pair weights and looking only at total weight
-   per direction.
-2. **Concentration modulation**: after the first NNLS, the *angular
-   concentration* of the anisotropic weight is measured. Where it is low
-   (diffuse weight = isotropic leakage rather than a real fiber),
-   `lambda_aniso` is boosted and the voxel is re-solved. A continuous ramp,
-   so low-FA fibers are not crushed along with the leakage.
-3. **Population detection**: local maxima on the direction graph, Voronoi
-   basin mass, then greedy selection with angular non-maximum suppression.
-   The angular-concentration gate that used to precede the selection is
-   **off by default since 1.4.0**: a wide-angle crossing is angularly diffuse
-   by construction, so the gate rejected exactly the crossings the dictionary
-   can resolve (on real data it removed the fiber compartment from 19.5% of
-   voxels, whose residual rose from 1.03 to 1.80 sigma). Fiber/no-fiber
-   discrimination is left to `fiber_threshold`. Yields 0, 1 or **at most 2**
-   populations (`MAX_FIBER_POPULATIONS`, fixed).
-4. **Per-voxel tensor estimation**, by branch:
-   - **one population → cone refinement, then Stage C (VARPRO)**: Stage A's
-     direction is first refined inside a cone whose radius is tied to the
-     dictionary's own measured spacing, because the true fiber almost always
-     falls between grid nodes. Stage C then re-solves the fiber tensor *and*
-     the compartment fractions jointly at that refined direction, on a reduced
-     `[fiber column | isotropic grid]` dictionary, scanning a 14×12 (AD, RD)
-     grid with a 5×5 local refine. This replaces both the raw Stage A fractions and the Stage B
-     tensor, which poison each other: near-fiber columns absorb restricted
-     signal, so FF inflates, RF collapses and AD is under-estimated. Uses
-     the **raw** normalised signal — Rician noise-floor subtraction biases
-     the tensor low.
-   - **two populations → MRDS joint Stage B**: a short symmetry-breaking
-     alternating warm start, then a bounded Levenberg–Marquardt fit of both
-     tensors simultaneously, with directions and fractions held fixed.
-   - **Stage B closed-form** — a weighted least-squares regression on the
-     log-signal, no grid — is the fallback used for a single fiber only when
-     Stage C is disabled.
-5. **Stage D — constrained fraction re-solve** (whole volume): for every
-   fitted voxel the compartment fractions are re-estimated by NNLS over
-   `[detected fibers | fixed isotropic centroids]` on the **Rician-corrected**
-   signal. Stage A's over-complete spectrum smears weight across nearly
-   collinear atoms and mis-bins RF/HF/WF; a few well-placed columns are a
-   far better-conditioned estimator. For crossings only the isotropic split
-   is taken from Stage D, not the total FF.
-6. **Derived channels**: the population-1 fraction, the FF-weighted fiber
-   tensor, and the R²/RMSE fit-quality maps.
-
-The restricted-fraction bias correction (a Monte Carlo response table
-inverted per voxel) was **removed in 1.6.0**. It was built for the
-Stage-A-only pipeline; Stages C and D fix the RF under-recovery at the
-source, and applying it on top double-corrected (RF 2.45× worse on 320
-synthetic voxels: mean RF 0.149 → 0.274, healthy WM 0.076 → 0.272).
-
-### Protocol calibration
-
-Hyperparameters calibrated per acquisition follow that acquisition's noise
-(on 40 acquisitions of one protocol, Spearman with SNR -0.56 for
-`lambda_aniso` and -0.74 for `lambda_iso`): in a group comparison the pipeline
-would manufacture differences. For a cohort, calibrate **once per protocol**:
-
-```python
-from dbsi_toolbox import (DBSI_Adaptive, calibrate_protocol,
-                          save_protocol_calibration)
-
-# 1. one record per acquisition of a (group-balanced) sample; no voxel-wise fit
-records = [DBSI_Adaptive().calibrate(data, bvals, bvecs, mask) for ... in sample]
-
-# 2. one set of hyperparameters for the protocol
-cal = calibrate_protocol(records, name='P3', ids=subject_ids)   # rule='geomean'
-save_protocol_calibration(cal, 'P3_calibration.json')           # returns sha256
-
-# 3. every acquisition of that protocol
-model = DBSI_Adaptive.from_calibration('P3_calibration.json')
-results, mode = model.fit(data, bvals, bvecs, mask)
-```
-
-`from_calibration` imposes `lambda_aniso`, `lambda_iso`, `n_iso`, the gate and
-the dictionary options (the lambdas only mean something on the dictionary they
-were calibrated on), refuses data whose protocol fingerprint differs
-(`strict=True`), and refuses to override a calibrated parameter. The run report
-states `calibration_source: protocol` with the file's sha256, and a copy of the
-JSON lands in `toolbox_report/`. From the command line:
-`run_dbsi.py ... --protocol-calibration P3_calibration.json`.
-
-Two aggregation rules: `'geomean'` minimises the mean of the log GCV curves
-(each acquisition's curve is scale-invariant, so a noisier acquisition does not
-outvote a cleaner one), `'median_index'` is the grid index closest on average
-to the individual optima, ties broken on the worst case. The record always
-reports the other rule's answer, the bootstrap stability over acquisitions and
-how far each acquisition sits from its own optimum. `lambda_iso` is also capped
-by the acquisitions' discrepancy ceilings (`lambda_iso_cap_rule`).
-
-### Key Parameters
-
-* `n_iso`: density of the anchored isotropic grid (default: `None` →
-  fixed at **6** by grid convergence, `fit(n_iso_method='quadrature')`).
-  It is a discretisation parameter, not a model order: Stage D recomputes the
-  reported fractions on three fixed centroids, and n_iso=6 already sits within
-  tolerance of the converged tensor. It is not the column count — n_iso=6
-  gives 11 columns (4 restricted / 5 hindered / 2 water), reported as
-  `n_iso_columns` in `toolbox_report/run_report.txt`. Per-dataset selection
-  (`n_iso_method='bootstrap'`) was the default before 1.3.9.
-* `lambda_aniso`, `lambda_iso`: Stage A regularization strengths
-  (default: auto-calibrated per acquisition by GCV). For a cohort they
-  should be calibrated **once per protocol** and imposed on every
-  acquisition: `model.calibrate(data, bvals, bvecs, mask)` runs only the
-  calibration of one acquisition (no voxel-wise fit) and returns a JSON-ready
-  record with the full GCV curves and the protocol fingerprint
-  (`protocol_fingerprint`: volume, b=0 and per-shell counts, never the exact
-  gradient vectors), to be aggregated across acquisitions.
-  The aggregation and its use are in the toolbox too (see *Protocol
-  calibration* below).
-* `min_dominant_concentration`: angular-concentration gate (default **0.0**,
-  i.e. off since 1.4.0). Available on request, as is
-  `fit(calibrate_concentration_gate=True)` for the Monte Carlo null.
-* `fiber_detection_threshold` (v1.6.1, default `None` = off): reject a voxel's
-  fibers when they lower the Stage D residual by less than this many noise
-  variances, `(RSS_iso_only - RSS_fibers+iso) / sigma_voxel^2`. The statistic is
-  always computed, summarised in the run report (`fiber_detection`) and written
-  to `fiber_detection_stat.nii.gz`. Why: on synthetic isotropic tissue at SNR 26
-  (P3 protocol) 38-62% of voxels get a false fiber, almost all as a crossing
-  with FF just above `fiber_threshold`; the statistic's null is SNR-invariant
-  (median 4-6, p95 11-14) while true fibers score >= 17 (weak 90-degree
-  crossing) to >= 74 (single fiber, FF 0.25). The default threshold will be set
-  from the 13-scenario battery and real data.
-* `n_dirs`: Number of fiber directions on the hemisphere for Stage A
-  (default: `None`, autoconfigured from the protocol).
-* `n_ad`, `n_rd`: Stage A's AD/RD grid density (default: 3, 3 —
-  deliberately coarse; Stage A does not benefit from finer diffusivity
-  resolution).
-* `anisotropy_ratio`: minimum AD/RD ratio admissible into Stage A's
-  detection dictionary (default: **2.0**). Raised from 1.15 to drop the
-  near-isotropic ratio-1.83 grid column, which leaked isotropic signal into
-  `fiber_fraction`.
-* `min_weight_fraction`: Minimum fraction of total Stage A anisotropic
-  weight a direction must carry to be reported as a fiber population
-  (default: 0.05).
-* `ad_range`, `rd_range`: Physical bounds for Stage A's AD/RD grids,
-  mm²/s (default: `(0.5e-3, 2.2e-3)` and `(0.05e-3, 1.2e-3)`).
-* `iso_range`: ADC range of the isotropic basis in mm²/s (default:
-  `(0.0, 3.0e-3)`).
-* `fiber_threshold`: Minimum fiber fraction for AD/RD/FA estimation
-  (default: 0.15).
-* `force_n_iso`: Forces the algorithm into 2-ISO or 3-ISO mode.
-
-## Requirements
-
-* Python >= 3.8
-* NumPy >= 1.20
-* Numba >= 0.55
-* NiBabel >= 3.2
-* SciPy >= 1.7
-* tqdm >= 4.60
+Requirements: Python ≥ 3.8, NumPy ≥ 1.20, Numba ≥ 0.55, NiBabel ≥ 3.2, SciPy ≥ 1.7, tqdm ≥ 4.60.
+For the noise map: MRtrix3 (`dwidenoise`, `dwibiascorrect`, `mrcalc`).
 
 ## References
 
-1. Wang Y, et al. (2011). Quantification of increased cellularity during inflammatory demyelination. *Brain*, 134(12), 3590-3601.
-2. Wang Y, et al. (2015). Differentiation and quantification of inflammation, demyelination and axon injury or loss in multiple sclerosis. *Brain*, 138(5), 1223-1238.
-3. Vavasour IM, et al. (2022). Characterisation of multiple sclerosis neuroinflammation and neurodegeneration with relaxation and diffusion basis spectrum imaging. *Multiple Sclerosis Journal*, 28(3), 418-428.
+1. Wang Y, et al. (2011). Quantification of increased cellularity during inflammatory
+   demyelination. *Brain*, 134(12), 3590–3601.
+2. Wang Y, et al. (2015). Differentiation and quantification of inflammation, demyelination and
+   axon injury or loss in multiple sclerosis. *Brain*, 138(5), 1223–1238.
+3. Vavasour IM, et al. (2022). Characterisation of multiple sclerosis neuroinflammation and
+   neurodegeneration with relaxation and diffusion basis spectrum imaging. *Multiple Sclerosis
+   Journal*, 28(3), 418–428.
+4. Veraart J, et al. (2016). Denoising of diffusion MRI using random matrix theory.
+   *NeuroImage*, 142, 394–406.
+5. Coronado-Leija R, Ramirez-Manzanares A, Marroquin JL (2017). Estimation of individual axon
+   bundle properties by a Multi-Resolution Discrete-Search method. *Medical Image Analysis*, 42,
+   26–43.
 
-v2's design grounded in feedback from Alonso Ramirez-Manzanares on
-orientation-space vs. parameter-space dictionary sampling for DBSI; v3's
-hybrid two-stage redesign motivated by synthetic recovery validation
-showing v2's single-stage approach is not numerically identifiable.
+The two-stage design (direction detection, then diffusivity estimation) followed synthetic
+recovery validation showing that a single exhaustive dictionary is not numerically identifiable
+for AD/RD; the orientation-space dictionary sampling was grounded in feedback from Alonso
+Ramirez-Manzanares.

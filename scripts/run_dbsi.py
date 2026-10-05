@@ -70,12 +70,12 @@ def main():
                         help="Brain mask. REQUIRED: it defines both the fitted voxels "
                              "and the voxels sampled for calibration, so it changes the "
                              "calibrated lambda/n_iso/gate, not just the field of view.")
-    parser.add_argument("--noise", default=None,
+    parser.add_argument("--noise", required=True,
                         help="Thermal noise map (sigma per voxel) in the SAME scale and grid as --dwi: "
                              "the dwidenoise -noise map divided by the N4 bias field (dwibiascorrect "
                              "-bias). Used for the Rician correction and every sigma-normalised "
-                             "quantity. Without it the model falls back to the b=0 temporal sigma, "
-                             "which also contains physiological variability.")
+                             "quantity. REQUIRED (v1.7.1): the b=0 temporal sigma also contains "
+                             "physiological variability and is not a substitute.")
     parser.add_argument("--out", required=True)
     parser.add_argument("--skip-calibration", action="store_true")
     parser.add_argument("--protocol-calibration", dest="protocol_calibration", default=None,

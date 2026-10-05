@@ -14,6 +14,8 @@ COSA SI PROTEGGE.
      report trova il rapporto 1.6 e la RF e' piu' vicina al vero che senza mappa.
   3. Mappa con griglia sbagliata o quasi tutta non valida: rifiutata. Pochi voxel non validi:
      riempiti con la mediana e contati.
+  4. La mappa e' OBBLIGATORIA: senza, fit e calibrate si fermano (salvo _ALLOW_B0_SIGMA, solo per
+     test e simulazioni), e calibrate_protocol rifiuta i record calibrati senza mappa.
 
     python tests/test_noise_map.py
 """
@@ -23,6 +25,7 @@ import numpy as np
 
 import dbsi_toolbox
 from dbsi_toolbox import DBSI_Adaptive
+import dbsi_toolbox.model_Niso_adaptive_ff_thr as M
 
 NOMI = DBSI_Adaptive.output_map_names(3); IX = {n: i for i, n in enumerate(NOMI)}
 LAM = dict(lambda_aniso=9.805121767832382, lambda_iso=0.015117750706156615, n_iso=6)
@@ -46,6 +49,7 @@ def _dati(seed=5, n=120):
 
 
 def _fit(d, bv, bc, **kw):
+    M._ALLOW_B0_SIGMA = 'noise_map' not in kw      # il confronto senza mappa serve al test 1-2
     m = DBSI_Adaptive(**LAM)
     with contextlib.redirect_stdout(io.StringIO()):
         res, _ = m.fit(d, bv, bc, np.ones(d.shape[:3], bool), run_calibration=False, **kw)
@@ -92,6 +96,39 @@ def test_mappa_sbagliata():
     m, _ = _fit(d, bv, bc, noise_map=nm)
     print(f"  2 voxel non validi: riempiti {m.noise_['noise_map_filled_voxels']}")
     assert m.noise_['noise_map_filled_voxels'] == 2
+
+
+def test_mappa_obbligatoria():
+    from dbsi_toolbox.calibration.protocol import calibrate_protocol
+    d, bv, bc = _dati(n=10)
+    M._ALLOW_B0_SIGMA = False
+    for nome, chiama in (('fit', lambda: DBSI_Adaptive(**LAM).fit(d, bv, bc, np.ones(d.shape[:3], bool),
+                                                                    run_calibration=False)),
+                         ('calibrate', lambda: DBSI_Adaptive().calibrate(d, bv, bc, np.ones(d.shape[:3], bool),
+                                                                         n_calibration_voxels=15))):
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                chiama()
+        except ValueError as e:
+            print(f"  {nome} senza mappa: fermato ({str(e)[:55]}...)")
+            continue
+        raise AssertionError(f'{nome} senza mappa non si e fermato')
+    M._ALLOW_B0_SIGMA = True
+    with contextlib.redirect_stdout(io.StringIO()):
+        recs = [DBSI_Adaptive().calibrate(d, bv, bc, np.ones(d.shape[:3], bool), n_calibration_voxels=15)
+                for _ in range(2)]
+    M._ALLOW_B0_SIGMA = False
+    try:
+        calibrate_protocol(recs)
+    except ValueError as e:
+        print(f"  calibrate_protocol con record senza mappa: rifiutato ({str(e)[:50]}...)")
+    else:
+        raise AssertionError('calibrate_protocol ha accettato record senza mappa')
+    with contextlib.redirect_stdout(io.StringIO()):
+        recs = [DBSI_Adaptive().calibrate(d, bv, bc, np.ones(d.shape[:3], bool), n_calibration_voxels=15,
+                                          noise_map=np.full(d.shape[:3], SIG_T)) for _ in range(2)]
+    cal = calibrate_protocol(recs)
+    print(f"  con la mappa: calibrazione di protocollo fatta (lambda_aniso {cal['hyperparameters']['lambda_aniso']:.3g})")
 
 
 if __name__ == '__main__':

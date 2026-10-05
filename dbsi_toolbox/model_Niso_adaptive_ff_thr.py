@@ -597,6 +597,21 @@ _DEFAULT_ISO_RESOLVE = True
 # best worst case across protocols. 0 restores the 1.6.x path (Stage A's FF held
 # fixed; Stage D keeps it). Needs Stage D: without it kappa is ignored.
 _DEFAULT_CROSSING_FF_KAPPA = 30.0
+
+# v1.7.1 — the thermal noise map is REQUIRED (decision 2026-10-05): the b=0
+# temporal sigma also holds pulsation and motion (1.3-2.2x the thermal noise on
+# real P3 data, differently per subject), and every sigma-normalised step --
+# the Rician correction first -- would inherit a subject-dependent bias. Set to
+# True ONLY for synthetic tests/simulations or to reproduce pre-1.7.1 results;
+# the run report records it (sigma_source 'b0_temporal').
+_ALLOW_B0_SIGMA = False
+
+_NOISE_MAP_HELP = (
+    "noise_map is required (v1.7.1): the thermal noise sigma per voxel, on the grid and in the "
+    "intensity scale of the DWI passed to fit. With MRtrix: 'dwidenoise in out -noise noise.nii.gz', "
+    "'dwibiascorrect ants ... -bias bias.nii.gz', then 'mrcalc noise.nii.gz bias.nii.gz -div -finite "
+    "noise.nii.gz bias.nii.gz -div 0 -if noise_N4.nii.gz'. The b=0 temporal sigma is not a substitute: "
+    "it also contains physiological variability (README, 'Noise').")
 _ISO_RESOLVE_D_3ISO = (0.15e-3, 1.0e-3, 3.0e-3)   # RF, HF, WF centroids
 _ISO_RESOLVE_D_2ISO = (0.15e-3, 1.5e-3)            # RF, NRF centroids (single-shell)
 
@@ -2281,6 +2296,8 @@ class DBSI_Adaptive:
         # (notebook 12, 2026-10-02). Il termico viene dalla mappa di rumore di
         # dwidenoise (MP-PCA), portata nella scala dei dati (divisa per il campo
         # di bias di N4): `noise_map`. Senza mappa, sigma resta quello dei b=0.
+        if noise_map is None and not _ALLOW_B0_SIGMA:
+            raise ValueError(_NOISE_MAP_HELP)
         tsnr, sigma_b0 = estimate_snr_robust(data, bvals, mask, verbose=True)
         coords = np.argwhere(mask)
         xs, ys, zs = coords[:, 0], coords[:, 1], coords[:, 2]
@@ -2320,8 +2337,9 @@ class DBSI_Adaptive:
             sigma_map = np.full(data.shape[:3], sigma, dtype=np.float64)
             snr = tsnr
             self.noise_.update(sigma_source='b0_temporal')
-            print("   [NOTE] no noise_map: the model uses the b=0 temporal sigma, which also "
-                  "contains physiological variability (overestimates the thermal noise).")
+            print("   [WARNING] no noise_map (allowed by _ALLOW_B0_SIGMA, synthetic/legacy use "
+                  "only): the model uses the b=0 temporal sigma, which also contains "
+                  "physiological variability and overestimates the thermal noise.")
 
         # ── Rician bias correction (unchanged from v1/v2) ──────────────────
         print("\n3. Applying Rician Bias Correction...")

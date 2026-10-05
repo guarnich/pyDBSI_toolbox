@@ -28,6 +28,8 @@ from pathlib import Path
 import numpy as np
 
 import dbsi_toolbox
+import dbsi_toolbox.model_Niso_adaptive_ff_thr as _MOD
+_MOD._ALLOW_B0_SIGMA = True   # test sintetici: sigma dei b=0 consentito (v1.7.1, solo test)
 from dbsi_toolbox import DBSI_Adaptive, save_output_maps
 from dbsi_toolbox import uncertainty as U
 from dbsi_toolbox.model_Niso_adaptive_ff_thr import (

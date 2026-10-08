@@ -110,7 +110,7 @@ def main():
     parser.add_argument("--crossing-ff-kappa", type=float, dest="crossing_ff_kappa", default=None,
                         help=f"Crossing fiber fraction re-solved before the crossing tensors are "
                              f"fitted, with ridge kappa x (sigma/S0)^2. Default: {_D['crossing_ff_kappa']}. "
-                             "0 restores the 1.6.x path (Stage A's fraction held fixed, which put "
+                             "0 keeps Stage A's crossing fraction (held fixed, it put "
                              "~75%% of real crossings on the RD floor).")
     parser.add_argument("--no-uncertainty", dest="no_uncertainty", action="store_true",
                         help="Skip the uncertainty maps (per-voxel Fisher standard error of every "
@@ -231,7 +231,8 @@ def _load_noise(path, shape3d, affine):
     if arr.shape != tuple(shape3d):
         raise SystemExit(f"--noise {path}: grid {arr.shape} differs from the DWI {tuple(shape3d)}")
     if not np.allclose(img.affine, affine, atol=1e-3):
-        print(f"WARNING: --noise {path} has a different orientation matrix than the DWI")
+        raise SystemExit(f"--noise {path}: orientation matrix differs from the DWI (same grid "
+                         f"size, different voxel-to-world mapping): not the map of this DWI")
     return arr
 
 

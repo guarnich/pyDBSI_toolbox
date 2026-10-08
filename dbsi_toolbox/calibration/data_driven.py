@@ -122,7 +122,7 @@ Morozov VA (1966). On the solution of functional equations by the
 import numpy as np
 from ..core.basis import build_isotropic_dictionary
 from ..core.solvers import nnls_coordinate_descent, compute_regularization_matrix
-from ..utils.tools import _chi_median_factor
+from ..utils.tools import _chi_median_factor, B0_THRESHOLD
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -334,7 +334,7 @@ def calibrate_concentration_gate_mc(bvals, At, AtA_reg, n_aniso_cols, n_dirs,
                                     n_pairs, fiber_dirs, neighbor_idx, sigma,
                                     iso_d_range, fiber_threshold,
                                     default_gate, percentile=99.0, n_mc=400,
-                                    b0_thr=100.0, seed=0):
+                                    b0_thr=B0_THRESHOLD, seed=0):
     """Monte-Carlo NULL calibration of the fiber-detection CONCENTRATION GATE
     used by `core.solvers.select_dominant_directions`.
 
@@ -906,7 +906,7 @@ def select_lambda_aniso_gcv_lcurve(AtA, At, y_voxels, n_aniso_cols,
 # REAL-DATA VOXEL SAMPLING (for use with select_lambdas_data_driven)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def sample_calibration_voxels(data, mask, bvals, b0_thr=100.0,
+def sample_calibration_voxels(data, mask, bvals, b0_thr=B0_THRESHOLD,
                               n_voxels=500, min_signal_fraction=0.05,
                               seed=None, noise_map=None):
     """
@@ -952,10 +952,9 @@ def sample_calibration_voxels(data, mask, bvals, b0_thr=100.0,
     seed : int or None
         Random seed for reproducible sampling.
     noise_map : ndarray (X, Y, Z) or None
-        Thermal noise sigma per voxel, in the data's units (v1.7.1). If given,
-        sigma_normalised is the median of noise_map / S0 over the sampled
-        voxels instead of the b=0 temporal spread, which also contains
-        physiological variability (1.3-2.2x the thermal noise on real data).
+        Thermal noise sigma per voxel, in the data's units. sigma_normalised
+        is then the ROOT MEAN SQUARE of noise_map / S0 over the sampled voxels
+        (v1.8.0; the median until 1.7.1), see below.
 
     Returns
     -------
@@ -1013,9 +1012,20 @@ def sample_calibration_voxels(data, mask, bvals, b0_thr=100.0,
     # consistent with the temporal method in estimate_snr_robust, but
     # expressed in the normalised-signal space used here.
     if noise_map is not None:
+        # RMS, not the median (v1.8.0). Every consumer compares the MEAN over
+        # the sampled voxels of a squared residual with N * sigma^2 (lambda_iso
+        # ceiling, pass-1 discrepancy): the noise part of that mean is
+        # N * mean(sigma_v^2 / S0_v^2), so sigma must be its RMS. sigma/S0 is
+        # strongly heterogeneous in a brain (measured on a real DWI: mean of the
+        # squares 3.5x the squared median), and with the median the target was
+        # too small: no lambda met it, and the lambda_iso ceiling fell to the
+        # bottom of its grid (1e-5) -- on a synthetic sample already at a ratio
+        # of 1.66 (tests/test_calibration_sigma_rms.py). Until 1.7.1 the b=0
+        # sigma, inflated 1.3-2.2x, happened to hide it.
         nm = np.asarray(noise_map, dtype=np.float64)[xs, ys, zs]
         ok = np.isfinite(nm) & (nm > 0)
-        sigma_normalised = float(np.median(nm[ok] / sampled_s0[ok])) if ok.any() else float('nan')
+        sigma_normalised = (float(np.sqrt(np.mean((nm[ok] / sampled_s0[ok]) ** 2)))
+                            if ok.any() else float('nan'))
     elif len(b0_idx) >= 2:
         # De-biased exactly as `estimate_snr_robust` (v1.3.5): the median of the
         # per-voxel sample standard deviation is sigma * sqrt(median(chi2_k)/k),

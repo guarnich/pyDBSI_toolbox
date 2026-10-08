@@ -13,8 +13,8 @@ dello stesso protocollo; un'impronta sui vettori rifiuterebbe tutto.
 """
 import numpy as np
 
-# Soglia sotto la quale un volume e' b=0 (stessa convenzione di tools.py).
-B0_THRESHOLD = 50.0
+# Soglia sotto la quale un volume e' b=0: quella di tutto il pacchetto (utils/tools.py).
+from ..utils.tools import B0_THRESHOLD
 # Arrotondamento dei gusci: b=995 e b=1005 sono lo stesso guscio.
 SHELL_ROUNDING = 100.0
 

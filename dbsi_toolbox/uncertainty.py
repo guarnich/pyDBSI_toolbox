@@ -12,7 +12,7 @@ from the Fisher information of the signal model the maps were reported under:
 with D_j the fixed Stage D centroids (RF / HF / WF, or RF / NRF in 2-ISO), up
 to two fiber populations k, and Gaussian noise of standard deviation
 sigma_voxel = sigma / S0_voxel on the Rician-corrected signal (sigma = the thermal
-noise map since v1.7.1, the b=0 temporal sigma without it). The free
+noise map of the voxel). The free
 parameters are, per population, the weight w_k, AD_k, RD_k and two tangent
 angles of the direction d_k, plus the iso weights u_j. With J the Jacobian at
 the reported estimate,
@@ -34,7 +34,7 @@ WHAT THE NUMBER MEANS -- READ BEFORE USING THE MAPS
   confidently wrong. The coverage check in the dossier measures how far the
   two diverge on synthetic data.
 * Since v1.7.0 crossings report the Stage D fit of the model above, like
-  single fibers. With crossing_ff_kappa = 0 (the 1.6.x path) they report
+  single fibers. With crossing_ff_kappa = 0 they report
   Stage A's total FF instead: the SE is then the information the data carry
   about FF under this model, not the spread of the Stage A estimator (which
   on synthetic crossings was 5-9x smaller, with a bias inside the SE).
@@ -65,8 +65,8 @@ FLAGS (bitmask, `uncertainty_flags`)
        under evaluation; never set in this release).
    16  the residual is larger than noise explains: residual_over_sigma above
        the 99.9% quantile of its chi-square null. The model does not describe
-       the voxel, or the local noise is above the global sigma (g-factor); either
-       way the SEs are optimistic by about that ratio.
+       the voxel, or the noise map under-states the local noise; either way
+       the SEs are optimistic by about that ratio.
 
 RESIDUAL / SIGMA (`residual_over_sigma`)
 ----------------------------------------
@@ -124,8 +124,8 @@ _LOG10_COND_SINGULAR = 14.0
 # protocol: 1.22 for P3 (N 91) with one fiber. Measured on synthetic P3 data with
 # the correct model: median 1.00 / p99 1.15-1.24 at SNR 26-40; 1.07-1.12 / p99
 # 1.23-1.34 at SNR 15, where the Rician-corrected signal is no longer Gaussian.
-# Crossings (Stage A FF held fixed): median 1.16 at SNR 26, 1.36 at SNR 40 -- the
-# bias shows up as misfit. Fiber dispersion (sd 20 deg) and iso diffusivities off
+# Crossings with Stage A's FF held fixed (kappa 0): median 1.16 at SNR 26, 1.36 at
+# SNR 40 -- the bias shows up as misfit. Fiber dispersion (sd 20 deg) and iso diffusivities off
 # the Stage D centroids move the median only to 1.01-1.06: the ratio does not see
 # every misfit at these SNRs.
 _RESID_FLAG_Z = 3.090
@@ -300,7 +300,7 @@ def _uncertainty_kernel(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso
         # reported model rescaled by its best overall amplitude (the fractions
         # sum to 1, the measured S0 is noisy). ~1 when the model describes the
         # voxel and sigma is right; above 1 the SEs are optimistic by about
-        # that factor (misfit, or local noise above the global sigma).
+        # that factor (misfit, or local noise above the noise map).
         pred = np.zeros(N)
         for k in range(n_fib):
             for i in range(N):

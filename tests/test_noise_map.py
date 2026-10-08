@@ -6,14 +6,15 @@ IL PROBLEMA (notebook 12, 2026-10-02). Il sigma del modello veniva dalla variabi
 b=0, che contiene anche pulsazione e movimento: sui dati veri 1.3-2.2 volte il rumore termico, in
 misura diversa per soggetto. La correzione Rician sottrae 2 sigma^2: con sigma gonfiato sottrae
 troppo e abbassa RF. Il rumore termico viene dalla mappa di dwidenoise (MP-PCA), divisa per il campo
-di bias di N4; il tSNR (b=0 / b=0) resta come indicatore di qualita'.
+di bias di N4. Dalla 1.8.0 il tSNR non si calcola piu' e i b=0 servono solo a S0: ne basta uno.
 
 COSA SI PROTEGGE.
   1. Senza mappa, oppure con una mappa COSTANTE pari al sigma dei b=0, le uscite sono identiche.
-  2. Su un fantoccio con b=0 piu' rumorosi (sigma_b0 = 1.6 x termico), con la mappa giusta il run
-     report trova il rapporto 1.6 e la RF e' piu' vicina al vero che senza mappa.
+  2. Su un fantoccio con b=0 piu' rumorosi (sigma_b0 = 1.6 x termico), con la mappa giusta la RF e'
+     piu' vicina al vero che senza mappa.
   3. Mappa con griglia sbagliata o quasi tutta non valida: rifiutata. Pochi voxel non validi:
      riempiti con la mediana e contati.
+  5. Con la mappa basta UN volume b=0 (v1.8.0; prima ne servivano due per il tSNR); senza b=0 si ferma.
   4. La mappa e' OBBLIGATORIA: senza, fit e calibrate si fermano (salvo _ALLOW_B0_SIGMA, solo per
      test e simulazioni), e calibrate_protocol rifiuta i record calibrati senza mappa.
 
@@ -74,11 +75,9 @@ def test_rf_con_sigma_termico():
     m0, r0 = _fit(d, bv, bc)
     m1, r1 = _fit(d, bv, bc, noise_map=np.full(d.shape[:3], SIG_T))
     rf0 = np.median(r0[..., IX['restricted_fraction']]); rf1 = np.median(r1[..., IX['restricted_fraction']])
-    rap = m1.noise_['sigma_b0_over_thermal']
-    print(f"  sigma_b0 / termico misurato {rap:.2f} (vero {FATT_B0}); tSNR {m1.noise_['tsnr']:.1f}, "
-          f"SNR termico {m1.noise_['snr_thermal']:.1f}")
+    print(f"  SNR termico {m1.noise_['snr_thermal']:.1f} (vero {S0 / SIG_T:.0f})")
     print(f"  RF mediana (vera 0.25): sigma dei b=0 {rf0:.3f}, mappa termica {rf1:.3f}")
-    assert abs(rap - FATT_B0) < 0.15
+    assert 'tsnr' not in m1.noise_ and 'tsnr' not in m1.run_report_['noise']
     assert abs(rf1 - 0.25) < abs(rf0 - 0.25), 'la mappa termica non avvicina la RF al vero'
     assert m1.run_report_['noise']['sigma_source'] == 'noise_map'
 
@@ -96,6 +95,22 @@ def test_mappa_sbagliata():
     m, _ = _fit(d, bv, bc, noise_map=nm)
     print(f"  2 voxel non validi: riempiti {m.noise_['noise_map_filled_voxels']}")
     assert m.noise_['noise_map_filled_voxels'] == 2
+
+
+def test_un_solo_b0():
+    d, bv, bc = _dati(n=10)
+    b0 = np.where(bv < 100)[0]
+    tieni = np.setdiff1d(np.arange(bv.size), b0[1:])          # un solo b=0
+    m, r = _fit(d[..., tieni], bv[tieni], bc[tieni], noise_map=np.full(d.shape[:3], SIG_T))
+    print(f"  un solo b=0: fit fatto, n_b0 nel report {m.run_report_['noise']['n_b0']}")
+    assert m.run_report_['noise']['n_b0'] == 1 and np.isfinite(r[..., IX['restricted_fraction']]).all()
+    senza = np.setdiff1d(np.arange(bv.size), b0)
+    try:
+        _fit(d[..., senza], bv[senza], bc[senza], noise_map=np.full(d.shape[:3], SIG_T))
+    except ValueError as e:
+        print(f"  nessun b=0: fermato ({str(e)[:50]}...)")
+    else:
+        raise AssertionError('fit senza volumi b=0 non si e fermato')
 
 
 def test_mappa_obbligatoria():

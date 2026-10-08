@@ -56,6 +56,7 @@ Wang Y, et al. (2011). Brain, 134(12):3590-3601.
 import numpy as np
 from numba import njit, prange
 from ._numba_flags import FASTMATH
+from .utils.tools import B0_THRESHOLD
 import time
 from tqdm import tqdm
 
@@ -350,7 +351,7 @@ def compute_fit_quality(data, bvals, bvecs, mask, results, model_mode,
 
     bvals = np.asarray(bvals, dtype=np.float64)
 
-    b0_thr = 100.0
+    b0_thr = B0_THRESHOLD
 
     if isinstance(iso_centroids, str):
         if iso_centroids not in ISO_CENTROID_MODES:

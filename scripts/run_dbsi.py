@@ -110,7 +110,7 @@ def main():
     parser.add_argument("--crossing-ff-kappa", type=float, dest="crossing_ff_kappa", default=None,
                         help=f"Crossing fiber fraction re-solved before the crossing tensors are "
                              f"fitted, with ridge kappa x (sigma/S0)^2. Default: {_D['crossing_ff_kappa']}. "
-                             "0 restores the 1.6.x path (Stage A's fraction held fixed, which put "
+                             "0 keeps Stage A's crossing fraction (held fixed, it put "
                              "~75%% of real crossings on the RD floor).")
     parser.add_argument("--no-uncertainty", dest="no_uncertainty", action="store_true",
                         help="Skip the uncertainty maps (per-voxel Fisher standard error of every "

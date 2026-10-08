@@ -130,7 +130,7 @@ def test_popolazione_a_peso_zero_diventa_mono():
             out[0, 0, 0, ca] = ad; out[0, 0, 0, cr] = rd; out[0, 0, 0, cf] = 0.7; out[0, 0, 0, cd:cd + 3] = dd
         dc = (1000 * S)[None, None, None, :].astype(np.float32)
         M._iso_resolve_pass(dc, np.array([[0, 0, 0]]), bv, bc, 100.0, np.array(M._ISO_RESOLVE_D_3ISO),
-                            True, out, True)
+                            True, out, True, M.FIBER_THRESHOLD)
         o = out[0, 0, 0]
         print(f"  fibra vera in pop{vera + 1}: n_pop {o[M._C_NPOP]:.0f}, pop2 NaN {bool(np.isnan(o[M._C_AD2]))}, "
               f"pop1 AD {o[M._C_AD1] * 1e3:.2f}e-3, dir1 {np.round(o[M._C_DIR1:M._C_DIR1 + 3], 2)}, FF {o[M._C_FF]:.3f}")

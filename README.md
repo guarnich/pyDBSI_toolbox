@@ -1,4 +1,4 @@
-# pyDBSI Toolbox — v1.7.1
+# pyDBSI Toolbox — v1.8.0
 
 **Diffusion Basis Spectrum Imaging (DBSI): adaptive implementation with Numba acceleration**
 
@@ -25,8 +25,8 @@ with known ground truth and checked on real acquisitions.
 
 | input | notes |
 |---|---|
-| preprocessed DWI (4D NIfTI) | denoised, Gibbs- and eddy/distortion-corrected, bias-corrected |
-| b-values, b-vectors (FSL format) | the gradient table matching the preprocessed volumes |
+| preprocessed DWI (4D NIfTI) | preprocessed through topup, eddy and N4 bias correction (recipe below) |
+| b-values, b-vectors (FSL format) | the gradient table matching the preprocessed volumes; at least one b=0 (b < 100), used for S0 only |
 | brain mask | defines the fitted voxels **and** the calibration sample |
 | **thermal noise map** (3D NIfTI) | **required since v1.7.1**, see below |
 
@@ -59,9 +59,8 @@ every σ-normalised quantity (crossing ridge, detection statistic, uncertainty m
 calibration). Mask voxels with no valid value are filled with the median and counted in the run
 report; a map with less than 50% valid mask voxels, or on another grid, is rejected.
 
-The run report gives both noise figures: the **tSNR** (temporal mean / temporal SD of the b=0
-volumes, de-biased: the acquisition-quality figure to report and to exclude subjects on) and the
-**thermal SNR** (S0 / σ), with the ratio between the two σ.
+The run report gives the **thermal SNR** (median of S0 / σ over the mask) and how many mask voxels
+had no valid value in the map.
 
 ## Quick start
 
@@ -115,16 +114,19 @@ dictionary, uncertainty maps).
 4. **Single fiber.** The direction is refined inside a cone tied to the dictionary spacing, then
    **Stage C** re-solves the fiber tensor and the compartment fractions jointly (variable
    projection over a 14×12 (AD, RD) grid with local refinement) on the raw normalised signal.
-5. **Crossing (v1.7.0).** The fiber fraction is **re-solved on the detected support** (the
+5. **Crossing.** The fiber fraction is **re-solved on the detected support** (the
    detected directions' grid nodes and their neighbours, every admissible (AD, RD) pair, plus the
    isotropic grid) with a light ridge κ·(σ/S0)², then both tensors are fitted jointly by a bounded
-   Levenberg–Marquardt with fractions and directions fixed. Before 1.7.0 the crossing fraction was
-   Stage A's, shrunk by its sparsity penalty and held fixed: the tensors compensated by turning more
-   anisotropic, and 75% of real crossings had their RD on the floor.
+   Levenberg–Marquardt with fractions and directions fixed. Stage A's own crossing fraction is
+   shrunk by its sparsity penalty: held fixed, the tensors compensated by turning more anisotropic
+   and 75% of real crossings had their RD on the floor.
 6. **Stage D.** For every fitted voxel the final compartment fractions are re-estimated by NNLS
    over `[fitted fibers | three fixed isotropic centroids (0.15, 1.0, 3.0)×10⁻³ mm²/s]` on the
-   Rician-corrected signal (RF/NRF centroids in 2-ISO). Since 1.7.0 this includes crossings; a
-   crossing whose population Stage D gives no weight becomes a single fiber (1.7.1).
+   Rician-corrected signal (RF/NRF centroids in 2-ISO), crossings included. A crossing whose
+   population Stage D gives no weight becomes a single fiber. **`fiber_threshold` is applied to
+   this final fiber fraction**: where it is ≤ 0.15 the fiber is removed and the fractions are
+   re-solved on the isotropic centroids alone, so a tensor is reported only where the reported
+   FF > 0.15 (counted in the run report as `fiber_threshold_final`).
 7. **Fiber detection statistic.** `(RSS_iso_only − RSS_fibers+iso) / σ_voxel²` on the Stage D
    model, always computed and written; the rejection threshold is off by default (see
    `fiber_detection_threshold`).
@@ -133,14 +135,13 @@ dictionary, uncertainty maps).
 
 ## Outputs
 
-27 channels; read them **by name** (`DBSI_Adaptive.output_map_names(mode)`), v1.7.0 removed
-`mean_iso_adc` (channel 5 until 1.6.x) and every later channel moved down by one.
+27 channels; read them **by name** (`DBSI_Adaptive.output_map_names(mode)`).
 
 | # | channel | |
 |---|---|---|
 | 0 | `fiber_fraction` | total fiber fraction, both populations |
 | 1–4 | `restricted_fraction`, `hindered_fraction`, `water_fraction`, `nonrestricted_fraction` | HF/WF are NaN in 2-ISO |
-| 5 | `n_fiber_populations` | NaN = no fiber compartment, 0 = fiber without a resolved direction, 1–2 |
+| 5 | `n_fiber_populations` | NaN = no fiber (Stage A or final FF ≤ threshold), 0 = fiber mass without a resolved direction (FF 0 after Stage D), 1–2 |
 | 6–12 | `fiber_fraction_pop1`, `axial_/radial_diffusivity_pop1`, `fiber_fa_pop1`, `dir1_x/y/z` | NaN if absent |
 | 13–19 | same for population 2 | NaN if absent |
 | 20–22 | `axial_/radial_diffusivity_weighted`, `fiber_fa_weighted` | tensor averaged over the populations, weighted by their fractions; FA of that tensor |
@@ -153,12 +154,12 @@ interpolation turns NaN into 0), `fiber_detection_stat.nii.gz`, and `toolbox_rep
 
 | file | content |
 |---|---|
-| `run_report.txt` | version, git commit, noise (tSNR, thermal SNR, σ source), Rician truncation, calibration and its source, options, population census, solver diagnostics, detection statistic, uncertainty summary |
+| `run_report.txt` | version, git commit, noise (thermal SNR, σ source), Rician truncation, fibers removed by the final threshold, calibration and its source, options, population census, solver diagnostics, detection statistic, uncertainty summary |
 | `design_matrix.png/.npz`, `dictionary_columns.csv` | the Stage A dictionary actually used |
 | `protocol_calibration.json` | copy of the protocol calibration, when used |
 | `uncertainty_maps/` | `NN_<channel>_se.nii.gz` for every continuous channel, `dir1/2_angle_se_deg`, `fisher_log10_condition`, `residual_over_sigma`, `uncertainty_flags`, `README.txt` |
 
-**Uncertainty maps (v1.7.0).** The standard error of each continuous map is the Cramér–Rao bound
+**Uncertainty maps.** The standard error of each continuous map is the Cramér–Rao bound
 at the estimate: Fisher information of the reported model (fibers with weight, AD, RD and
 direction free; fixed isotropic centroids), delta method for normalised fractions, FA and the
 weighted tensor. It is the precision the data and protocol allow, **not the bias**. On synthetic
@@ -197,8 +198,8 @@ its own optimum. `lambda_iso` is capped by the acquisitions' discrepancy ceiling
 
 | parameter | default | |
 |---|---|---|
-| `crossing_ff_kappa` | 30 | ridge of the crossing fraction re-solve, × (σ/S0)²; 0 restores the 1.6.x path. 65 centres healthy crossing FF on three protocols at SNR 15 and 26; 30 keeps more demyelination contrast at low SNR |
-| `fiber_detection_threshold` | `None` (off) | reject fibers whose detection statistic is below it. Off by decision (Oct 2026): adoptable on the synthetic battery (threshold 15), but its real-data control failed and the 1.7.0 crossing path changes the statistic |
+| `crossing_ff_kappa` | 30 | ridge of the crossing fraction re-solve, × (σ/S0)²; 0 keeps Stage A's crossing fraction. 65 centres healthy crossing FF on three protocols at SNR 15 and 26; 30 keeps more demyelination contrast at low SNR |
+| `fiber_detection_threshold` | `None` (off) | reject fibers whose detection statistic is below it. Off by decision (Oct 2026): adoptable on the synthetic battery (threshold 15), but its real-data control failed and the crossing re-solve changes the statistic |
 | `uncertainty` | `True` | write the uncertainty maps |
 | `iso_resolve` | `True` | Stage D; the crossing re-solve and the uncertainty maps need it |
 | `stagec_refine`, `stagec_dir_refine`, `lambda_aniso_conc_mod` | `True` | Stage C, cone refinement before it, concentration modulation |
@@ -207,7 +208,7 @@ its own optimum. `lambda_iso` is capped by the acquisitions' discrepancy ceiling
 | `min_dominant_concentration` | 0.0 (off) | angular-concentration gate |
 | `anisotropy_ratio` | 2.0 | minimum AD/RD of Stage A's fiber atoms (drops the near-isotropic column that leaked into FF) |
 | `n_dirs`, `n_ad`, `n_rd` | auto, 3, 3 | Stage A dictionary; directions from the protocol |
-| `fiber_threshold` | 0.15 | minimum fiber fraction for a tensor to be estimated |
+| `fiber_threshold` | 0.15 | minimum fiber fraction for a tensor: on Stage A's FF (candidates) and on the final FF (reported) |
 | `force_n_iso` | `None` | force 2-ISO or 3-ISO |
 
 ## What the numbers mean — known limits
@@ -220,7 +221,7 @@ its own optimum. `lambda_iso` is capped by the acquisitions' discrepancy ceiling
   (≈ −0.1×10⁻³ mm²/s for a single fiber at SNR 26): the sign of a lesion contrast is preserved,
   its magnitude is not. Report contrasts, not absolute RD, and average over regions.
 - **Per-population AD in crossings is not quantitative** (Cramér–Rao SD ≈ 0.6×10⁻³): use
-  `axial_diffusivity_weighted` there. Per-population RD in crossings is reliable since 1.7.0.
+  `axial_diffusivity_weighted` there. Per-population RD in crossings is reliable.
 - **Perfusion is not modelled.** Fine in white matter (pseudo-diffusion fraction ≈ 0 on real data);
   in grey matter the free-water fraction includes ≈ 0.03 of perfusion signal, more in CSF-adjacent
   voxels.
@@ -230,7 +231,8 @@ its own optimum. `lambda_iso` is capped by the acquisitions' discrepancy ceiling
 
 | version | |
 |---|---|
-| **1.7.1** | thermal noise map **required** (`noise_map` / `--noise`), tSNR reported apart; crossings whose population Stage D zeroes become single fibers |
+| **1.8.0** | `fiber_threshold` applied to the final fiber fraction; tSNR removed (one b=0 is enough); single b=0 threshold (100) everywhere, protocol fingerprints included; stale channel map `DBSI_Adaptive.CH` removed |
+| 1.7.1 | thermal noise map **required** (`noise_map` / `--noise`); crossings whose population Stage D zeroes become single fibers |
 | 1.7.0 | crossing fiber fraction re-solved before the tensor fit; uncertainty maps; `mean_iso_adc` removed (27 channels); detection threshold kept off |
 | 1.6.4 | numba kernels no longer use `fastmath` NaN/inf assumptions (they made NaN checks platform-dependent: x86 vs arm64) |
 | 1.6.2–1.6.3 | non-finite input voxels excluded; detection statistic computed serially |

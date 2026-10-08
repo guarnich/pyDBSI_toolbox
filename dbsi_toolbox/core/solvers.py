@@ -1623,56 +1623,14 @@ def compute_fiber_fa(AD, RD):
 #
 # SCOPE — WHAT THIS MODULE DOES NOT DO (read before relying on it)
 # -----------------------------------------------------------------------
-# - Does NOT touch, correct, or re-derive the isotropic-compartment
-#   FRACTIONS (RF/HF/WF/NRF) or the anisotropic FRACTIONS (FF) computed by
-#   Stage A's NNLS solve. Those are computed and written to the output
-#   BEFORE this module ever runs and are architecturally independent of
-#   it -- this module only refines AD/RD/FA/direction reporting for
-#   populations Stage A already detected. An attempt to also correct
-#   Stage A's fraction leakage via a small unregularized re-fit conditioned
-#   on this module's output ("Stage C") was tested and REJECTED AT THE TIME.
-#   SUPERSEDED: the Stage C that ships today (joint VARPRO mono-fiber
-#   tensor+fraction re-solve, default ON) is a different estimator and does
-#   improve the fractions; the rejection below applies to the earlier variant
-#   described here, not to it. The rest of this paragraph is kept as the record
-#   of what was tried and why. The original text follows: it
-#   collapses the isotropic compartment to 1-2 fixed-diffusivity columns,
-#   discarding the spectral resolution that is the toolbox's core
-#   contribution, and made FF/NRF recovery WORSE in 5 of 6 tested
-#   synthetic conditions (median FF error increases of 0.03-0.09 vs. Stage
-#   A's raw, uncorrected fractions). A "targeted" variant (full isotropic
-#   spectrum retained, only the anisotropic block replaced by refined
-#   fiber columns) was less harmful but still inconsistent (improved 4/6
-#   conditions on FF, only 3/6 on NRF) and is NOT included here. Isotropic
-#   fraction accuracy under true crossing-fiber ground truth is TRACKED AS
-#   A DOCUMENTED OPEN LIMITATION, not something this module claims to fix.
-#   MEASURED 2026-09-30 (inspection, experiments/crossing_asymmetry/): the
-#   limitation reaches the TENSORS, not just the fractions. Synthetic crossings,
-#   P3 protocol, SNR 26, FF 0.6, AD 1.7e-3, iso 0.10/0.20/0.10:
-#
-#                                    RD bias (e-3)   RD at floor   FF bias
-#     crossing, full fit, RD 0.3       -0.10           ~43%          -0.07
-#     crossing, full fit, RD 0.5       -0.28           ~40%          -0.21
-#     single fiber (Stage C), RD 0.3   -0.01            5%           +0.01
-#     single fiber (Stage C), RD 0.5   -0.03            2%            0.00
-#     THIS solver, TRUE fractions/iso  +0.01            0%             --
-#     THIS solver, FF x0.70            -0.15/-0.21      91%/0%         --
-#
-#   So the LM is unbiased; the bias is Stage A's crossing FF, which is
-#   UNDER-estimated (heavy lambda_aniso shrinks the anisotropic block, and
-#   nothing re-solves FF on crossings) and held fixed here, so the tensor turns
-#   more anisotropic to carry the angular contrast -- RD to the floor, AD low.
-#   This is what the ~49% of real crossings on the RD floor are. Raw vs
-#   corrected signal makes no difference (tested). Alternatives tried, none
-#   adopted, each moves the bias rather than removing it: VARPRO over
-#   [fibers | iso grid] from this solver's estimate (AD bias fixed, RD not);
-#   the same from a global shared-tensor scan (RD bias -0.28 -> -0.10, floor
-#   40 -> 22%, but AD bias turns +0.3 and FF MAE does not improve); an
-#   UNpenalised re-solve on the detected support (FF over-shoots, +0.10/+0.18).
-#   The truth sits between the penalised and the unpenalised FF and no
-#   parameter-free estimator lands on it at this SNR: per-population tensors of
-#   crossings are not quantitative, and crossing FF is biased low relative to
-#   single-fiber FF. The variants live on branch `ispezione-crossing`.
+# - Does NOT estimate the fractions. The crossing FF it receives is re-solved
+#   beforehand on the detected support (`crossing_ff_resolve`, ridge
+#   kappa * (sigma/S0)^2), and Stage D re-solves the final fractions with the
+#   tensors fitted here. MEASURED 2026-09-30 (experiments/crossing_asymmetry/,
+#   P3, SNR 26, FF 0.6): given the true fractions the LM is unbiased (RD bias
+#   +0.01e-3, 0% on the floor); given Stage A's shrunk FF (x0.70) RD went to the
+#   floor in 91% of crossings -- the reason the FF is re-solved first. Per-
+#   population AD stays not quantitative (Cramer-Rao sd ~0.6e-3).
 # - Does NOT refine direction (unlike the existing single-fiber MRDS-lite
 #   cone search): directions passed in are Stage A's raw discrete-grid
 #   detections. Extending per-population cone refinement to 2-3 populations

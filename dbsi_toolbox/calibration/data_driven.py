@@ -122,7 +122,7 @@ Morozov VA (1966). On the solution of functional equations by the
 import numpy as np
 from ..core.basis import build_isotropic_dictionary
 from ..core.solvers import nnls_coordinate_descent, compute_regularization_matrix
-from ..utils.tools import _chi_median_factor
+from ..utils.tools import _chi_median_factor, B0_THRESHOLD
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -334,7 +334,7 @@ def calibrate_concentration_gate_mc(bvals, At, AtA_reg, n_aniso_cols, n_dirs,
                                     n_pairs, fiber_dirs, neighbor_idx, sigma,
                                     iso_d_range, fiber_threshold,
                                     default_gate, percentile=99.0, n_mc=400,
-                                    b0_thr=100.0, seed=0):
+                                    b0_thr=B0_THRESHOLD, seed=0):
     """Monte-Carlo NULL calibration of the fiber-detection CONCENTRATION GATE
     used by `core.solvers.select_dominant_directions`.
 
@@ -906,7 +906,7 @@ def select_lambda_aniso_gcv_lcurve(AtA, At, y_voxels, n_aniso_cols,
 # REAL-DATA VOXEL SAMPLING (for use with select_lambdas_data_driven)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def sample_calibration_voxels(data, mask, bvals, b0_thr=100.0,
+def sample_calibration_voxels(data, mask, bvals, b0_thr=B0_THRESHOLD,
                               n_voxels=500, min_signal_fraction=0.05,
                               seed=None, noise_map=None):
     """

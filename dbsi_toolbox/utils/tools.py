@@ -68,6 +68,10 @@ from scipy.stats import chi2
 # NOT a supported configuration: it is provably biased.
 _SNR_LEGACY_BIASED = False
 
+# Un volume e' b=0 se b < B0_THRESHOLD (s/mm^2). UNICA definizione nel pacchetto:
+# S0, kernel, calibrazione, impronta del protocollo e run report la leggono da qui.
+B0_THRESHOLD = 100.0
+
 
 def _chi_median_factor(n_samples):
     """E[median] scale of a k-dof sample standard deviation, k = n_samples - 1.
@@ -140,7 +144,7 @@ def estimate_snr_robust(data, bvals, mask, verbose=True):
         print("\n[SNR ESTIMATION REPORT]")
         print("-" * 30)
     bvals = np.array(bvals).flatten()
-    b0_idx = np.where(bvals < 50)[0]
+    b0_idx = np.where(bvals < B0_THRESHOLD)[0]
     n_b0 = len(b0_idx)
     if verbose:
         print(f"  Number of b0 volumes found: {n_b0}")

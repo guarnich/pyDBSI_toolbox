@@ -231,7 +231,7 @@ its own optimum. `lambda_iso` is capped by the acquisitions' discrepancy ceiling
 
 | version | |
 |---|---|
-| **1.8.0** | `fiber_threshold` applied to the final fiber fraction; tSNR removed (one b=0 is enough); single b=0 threshold (100) everywhere, protocol fingerprints included; stale channel map `DBSI_Adaptive.CH` removed |
+| **1.8.0** | `fiber_threshold` applied to the final fiber fraction; calibration sigma = RMS of σ/S0 over the sample (the median made the λ_iso ceiling collapse to its grid floor); tSNR removed (one b=0 is enough); single b=0 threshold (100) everywhere, protocol fingerprints included; stale channel map `DBSI_Adaptive.CH` removed |
 | 1.7.1 | thermal noise map **required** (`noise_map` / `--noise`); crossings whose population Stage D zeroes become single fibers |
 | 1.7.0 | crossing fiber fraction re-solved before the tensor fit; uncertainty maps; `mean_iso_adc` removed (27 channels); detection threshold kept off |
 | 1.6.4 | numba kernels no longer use `fastmath` NaN/inf assumptions (they made NaN checks platform-dependent: x86 vs arm64) |

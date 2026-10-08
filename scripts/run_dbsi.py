@@ -231,7 +231,8 @@ def _load_noise(path, shape3d, affine):
     if arr.shape != tuple(shape3d):
         raise SystemExit(f"--noise {path}: grid {arr.shape} differs from the DWI {tuple(shape3d)}")
     if not np.allclose(img.affine, affine, atol=1e-3):
-        print(f"WARNING: --noise {path} has a different orientation matrix than the DWI")
+        raise SystemExit(f"--noise {path}: orientation matrix differs from the DWI (same grid "
+                         f"size, different voxel-to-world mapping): not the map of this DWI")
     return arr
 
 

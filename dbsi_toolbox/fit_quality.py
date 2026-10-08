@@ -469,11 +469,11 @@ def compute_fiber_validity_map(results, channel_names, population='pop1'):
     prevent:
 
       `population='pop1'` (the default, written as `fiber_valid.nii.gz`)
-          covers the population-1 block (7-13) and the FF-weighted aggregates
-          (21-23). Those are NaN wherever no fibre was estimated.
+          covers the population-1 block (6-12) and the FF-weighted aggregates
+          (20-22). Those are NaN wherever no fibre was estimated.
 
       `population='pop2'` (written as `fiber_valid_pop2.nii.gz`)
-          covers the population-2 block (14-20). Those are NaN wherever
+          covers the population-2 block (13-19). Those are NaN wherever
           `n_pop < 2`, which on real data is roughly HALF of the fibre voxels
           (the crossing fraction is ~52%). Masking the pop-2 maps with the
           pop-1 term therefore declares ~48% of fibre voxels "valid" where the
@@ -483,7 +483,7 @@ def compute_fiber_validity_map(results, channel_names, population='pop1'):
           and its docstring said "the fiber-tensor output channels" without
           qualification, so this was easy to get wrong.
 
-      channels 0-6, 24-27 need no validity term: they are written for every
+      channels 0-5, 23-26 need no validity term: they are written for every
           fitted voxel (`dominant_basin_concentration` included -- it is
           computed before the fiber_threshold branch).
 
@@ -701,7 +701,7 @@ def save_output_maps(results, channel_names, affine, output_dir,
     with no record of what produced them is not reproducible, and the version
     cannot be recovered from the maps afterwards.
 
-    The FF-weighted aggregate maps are ordinary channels now (21-23:
+    The FF-weighted aggregate maps are ordinary channels now (20-22:
     axial_/radial_diffusivity_weighted, fiber_fa_weighted), computed by the
     model itself, so they are written by the loop below like any other channel.
     They used to be a separate `compute_aggregate_fiber_maps` step that every

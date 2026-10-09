@@ -129,13 +129,6 @@ _NNLS_MAX_ITER = 20000
 # that was not enough). 3 brings the resolution to 1/8 of the coarse grid step.
 _STAGEC_N_REFINE = 3
 
-# Nominal isotropic diffusivities, used only as fallbacks when a compartment
-# carries no weight. Numerically close to some _TENSOR_* bounds by coincidence;
-# they describe a different quantity and must not be merged with them.
-_ISO_NOMINAL_RES = 0.15e-3
-_ISO_NOMINAL_HIN = 1.0e-3
-_ISO_NOMINAL_WAT = 3.0e-3
-
 
 @njit(cache=True, fastmath=FASTMATH, nogil=True)
 def nnls_coordinate_descent(AtA, Aty, reg_lambda, tol=1e-7,
@@ -1492,46 +1485,6 @@ def measure_hemisphere_spacing(fiber_dirs):
     nearest_cos = np.clip(np.max(dots, axis=1), -1.0, 1.0)
     nearest_angle = np.arccos(nearest_cos)
     return float(np.mean(nearest_angle))
-
-
-
-
-@njit(cache=True, fastmath=FASTMATH)
-def compute_weighted_centroids(w_iso, iso_grid):
-    """Compute weighted centroids for isotropic components. Unchanged
-    from v1/v2 — the isotropic block's centroid extraction is correct
-    and is not affected by the Stage A/B split, which only concerns the
-    anisotropic compartment.
-    """
-    THRESH_RES = 0.3e-3
-    THRESH_WAT = 3.0e-3
-
-    sum_w_res, sum_wd_res = 0.0, 0.0
-    sum_w_hin, sum_wd_hin = 0.0, 0.0
-    sum_w_wat, sum_wd_wat = 0.0, 0.0
-
-    for k in range(len(iso_grid)):
-        adc = iso_grid[k]
-        w = w_iso[k]
-
-        if adc <= THRESH_RES:
-            sum_w_res += w
-            sum_wd_res += w * adc
-        elif adc <= THRESH_WAT:
-            sum_w_hin += w
-            sum_wd_hin += w * adc
-        else:
-            sum_w_wat += w
-            sum_wd_wat += w * adc
-
-    # Fallback centroids when a compartment carries no weight. These are
-    # ISOTROPIC nominal diffusivities and only coincide numerically with the
-    # tensor bounds — do not fold them into the _TENSOR_* constants.
-    D_res = sum_wd_res / sum_w_res if sum_w_res > 1e-10 else _ISO_NOMINAL_RES
-    D_hin = sum_wd_hin / sum_w_hin if sum_w_hin > 1e-10 else _ISO_NOMINAL_HIN
-    D_wat = sum_wd_wat / sum_w_wat if sum_w_wat > 1e-10 else _ISO_NOMINAL_WAT
-
-    return D_res, D_hin, D_wat
 
 
 @njit(cache=True, fastmath=FASTMATH)

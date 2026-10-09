@@ -63,14 +63,14 @@ or contradicting GCV's choice against a formally NNLS-correct risk
 criterion), but its raw point-estimate argmin is no more reliable than
 GCV's within the flat, statistically-indistinguishable region — same
 overall lesson as this project's earlier findings for GCV-based n_iso
-sweeps (`adaptive_n_iso.select_n_iso_data_driven_sweep`) and the
+sweeps (`select_n_iso_data_driven_sweep`, removed in 1.8.1) and the
 discrepancy-principle floor. This module therefore does NOT offer a
 "select_lambda_iso_sure" function that returns a new point estimate.
 Instead, it offers CROSS-CHECK functions that evaluate SURE risk in a
 neighbourhood of an already-chosen candidate (from GCV, or from a
 candidate n_iso) and report whether that candidate falls within the
 low-risk region — consistent with this project's established pattern
-for `select_n_iso_with_gcv_crosscheck` and the Monte Carlo
+for the GCV cross-check of n_iso (removed in 1.8.1) and the Monte Carlo
 tissue-scenario cross-check (removed 2026-09-21, see calibration/__init__):
 verification tools, not replacement selectors.
 
@@ -324,9 +324,8 @@ def crosscheck_n_iso_sure(bvals, y_voxels, sigma, n_iso_candidate,
     `calibration.adaptive_n_iso.select_n_iso_bootstrap` or
     `select_n_iso_svd`) against Monte Carlo SURE risk evaluated at that
     candidate and its immediate integer neighbours, with lambda_iso
-    re-tuned via GCV at each candidate (matching how
-    `select_n_iso_with_gcv_crosscheck` handles the same issue for its
-    own GCV-based comparison).
+    re-tuned via GCV at each candidate (as the GCV cross-check of n_iso,
+    removed in 1.8.1, did for its own comparison).
 
     Same non-replacement philosophy as `crosscheck_lambda_iso_sure` —
     see that function's and this module's docstrings.

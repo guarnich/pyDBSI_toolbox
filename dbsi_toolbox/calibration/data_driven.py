@@ -436,7 +436,7 @@ def select_lambda_aniso_discrepancy(AtA, At, y_voxels, n_aniso_cols,
 
     Uses 1D bisection on log(lambda_aniso): cheap (a few dozen NNLS
     solves total, vs. the thousands of Monte Carlo samples in
-    `calibration/optimizer.py`), because Stage A's detection objective
+    the removed `calibration/optimizer.py`), because Stage A's detection objective
     (sparse fiber/no-fiber per direction) is simpler than full spectral
     recovery and does not require evaluating multiple tissue scenarios.
 
@@ -485,7 +485,7 @@ def select_lambda_aniso_discrepancy(AtA, At, y_voxels, n_aniso_cols,
     aniso_floor_fraction=0.075 was fitted from a sweep that (by mistake)
     forced n_iso explicitly in the DBSI_Adaptive constructor for every
     test point. Explicit n_iso routes the fit through
-    `core.basis.generate_isotropic_grid` (a plain linear grid), NOT
+    `core.basis.generate_isotropic_grid` (a plain linear grid, removed in 1.8.1), NOT
     `generate_anchored_isotropic_grid` (the threshold-anchored grid the
     real adaptive pipeline uses when n_iso is left at its default None).
     These are materially different dictionaries, and a follow-up check

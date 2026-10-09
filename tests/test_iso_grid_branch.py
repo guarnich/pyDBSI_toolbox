@@ -51,8 +51,11 @@ def _griglia_usata(**kw_costruttore):
     mask = np.ones(data.shape[:3], bool)
 
     visto = []
-    orig_grid = {n: getattr(M, n) for n in
-                 ('generate_anchored_isotropic_grid', 'generate_isotropic_grid')}
+    # Dalla 1.8.1 il costruttore LINEARE non esiste piu' nel pacchetto: il modello
+    # non lo deve nemmeno importare (se tornasse, il test lo dice).
+    assert not hasattr(M, 'generate_isotropic_grid'), (
+        'il modello importa di nuovo il costruttore LINEARE della griglia isotropa')
+    orig_grid = {n: getattr(M, n) for n in ('generate_anchored_isotropic_grid',)}
     orig_kern = {n: getattr(M, n) for n in
                  ('_fit_voxels_3iso_v3', '_fit_voxels_2iso_v3')}
 
@@ -90,9 +93,9 @@ def _griglia_usata(**kw_costruttore):
     #   NESSUNA chiamata deve finire sul costruttore LINEARE.
     # Il conteggio resta stampato, cosi' un cambio di architettura si vede.
     assert visto, 'nessuna griglia isotropa costruita: il fit non e\' arrivato li\''
-    lineari = [v for v in visto if v[0] == 'generate_isotropic_grid']
+    lineari = [v for v in visto if v[0] != 'generate_anchored_isotropic_grid']
     assert not lineari, (
-        f'costruttore LINEARE usato (era il bug di v1.3.1): {lineari}')
+        f'griglia non ancorata usata (era il bug di v1.3.1): {lineari}')
     # quella che conta per il fit e' l'ULTIMA: il riferimento viene prima.
     return visto[-1], visto
 
@@ -125,8 +128,7 @@ def test_griglia_ancorata_sempre():
 
 def test_griglia_lineare_priva_di_acqua_libera():
     """Perche' il ramo sbagliato faceva danno: la lineare non copre i comparti."""
-    from dbsi_toolbox.core.basis import (generate_anchored_isotropic_grid,
-                                         generate_isotropic_grid)
+    from dbsi_toolbox.core.basis import generate_anchored_isotropic_grid
     def conta(g):
         g = np.ravel(np.asarray(g))
         return (int((g <= M.THRESH_RES).sum()),
@@ -135,7 +137,8 @@ def test_griglia_lineare_priva_di_acqua_libera():
     anc = generate_anchored_isotropic_grid(
         d_min=1e-4, d_max=max(3.0e-3, M._ISO_GRID_D_MAX_EXTENDED), n_steps=6,
         thresh_res=M.THRESH_RES, thresh_wat=M.THRESH_WAT)
-    lin = generate_isotropic_grid(d_min=0.0, d_max=3.0e-3, n_steps=6)
+    # la griglia LINEARE del bug (generate_isotropic_grid, tolta nella 1.8.1)
+    lin = np.linspace(0.0, 3.0e-3, 6)
     r_a, h_a, w_a = conta(anc); r_l, h_l, w_l = conta(lin)
     print(f'  ancorata: {np.size(anc):>3} colonne  RES {r_a} HIN {h_a} WAT {w_a}')
     print(f'  lineare : {np.size(lin):>3} colonne  RES {r_l} HIN {h_l} WAT {w_l}')

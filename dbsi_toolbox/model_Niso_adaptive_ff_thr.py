@@ -117,7 +117,6 @@ from .core.basis import (
     build_design_matrix_exhaustive,
     generate_exhaustive_diffusivity_pairs,
     generate_fibonacci_sphere_hemisphere,
-    generate_isotropic_grid,
     generate_anchored_isotropic_grid,
 )
 from .core.solvers import (
@@ -2497,7 +2496,8 @@ class DBSI_Adaptive:
         # warning. Found by a control fit that imposed a session's own calibrated
         # gate and got the *imposed*-run numbers rather than the free-run ones.
         #
-        # `generate_isotropic_grid` is the legacy LINEAR constructor and is not
+        # `generate_isotropic_grid` was the legacy LINEAR constructor (removed in
+        # 1.8.1) and is not
         # interchangeable with the anchored one (see its docstring): the anchoring
         # is what keeps a grid point from landing on the wrong side of THRESH_RES
         # / THRESH_WAT, which once produced an apparent total failure to detect

@@ -107,21 +107,6 @@ def generate_fibonacci_sphere_hemisphere(n_points):
     return dirs.astype(np.float64)
 
 
-def generate_fibonacci_sphere(n_points):
-    """Full sphere (deprecated, kept for compatibility)."""
-    golden_ratio = (1 + np.sqrt(5)) / 2
-    indices = np.arange(n_points)
-
-    theta = 2 * np.pi * indices / golden_ratio
-    phi = np.arccos(1 - 2 * (indices + 0.5) / n_points)
-
-    x = np.sin(phi) * np.cos(theta)
-    y = np.sin(phi) * np.sin(theta)
-    z = np.cos(phi)
-
-    return np.column_stack([x, y, z]).astype(np.float64)
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # v2 — EXHAUSTIVE ANISOTROPIC PARAMETER GRID  (AD, RD) PAIRS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -259,35 +244,8 @@ def build_design_matrix_exhaustive(bvals, bvecs, fiber_dirs, diff_pairs, iso_gri
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# v2 — ISOTROPIC SPECTRUM (explicit standalone builder)
+# ISOTROPIC GRIDS (the anchored one, further down, is the production grid)
 # ─────────────────────────────────────────────────────────────────────────────
-
-def generate_isotropic_grid(d_min=0.0, d_max=3.0e-3, n_steps=31):
-    """
-    Generate the isotropic ADC spectrum ("sphere radii") on a LINEAR grid.
-
-    A classic range is [0, 3.0e-3] mm^2/s with 31 steps (~0.1e-3 mm^2/s
-    increments). Note: this linear grid is the v2-document default; see
-    `generate_log_uniform_isotropic_grid` for the spectrally-motivated
-    alternative (Borgia et al. 1998), used together with the SVD-based
-    adaptive n_iso selection in `calibration.adaptive_n_iso`. The two
-    are not interchangeable — callers should be explicit about which
-    grid construction they need.
-
-    Parameters
-    ----------
-    d_min, d_max : float
-        Isotropic ADC range, mm^2/s.
-    n_steps : int
-        Number of grid points.
-
-    Returns
-    -------
-    iso_grid : ndarray (n_steps,), float64
-    """
-    iso_grid = np.linspace(d_min, d_max, n_steps)
-    return np.array(iso_grid, dtype=np.float64)
-
 
 def generate_log_uniform_isotropic_grid(d_min=0.1e-3, d_max=3.0e-3, n_steps=12):
     """

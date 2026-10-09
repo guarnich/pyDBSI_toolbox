@@ -13,8 +13,11 @@ DBSI Calibration Module — regularisation parameter selection
 - `calibration.adaptive_n_iso` (optional): per-dataset n_iso selection
   ('bootstrap', 'svd_floor'). The default is n_iso = 6 by grid convergence
   ('quadrature'): n_iso is a discretisation parameter, not a model order.
-- `calibration.optimizer`: synthetic tissue-scenario signals, not used by the
-  package (the Monte Carlo calibration that lived there was removed).
+
+Removed in 1.8.1 because nothing called them: `calibration.optimizer`
+(synthetic tissue-scenario signals, the last remnant of the Monte Carlo
+calibration removed on 2026-09-21), `select_n_iso_with_gcv_crosscheck` and
+`select_n_iso_data_driven_sweep`.
 
 Usage outside DBSI_Adaptive.fit:
 
@@ -33,11 +36,8 @@ from .data_driven import (
 )
 from .adaptive_n_iso import (
     select_n_iso_svd,
-    select_n_iso_with_gcv_crosscheck,
-    select_n_iso_data_driven_sweep,
     select_n_iso_bootstrap,
 )
-from .optimizer import generate_synthetic_signal
 from .mc_sure import (
     crosscheck_lambda_iso_sure,
     crosscheck_n_iso_sure,
@@ -51,11 +51,7 @@ __all__ = [
     "sample_calibration_voxels",
     # Adaptive n_iso
     "select_n_iso_svd",
-    "select_n_iso_with_gcv_crosscheck",
-    "select_n_iso_data_driven_sweep",
     "select_n_iso_bootstrap",
-    # Synthetic signal generation (no longer used by the package itself)
-    "generate_synthetic_signal",
     # Monte Carlo SURE (cross-check)
     "crosscheck_lambda_iso_sure",
     "crosscheck_n_iso_sure",

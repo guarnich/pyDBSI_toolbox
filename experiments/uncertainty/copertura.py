@@ -73,7 +73,8 @@ for nome, fibre, iso in SCEN:
 data = np.stack(blocchi)[:, :, None, :].astype(np.float32)   # (scen, NV, 1, N)
 m = DBSI_Adaptive(**LAM, min_dominant_concentration=0.0, fiber_detection_threshold=SOGLIA)
 with contextlib.redirect_stdout(io.StringIO()):
-    res, _ = m.fit(data, bv, bc, np.ones(data.shape[:3], bool), run_calibration=False)
+    res, _ = m.fit(data, bv, bc, np.ones(data.shape[:3], bool), run_calibration=False,
+                 noise_map=np.full(data.shape[:3], 1000 / SNR))   # sigma vera (1.7.1+)
 se = m.uncertainty_['se']; fl = m.uncertainty_['flags']; lc = m.uncertainty_['log10_cond']
 print(f"soglia di rilevamento {SOGLIA}; SNR {SNR:g}, {NV} voxel per scenario, sigma stimata {m.run_report_['noise']['sigma_raw']:.2f} "
       f"(vera {1000 / SNR:.2f})")

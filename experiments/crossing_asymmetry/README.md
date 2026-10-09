@@ -10,3 +10,8 @@ Result and table: the MRDS section of `dbsi_toolbox/core/solvers.py`
 ("MEASURED 2026-09-30"). The full-fit comparison of the three alternative
 crossing paths (`fit(_mrds_mode=1..3)`, `exp_crossing.py`) lives only on
 branch `ispezione-crossing`: none was adopted.
+
+**Version note.** Measured on 1.6.0. Since 1.7.0 production re-solves the crossing
+FF on the detected support (ridge kappa 30) before the MRDS LM, so `debias.py`
+now compares its unpenalised prototype against that re-solved FF, not against
+Stage A. Since 1.7.1 both scripts pass the true sigma as the noise map.

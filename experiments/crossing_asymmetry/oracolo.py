@@ -45,7 +45,8 @@ for RD in (0.3e-3, 0.5e-3):
         data[i // 20, i % 20, 0] = 1000 * np.sqrt((S + rng.normal(0, sd, S.shape)) ** 2 + rng.normal(0, sd, S.shape) ** 2)
     m = DBSI_Adaptive(lambda_aniso=8.376776400682925, lambda_iso=0.017012542798525893, n_iso=6)
     with contextlib.redirect_stdout(io.StringIO()):
-        res, _ = m.fit(data, bvals, bvecs, np.ones(data.shape[:3], bool), run_calibration=False)
+        res, _ = m.fit(data, bvals, bvecs, np.ones(data.shape[:3], bool), run_calibration=False,
+                       noise_map=np.full(data.shape[:3], 1000 * sd))   # sigma vera (1.7.1+)
     P = res.reshape(-1, len(N)); one = P[:, IX['n_fiber_populations']] == 1
     print(f'MONO-FIBRA fit vero RD {RD*1e3:.1f}: n_pop=1 {one.mean():.2f}  AD bias {np.nanmean(P[one, IX["axial_diffusivity_pop1"]] - 1.7e-3)*1e3:+.3f}  '
           f'RD bias {np.nanmean(P[one, IX["radial_diffusivity_pop1"]] - RD)*1e3:+.3f}  floor {np.mean(P[one, IX["radial_diffusivity_pop1"]] <= _TENSOR_RD_FLOOR*1.0001):.2f}  '

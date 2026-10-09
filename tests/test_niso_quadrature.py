@@ -14,6 +14,8 @@ COSA SI PROTEGGE.
      bootstrap ne' l'SVD -- sia a calibrazione libera sia coi lambda congelati.
   2. Il bootstrap resta disponibile, ma solo se chiesto.
   3. Un metodo sconosciuto si rifiuta PRIMA di campionare o fittare.
+  4. (1.8.1) La SVD conta i modi sulla gamma della griglia del fit, e le repliche
+     del bootstrap hanno la stessa correzione Rician del segnale che il fit vede.
 
 COME SI TESTA. Si strumenta il modulo (non si riproduce la logica) e si ferma il
 fit con una sentinella al posto del kernel, come in test_iso_grid_branch.
@@ -121,6 +123,48 @@ def test_bootstrap_solo_se_chiesto():
         'con n_iso_method=\'bootstrap\' il bootstrap deve girare')
 
 
+def test_svd_sulla_gamma_della_griglia():
+    """La SVD conta i modi sulla gamma della griglia del fit, [0.1, 5.0]e-3 (1.8.1).
+
+    Fino alla 1.8.0 il modello la chiamava col default del modulo, d_max 3.0e-3:
+    misurava un problema isotropo piu' piccolo di quello che il fit risolve."""
+    visti = []
+    orig = M.select_n_iso_svd
+    def spia(*a, **k):
+        visti.append(k); return orig(*a, **k)
+    M.select_n_iso_svd = spia
+    try:
+        m, _ = _fino_alla_griglia(dict(FROZEN), n_iso_method='svd_floor')
+    finally:
+        M.select_n_iso_svd = orig
+    print(f'  argomenti della SVD: {visti}')
+    assert visti, 'la SVD non e\' stata chiamata'
+    d_max = max(m.iso_range[1], M._ISO_GRID_D_MAX_EXTENDED)
+    assert visti[0].get('d_max') == d_max == 5.0e-3, (
+        f"d_max della SVD {visti[0].get('d_max')}, attesa {d_max} (la griglia del fit)")
+    assert visti[0].get('d_min') == max(m.iso_range[0], 0.1e-3)
+
+
+def test_repliche_bootstrap_corrette():
+    """Le repliche del bootstrap hanno la correzione Rician del fit (1.8.1).
+
+    La correzione lavora sulla POTENZA: E[M^2] = S^2 + 2 sigma^2 per il dato grezzo,
+    e sqrt(max(M^2 - 2 sigma^2, 0)) riporta la media dei quadrati su S^2 (a meno del
+    troncamento, piccolo a S = 3 sigma). Le repliche grezze stanno 2 sigma^2 sopra."""
+    from dbsi_toolbox.calibration import adaptive_n_iso as AN
+    sigma, S, n = 0.04, 0.12, 20000
+    base = np.full(n, S)
+    corr = AN._replica_corretta(base, sigma, np.random.default_rng(0))
+    rng = np.random.default_rng(0)
+    grezza = np.sqrt((base + rng.normal(0, sigma, n)) ** 2 + rng.normal(0, sigma, n) ** 2)
+    e_c, e_g = (corr ** 2).mean() - S ** 2, (grezza ** 2).mean() - S ** 2
+    print(f'  S^2={S**2:.5f}  2 sigma^2={2*sigma**2:.5f}  eccesso di potenza: '
+          f'corrette {e_c:+.5f}  grezze {e_g:+.5f}')
+    assert abs(e_g - 2 * sigma ** 2) < 0.2 * 2 * sigma ** 2, 'controllo del test: grezze attese +2 sigma^2'
+    assert abs(e_c) < 0.2 * 2 * sigma ** 2, (
+        'le repliche non hanno la correzione Rician del segnale che il fit vede')
+
+
 def test_metodo_sconosciuto_rifiutato():
     """Un refuso nel metodo non deve campionare ne' ripiegare in silenzio."""
     try:
@@ -140,7 +184,8 @@ def test_versione():
 if __name__ == '__main__':
     falliti = 0
     for fn in (test_versione, test_default_e_quadratura,
-               test_bootstrap_solo_se_chiesto, test_metodo_sconosciuto_rifiutato):
+               test_bootstrap_solo_se_chiesto, test_svd_sulla_gamma_della_griglia,
+               test_repliche_bootstrap_corrette, test_metodo_sconosciuto_rifiutato):
         print(f'\n=== {fn.__name__} ===')
         try:
             fn(); print('  [ok]')

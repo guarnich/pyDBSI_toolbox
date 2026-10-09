@@ -1,4 +1,8 @@
-"""Prototipo: FF dei crossing ristimata SENZA penalita' sul supporto rilevato (direzioni di Stage A del fit vero)."""
+"""Prototipo: FF dei crossing ristimata SENZA penalita' sul supporto rilevato (direzioni di Stage A del fit vero).
+
+Misurato il 2026-09-30 sulla 1.6.0, quando la FF di produzione dei crossing era quella di Stage A. Dalla 1.7.0
+la produzione la ri-stima gia' (ridge kappa 30): la colonna "FF bias prod" e' quella ri-stimata, e il
+prototipo senza penalita' qui sotto non e' piu' il confronto giusto (e' piu' rumoroso della produzione)."""
 import sys, io, contextlib, numpy as np
 from scipy.optimize import nnls
 from dbsi_toolbox import DBSI_Adaptive
@@ -20,7 +24,8 @@ for RD in (0.3e-3, 0.5e-3):
         TR.append((u, t))
     m = DBSI_Adaptive(lambda_aniso=8.376776400682925, lambda_iso=0.017012542798525893, n_iso=6)
     with contextlib.redirect_stdout(io.StringIO()):
-        res, _ = m.fit(data, bvals, bvecs, np.ones(data.shape[:3], bool), run_calibration=False)
+        res, _ = m.fit(data, bvals, bvecs, np.ones(data.shape[:3], bool), run_calibration=False,
+                       noise_map=np.full(data.shape[:3], 1000 * sd))   # sigma vera (1.7.1+)
     D = m.dictionary_; P = res.reshape(-1, len(N)); fd = D['fiber_dirs']; pairs = D['diff_pairs']; iso = D['iso_grid']
     sigma = float(m.run_report_['noise']['sigma_raw'])
     Aiso = np.exp(-np.outer(bvals, iso))
@@ -46,5 +51,5 @@ for RD in (0.3e-3, 0.5e-3):
         rdA += [P[i, IX['radial_diffusivity_pop1']] - RD, P[i, IX['radial_diffusivity_pop2']] - RD]
         rdD += list(RD2 - RD); flA += [P[i, IX['radial_diffusivity_pop1']] <= _TENSOR_RD_FLOOR * 1.0001, P[i, IX['radial_diffusivity_pop2']] <= _TENSOR_RD_FLOOR * 1.0001]
         flD += list(RD2 <= _TENSOR_RD_FLOOR * 1.0001)
-    print(f'RD vero {RD*1e3:.1f}  crossing {len(ffA)}:  FF bias Stage A {np.mean(ffA)-0.6:+.3f}  ristimata {np.mean(ffD)-0.6:+.3f} (mae {np.mean(np.abs(np.array(ffD)-0.6)):.3f})   '
+    print(f'RD vero {RD*1e3:.1f}  crossing {len(ffA)}:  FF bias prod {np.mean(ffA)-0.6:+.3f}  ristimata {np.mean(ffD)-0.6:+.3f} (mae {np.mean(np.abs(np.array(ffD)-0.6)):.3f})   '
           f'RD bias prod {np.mean(rdA)*1e3:+.3f} -> {np.mean(rdD)*1e3:+.3f}   pavimento {np.mean(flA):.2f} -> {np.mean(flD):.2f}')

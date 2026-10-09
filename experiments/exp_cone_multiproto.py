@@ -48,11 +48,12 @@ def build_volume(bvals, bvecs, snr, rng):
         data[i,j,k] = 1000.0*noisy; mask[i,j,k] = True
     return data, mask, idx, dict(dir=v, ad=ad, rd=rd, ff=np.full(N_VOX,ff), rf=np.full(N_VOX,rf))
 
-def fit(data, mask, idx, bvals, bvecs, gt, dir_refine):
+def fit(data, mask, idx, bvals, bvecs, gt, dir_refine, snr):
     m = DBSI_Adaptive(stagec_dir_refine=dir_refine)
     with contextlib.redirect_stdout(io.StringIO()):
         res, mode = m.fit(data, bvals, bvecs, mask, run_calibration=True,
-                          n_calibration_voxels=200)
+                          n_calibration_voxels=200,
+                          noise_map=np.full(mask.shape, 1000.0 / snr))   # sigma vera (1.7.1+)
     names = DBSI_Adaptive.output_map_names(mode); I={n_:i for i,n_ in enumerate(names)}
     g = lambda nm: np.array([res[i,j,k,I[nm]] for (i,j,k) in idx])
     d = np.stack([g('dir1_x'),g('dir1_y'),g('dir1_z')],1)
@@ -70,8 +71,8 @@ for pname, shells in PROTOCOLS.items():
         bvals, bvecs = build_protocol(shells, rng)
         data, mask, idx, gt = build_volume(bvals, bvecs, snr, rng)
         t0 = time.time()
-        A = fit(data, mask, idx, bvals, bvecs, gt, False)
-        B = fit(data, mask, idx, bvals, bvecs, gt, True)
+        A = fit(data, mask, idx, bvals, bvecs, gt, False, snr)
+        B = fit(data, mask, idx, bvals, bvecs, gt, True, snr)
         m_ = (A['npop']==1)&(B['npop']==1)&np.isfinite(A['ad'])&np.isfinite(B['ad'])
         r = dict(proto=pname, snr=snr, n_dirs=int(A['n_dirs']), mode=int(A['mode']),
                  n=int(m_.sum()), secs=round(time.time()-t0))

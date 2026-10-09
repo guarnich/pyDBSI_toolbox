@@ -637,7 +637,7 @@ def analyse_protocol(bvals):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PARALLEL FITTING KERNELS — v3 + MRDS multi-fiber extension
+# PARALLEL FITTING KERNELS — Stage A, selection, Stage C / MRDS, Stage D
 # ─────────────────────────────────────────────────────────────────────────────
 
 @njit(cache=True, fastmath=FASTMATH)
@@ -2038,7 +2038,8 @@ class DBSI_Adaptive:
         self.calibration_curves_ = None
 
         print("\n" + "="*70)
-        print("  DBSI ADAPTIVE PIPELINE — v3 + MRDS Multi-Fiber Extension")
+        from . import __version__ as _v       # deferred: __init__ imports us
+        print(f"  DBSI ADAPTIVE PIPELINE — pyDBSI {_v}")
         print("="*70)
 
         bvecs = np.asarray(bvecs, dtype=np.float64)
@@ -2272,7 +2273,7 @@ class DBSI_Adaptive:
                   "only): the model uses the b=0 temporal sigma, which also contains "
                   "physiological variability and overestimates the thermal noise.")
 
-        # ── Rician bias correction (unchanged from v1/v2) ──────────────────
+        # ── Rician bias correction, voxel by voxel with sigma_map ──────────
         print("\n3. Applying Rician Bias Correction...")
         data_corr = np.zeros_like(data, dtype=np.float32)
         # per voxel (v1.7.1): 2 sigma^2 col sigma del voxel; costante senza mappa
@@ -2371,6 +2372,9 @@ class DBSI_Adaptive:
                   f"(sigma_normalised={sigma_cal:.5f})")
 
         iso_d_max = max(self.iso_range[1], _ISO_GRID_D_MAX_EXTENDED)
+        # La SVD conta i modi sulla stessa gamma della griglia del fit (1.8.1):
+        # col default del modulo (3.0e-3) misurava un problema piu' piccolo.
+        _svd_range = dict(d_min=max(self.iso_range[0], 0.1e-3), d_max=iso_d_max)
 
         if self.n_iso is None:
             if n_iso_method == 'quadrature':
@@ -2417,7 +2421,7 @@ class DBSI_Adaptive:
                 if _rifiutato:
                     print(f"   [WARNING] the bootstrap refused to select "
                           f"(degenerate reference). Falling back to SVD+floor.")
-                    self.n_iso, _svd_diag = select_n_iso_svd(bvals, snr)
+                    self.n_iso, _svd_diag = select_n_iso_svd(bvals, snr, **_svd_range)
                     self.n_iso_source_ = 'svd_fallback_degenerate_reference'
                     print(f"   SVD+floor fallback: n_iso={self.n_iso}")
                 # ── Fallback: ONLY when the composite curve is flat. ────────
@@ -2454,7 +2458,7 @@ class DBSI_Adaptive:
                           f"separation: the bias-variance curve has no clear "
                           f"minimum) for this dataset; falling back to "
                           f"SVD+floor as a safer default.")
-                    self.n_iso, _svd_diag = select_n_iso_svd(bvals, snr)
+                    self.n_iso, _svd_diag = select_n_iso_svd(bvals, snr, **_svd_range)
                     self.n_iso_source_ = 'svd_fallback'
                     print(f"   SVD+floor fallback: n_iso={self.n_iso}")
                 else:
@@ -2462,7 +2466,7 @@ class DBSI_Adaptive:
                     print(f"   Bootstrap-selected n_iso={self.n_iso}")
 
             elif n_iso_method == 'svd_floor':
-                self.n_iso, _svd_diag = select_n_iso_svd(bvals, snr)
+                self.n_iso, _svd_diag = select_n_iso_svd(bvals, snr, **_svd_range)
                 self.n_iso_source_ = 'svd_floor'
                 print(f"\n4. Selecting n_iso — SVD + empirical floor: "
                       f"n_iso={self.n_iso} (raw SVD answer: "
@@ -2700,9 +2704,15 @@ class DBSI_Adaptive:
 
         # ── Data-driven fiber-detection concentration gate (MC null) ────────
         # Set the concentration gate from a protocol/dictionary/lambda/SNR-
-        # specific pure-isotropic NULL rather than the fixed default. Always on
-        # during calibration; falls back to the constructor default otherwise.
+        # specific pure-isotropic NULL rather than the fixed default. Only when
+        # asked (calibrate_concentration_gate=True, off since 1.4.0); otherwise
+        # the constructor value (0.0 = no gate) is used.
         if run_calibration and calibrate_concentration_gate:
+            if self.lambda_aniso_conc_mod:
+                print("   [WARNING] calibrate_concentration_gate=True: the MC null is "
+                      "computed BEFORE the concentration modulation of lambda_aniso, "
+                      "the gate is applied AFTER it (see calibrate_concentration_gate_mc, "
+                      "LIMITS).")
             _iso_d_lo = max(self.iso_range[0], 0.1e-3)
             _gate_mc, _gate_diag = calibrate_concentration_gate_mc(
                 bvals, At, AtA_reg, n_aniso_cols, self.n_dirs, n_pairs,

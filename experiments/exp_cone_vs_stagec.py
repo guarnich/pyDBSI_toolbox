@@ -59,7 +59,8 @@ def run(tag, **kw):
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         res, mode = m.fit(data, bvals, bvecs, mask, run_calibration=True,
-                          n_calibration_voxels=200)
+                          n_calibration_voxels=200,
+                          noise_map=np.full(mask.shape, 1000.0 / SNR))   # sigma vera (1.7.1+)
     names = DBSI_Adaptive.output_map_names(mode)
     I = {n_: i for i, n_ in enumerate(names)}
     g = lambda nm: np.array([res[i, j, k, I[nm]] for (i, j, k) in idx])

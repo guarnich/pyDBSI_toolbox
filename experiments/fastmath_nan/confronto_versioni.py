@@ -13,7 +13,7 @@ perche' in quella versione non esiste e git lo cancellerebbe:
     cp experiments/fastmath_nan/confronto_versioni.py ~/confronto_versioni.py
     git checkout b77527f            # 1.6.3
     python ~/confronto_versioni.py SESSDIR ~/v163.npz
-    git checkout main               # 1.7.0 o successive
+    git checkout v1.7.0             # dalla 1.7.1 fit() vuole la mappa di rumore e lo script non la passa
     python ~/confronto_versioni.py SESSDIR ~/v17.npz
     python ~/confronto_versioni.py --confronta ~/v163.npz ~/v17.npz
 

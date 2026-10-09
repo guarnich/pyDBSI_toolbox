@@ -333,7 +333,7 @@ def compute_fit_quality(data, bvals, bvecs, mask, results, model_mode,
     """
     if verbose:
         print("\n" + "="*60)
-        print("  DBSI FIT QUALITY (v3) — R² and RMSE")
+        print("  DBSI FIT QUALITY — R² and RMSE")
         print("  MULTI-POPULATION reconstruction: models ALL detected fiber")
         print("  populations (stored directions + tensors) + the isotropic")
         print("  block. Exact for single-fiber voxels; genuine crossings are")

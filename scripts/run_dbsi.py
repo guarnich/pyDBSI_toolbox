@@ -1,25 +1,23 @@
 #!/usr/bin/env python
 """
-DBSI Adaptive CLI — v3 (Hybrid Two-Stage Architecture)
+DBSI Adaptive CLI — the production fit of one session, from the shell.
 
-Outputs dynamically adapted based on acquisition scheme (2-ISO or 3-ISO).
+Same fit as the notebooks, bit for bit (tests/test_cli_matches_production.py):
+every default is read from DBSI_Adaptive's constructor, never restated here.
+Inputs are the fixed starting point of the toolbox: preprocessed DWI (topup,
+eddy, N4), bval/bvec, brain mask and the thermal noise map (--noise).
+Outputs adapt to the acquisition scheme (2-ISO or 3-ISO).
 
-CHANGES FROM v2
------------------
-- Stage A's (AD,RD) grid (`--n-ad`, `--n-rd`, `--anisotropy-ratio`)
-  defaults to a coarse 3x3 grid regardless of protocol, since Stage A
-  only needs to detect fiber direction, not estimate diffusivity (Stage
-  B does that, via closed-form regression with no free dictionary
-  parameters). See dbsi_toolbox.model_Niso_adaptive_ff_thr module
-  docstring.
-- New: `--min-weight-fraction` controls Stage A's direction-selection
-  threshold (see dbsi_toolbox.core.solvers.select_dominant_directions).
-- `--n-dirs` still defaults to protocol-derived (autoconfigured) sizing.
-- Calibration of (lambda_aniso, lambda_iso) is data-driven: GCV + the
-  discrepancy principle on a sample of this dataset's own voxels (fast,
-  no tissue-fraction priors). The legacy Monte Carlo grid search was
-  removed on 2026-09-21 (it never worked on this architecture; see
-  dbsi_toolbox.calibration module docstring).
+- Stage A's (AD,RD) grid (`--n-ad`, `--n-rd`, `--anisotropy-ratio`) is
+  deliberately coarse whatever the protocol: Stage A only detects fibers and
+  directions; the tensor is estimated afterwards (Stage C for single fibers,
+  crossing FF re-solve + MRDS for crossings).
+- `--n-dirs` defaults to protocol-derived (autoconfigured) sizing.
+- Calibration is data-driven on a sample of this dataset's own voxels:
+  lambda_iso by GCV on the fiber-subtracted residual, capped by the
+  discrepancy principle; lambda_aniso by ridge-dof GCV; n_iso fixed by
+  quadrature (6). `--protocol-calibration` imposes a protocol calibration
+  instead. See the dbsi_toolbox.calibration module docstring.
 
 OUTPUT LAYOUT (changed)
 -----------------------
@@ -62,14 +60,14 @@ _DICTIONARY_OPTS = ('n_ad', 'n_rd', 'anisotropy_ratio')
 
 
 def main():
-    parser = argparse.ArgumentParser(description="DBSI Adaptive Pipeline (v3, hybrid two-stage)")
+    parser = argparse.ArgumentParser(description="pyDBSI: DBSI Adaptive fit of one session")
     parser.add_argument("--dwi", required=True)
     parser.add_argument("--bval", required=True)
     parser.add_argument("--bvec", required=True)
     parser.add_argument("--mask", required=True,
                         help="Brain mask. REQUIRED: it defines both the fitted voxels "
                              "and the voxels sampled for calibration, so it changes the "
-                             "calibrated lambda/n_iso/gate, not just the field of view.")
+                             "calibrated lambdas, not just the field of view.")
     parser.add_argument("--noise", required=True,
                         help="Thermal noise map (sigma per voxel) in the SAME scale and grid as --dwi: "
                              "the dwidenoise -noise map divided by the N4 bias field (dwibiascorrect "

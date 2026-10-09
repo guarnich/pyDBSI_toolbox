@@ -508,6 +508,20 @@ def select_n_iso_data_driven_sweep(bvals, y_voxels, n_iso_candidates=None,
 _FLAT_RATIO = 1.5
 
 
+def _replica_corretta(base, sigma, rng):
+    """Una replica bootstrap: rumore Rician su `base`, poi la STESSA correzione
+    del fit, sqrt(max(S^2 - 2 sigma^2, 0)) (1.8.1).
+
+    `y_voxels` arriva al bootstrap gia' corretto, quindi lo e' anche il
+    riferimento liscio `base`. Fino alla 1.8.0 le repliche restavano grezze: il
+    bootstrap le confrontava con un segnale di un altro tipo, e il bias
+    misurato conteneva il pavimento del rumore oltre all'errore della griglia.
+    """
+    n = base.shape[0]
+    raw = np.sqrt((base + rng.normal(0, sigma, n)) ** 2 + rng.normal(0, sigma, n) ** 2)
+    return np.sqrt(np.maximum(raw ** 2 - 2.0 * sigma ** 2, 0.0))
+
+
 def select_n_iso_bootstrap(bvals, y_voxels, snr, sigma_normalised,
                            n_iso_candidates=None,
                            d_min=_DEFAULT_D_MIN, d_max=_DEFAULT_D_MAX,
@@ -558,7 +572,8 @@ def select_n_iso_bootstrap(bvals, y_voxels, snr, sigma_normalised,
          by a mismatched lambda).
       2. For each sampled voxel:
            a. Inject synthetic Rician noise at the measured SNR
-              (n_bootstrap times, each with a different seed).
+              (n_bootstrap times, each with a different seed) and apply
+              the fit's Rician correction (`_replica_corretta`).
            b. Solve the regularised NNLS and record the estimated RF
               fraction.
            c. Compute CV(RF) = std(RF_estimates)/mean(RF_estimates).
@@ -805,10 +820,7 @@ def select_n_iso_bootstrap(bvals, y_voxels, snr, sigma_normalised,
             rf_boots = []
             for rep in range(n_bootstrap):
                 rng = np.random.default_rng(v * 10007 + rep)
-                noisy = np.sqrt(
-                    (base + rng.normal(0, sigma_normalised, N))**2 +
-                    rng.normal(0, sigma_normalised, N)**2
-                )
+                noisy = _replica_corretta(base, sigma_normalised, rng)
                 w, _ = nnls_coordinate_descent(AtA_reg, At @ noisy, 0.0)
                 ftot = w.sum()
                 if ftot > 1e-10:

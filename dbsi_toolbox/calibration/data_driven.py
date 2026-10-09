@@ -268,8 +268,9 @@ def calibrate_concentration_gate_mc(bvals, At, AtA_reg, n_aniso_cols, n_dirs,
     fiber-FREE voxel (weight DIFFUSE across many basins). The concentration a
     fiber-free voxel can produce is not a universal constant — it depends on
     the protocol (b-values, direction count), the Stage-A dictionary, the
-    calibrated (lambda_aniso, lambda_iso) and the noise level. A fixed default
-    (0.35) was tuned on one synthetic protocol/SNR and will not generalise.
+    calibrated (lambda_aniso, lambda_iso) and the noise level. The old fixed
+    default (0.35) was tuned on one synthetic protocol/SNR and did not
+    generalise; since 1.4.0 the default is 0.0 (gate off).
 
     This routine builds the NULL distribution empirically FOR THE DATA AT
     HAND: it draws `n_mc` purely-isotropic signals (random 1-3 component
@@ -281,6 +282,16 @@ def calibrate_concentration_gate_mc(bvals, At, AtA_reg, n_aniso_cols, n_dirs,
     fiber-free voxel essentially never exceeds it, so anything above is a
     genuinely concentrated fiber. Auto-adapts to protocol + dictionary +
     lambdas + SNR.
+
+    LIMITS (ispezione 2026-10-09; OFF by default, not fixed because the gate
+    itself was judged the wrong tool -- see the model's gate note):
+      - the null is solved ONCE with the global lambda_aniso, while in the fit
+        the low-concentration voxels -- exactly the fiber-free ones the null
+        describes -- are re-solved with the concentration-modulated lambda
+        (Plan A) BEFORE the gate is applied. The null therefore describes the
+        concentration before modulation, not the one the gate sees;
+      - a single sigma (the calibration RMS) for every replicate, while the
+        fit corrects each voxel with its own sigma from the noise map.
 
     Returns
     -------

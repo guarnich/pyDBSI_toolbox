@@ -1,18 +1,20 @@
 """
-DBSI Core Module — Basis Functions and Solvers (v3, Hybrid Two-Stage)
+DBSI Core Module — Basis Functions and Solvers
 
-Contains the mathematical core of the v3 DBSI implementation:
-- Stage A detection dictionary (exhaustive direction x AD/RD-pair grid,
-  used ONLY to identify dominant fiber direction(s) via NNLS + heavy
-  sparsity regularization)
-- Stage B closed-form (AD, RD) estimation conditioned on Stage A's
-  selected direction(s)
-- Isotropic spectrum generation and weighted-centroid extraction
-  (unchanged from v1/v2)
-- Fiber direction generation (hemisphere)
-- NNLS solver with coordinate descent
-- Decoupled (lambda_aniso, lambda_iso) regularization for Stage A
-- Fiber FA computation
+The mathematical core used by `DBSI_Adaptive`:
+- Stage A detection dictionary (hemisphere directions x (AD, RD) pairs, plus
+  the isotropic block) and its regularized NNLS (coordinate descent, decoupled
+  lambda_aniso / lambda_iso); it detects fibers and directions, it does not
+  estimate the tensor
+- direction selection on the Stage A weights (axial neighbor graph, basins)
+- the per-population tensor estimators: cone refinement, Stage C VARPRO for
+  single fibers, crossing FF re-solve + MRDS for crossings; the closed-form
+  `estimate_AD_RD_conditioned` ("Stage B") only when Stage C is turned off
+- Stage D: compartment fractions on fixed isotropic centroids
+- isotropic grids: the anchored log-uniform one is the production grid; the
+  linear (`generate_isotropic_grid`) and plain log-uniform ones are not used
+  by the fit (the second only by the optional n_iso selectors)
+- fiber FA
 
 Removed in 1.0.0 — the v1/v2 estimators these superseded
 -----------------------------------------------------------------
@@ -36,7 +38,7 @@ from .basis import (
     generate_log_uniform_isotropic_grid,  # adaptive n_iso
     generate_anchored_isotropic_grid,     # threshold-anchored grid (production default)
     generate_fibonacci_sphere_hemisphere,
-    generate_fibonacci_sphere,
+    generate_fibonacci_sphere,           # not used by the fit
 )
 
 from .solvers import (
@@ -44,7 +46,7 @@ from .solvers import (
     compute_regularization_matrix,       # v3 Stage A regularization
     select_dominant_directions,          # v3 Stage A direction detection
     estimate_AD_RD_conditioned,          # v3 Stage B diffusivity estimation
-    compute_weighted_centroids,
+    compute_weighted_centroids,          # not used by the fit
     compute_fiber_fa,
 )
 

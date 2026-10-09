@@ -114,6 +114,22 @@ def test_report_descrive_il_dizionario():
     assert d['n_total_columns'] == m.dictionary_['A'].shape[1]
 
 
+def test_ogni_blocco_finisce_nel_testo():
+    """Ogni blocco-dizionario di run_report_ deve comparire in run_report.txt (v1.8.1).
+    `input` (1.6.2) e `fiber_threshold_final` (1.8.0) erano nel dizionario ma non nel testo:
+    esistevano solo in memoria, come era successo al test di rilevamento prima della 1.6.1."""
+    m, out, _ = _fit_e_salva()
+    txt = open(os.path.join(out, 'toolbox_report', 'run_report.txt')).read()
+    speciali = {'populations', 'solver', 'uncertainty', 'fit_quality'}   # stampati con etichette proprie
+    # OGNI chiave del blocco deve avere la sua riga: basta una chiave in comune con un
+    # altro blocco (p.es. fiber_threshold, anche fra le opzioni) per un falso 'presente'
+    mancanti = [k for k, v in m.run_report_.items()
+                if isinstance(v, dict) and v and k not in speciali
+                and not all(f'    {sk:<32}' in txt or f'    {sk} ' in txt for sk in v)]
+    print(f'  blocchi del report assenti dal testo: {mancanti or "nessuno"}')
+    assert not mancanti, f'blocchi del run report non stampati: {mancanti}'
+
+
 def test_find_run_report_due_layout():
     from dbsi_toolbox import find_run_report
     _, out, _ = _fit_e_salva()
@@ -133,8 +149,8 @@ def test_versione():
 
 if __name__ == '__main__':
     falliti = 0
-    for fn in (test_versione, test_cartella_e_file, test_matrice_e_quella_del_fit,
-               test_report_descrive_il_dizionario, test_find_run_report_due_layout):
+    # scoperta automatica: un test aggiunto e non elencato restava fuori (2026-10-09)
+    for fn in [f for k, f in list(globals().items()) if k.startswith('test_') and callable(f)]:
         print(f'\n=== {fn.__name__} ===')
         try:
             fn(); print('  [ok]')

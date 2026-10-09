@@ -1,56 +1,28 @@
 """
-DBSI Calibration Module - Regularization Parameter Selection (v3, Hybrid Two-Stage)
-======================================================================================
+DBSI Calibration Module — regularisation parameter selection
+=============================================================
 
-TWO COMPLEMENTARY PATHS
-----------------------------
-1. DATA-DRIVEN (primary) — `calibration.data_driven`
-   GCV (lambda_iso) + discrepancy principle (lambda_aniso), derived
-   purely from the acquisition protocol and a sample of the dataset's
-   own voxels. No tissue-fraction priors. Fast (a few dozen NNLS solves
-   total). Recommended as the default calibration path — see
-   `data_driven.py` module docstring for the full rationale and the
-   empirical comparison against the Monte Carlo path.
+- `calibration.data_driven` (the only selection path): GCV + discrepancy
+  ceiling for lambda_iso, ridge-dof GCV for lambda_aniso, on a sample of the
+  dataset's own voxels with the noise map's sigma. See its module docstring.
+- `calibration.protocol`: aggregation of per-acquisition calibration records
+  into one set of hyperparameters per protocol (cohort studies).
+- `calibration.mc_sure` (optional, off by default): Monte Carlo SURE
+  cross-check of lambda_iso / n_iso against the risk of the actual NNLS
+  estimator; reports agreement, never a new value.
+- `calibration.adaptive_n_iso` (optional): per-dataset n_iso selection
+  ('bootstrap', 'svd_floor'). The default is n_iso = 6 by grid convergence
+  ('quadrature'): n_iso is a discretisation parameter, not a model order.
+- `calibration.optimizer`: synthetic tissue-scenario signals, not used by the
+  package (the Monte Carlo calibration that lived there was removed).
 
-2. MONTE CARLO — REMOVED 2026-09-21
-   Both Monte Carlo entry points are gone: the grid search
-   (`optimize_hyperparameters`, `calibration_method='monte_carlo'`) and
-   the single-pair cross-check (`evaluate_lambda_pair`,
-   `--mc-crosscheck`). Neither ever worked here — their shared scenario
-   evaluator called `select_dominant_directions` with a pre-`fiber_dirs`
-   argument list and the numba kernel never compiled. `calibration.optimizer`
-   now only holds synthetic-signal generation.
+Usage outside DBSI_Adaptive.fit:
 
-3. MONTE CARLO SURE (cross-check) — `calibration.mc_sure`
-   Stein's Unbiased Risk Estimate, evaluated via randomized probes
-   (Ramani, Blu & Unser 2008), gives a risk criterion that is formally
-   exact for the actual constrained NNLS estimator used in this
-   toolbox — unlike GCV, which is derived for an unconstrained linear
-   estimator and is therefore an approximation once the non-negativity
-   constraint binds. Use `crosscheck_lambda_iso_sure` /
-   `crosscheck_n_iso_sure` to verify that a candidate n_iso/lambda_iso
-   (from the data-driven path) falls within a low-risk neighbourhood
-   under this independent criterion. See `mc_sure.py` module docstring
-   for the empirical finding that shaped this module's design: the risk
-   landscape here is typically a flat valley, so these functions report
-   AGREEMENT/DISAGREEMENT with a candidate, not a new point estimate.
-
-Recommended usage pattern
------------------------------
-    from dbsi_toolbox.calibration import (
-        select_lambdas_data_driven, sample_calibration_voxels,
-    )
-
-    y_voxels, sigma = sample_calibration_voxels(data, mask, bvals)
+    from dbsi_toolbox.calibration import select_lambdas_data_driven, sample_calibration_voxels
+    y_voxels, sigma = sample_calibration_voxels(data_corr, mask, bvals, n_voxels=1000,
+                                                seed=0, noise_map=noise_map)
     lambda_aniso, lambda_iso, diag = select_lambdas_data_driven(
-        bvals, bvecs, fiber_dirs, diff_pairs, iso_grid, y_voxels, sigma
-    )
-    # Check diag['discrepancy'].get('floor_applied'): True means the
-    # discrepancy principle's raw answer was below the safety floor
-    # (lambda_aniso < 10% of lambda_iso) and was clamped — usually a
-    # sign the calibration voxel sample was too small/homogeneous (see
-    # `select_lambda_aniso_discrepancy` docstring). Consider increasing
-    # n_calibration_voxels if this triggers often.
+        bvals, bvecs, fiber_dirs, diff_pairs, iso_grid, y_voxels, sigma)
 """
 
 from .data_driven import (

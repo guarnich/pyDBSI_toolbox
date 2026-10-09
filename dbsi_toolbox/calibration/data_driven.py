@@ -1,122 +1,46 @@
 """
-DBSI Data-Driven Regularization — GCV (lambda_iso) + Discrepancy Principle (lambda_aniso)
-=============================================================================================
+DBSI Data-Driven Regularization — how (lambda_aniso, lambda_iso) are chosen
+=============================================================================
 
-WHY THIS MODULE EXISTS
---------------------------
-The Monte Carlo calibration that used to live in `calibration/optimizer.py`
-selected (lambda_aniso, lambda_iso) by simulating signals from 14
-physiologically grounded tissue scenarios (Wang et al. 2011, Ye et al. 2020,
-Vavasour et al. 2022) with hardcoded fraction/diffusivity priors. (It was
-REMOVED on 2026-09-21 — it never compiled; see that module's docstring.)
-That approach is methodologically sound as a CROSS-VALIDATION step (does a
-candidate lambda pair produce reasonable fraction/diffusivity recovery
-across known tissue regimes?),
-but using it as the SOURCE of lambda has a specific weakness: the chosen
-lambda optimizes performance on literature-derived scenarios, which may
-not match the actual fraction distribution of the protocol/population
-being processed. Since lambda's optimum has already been shown (see
-project validation records for v2/v3) to depend on SNR and the
-acquisition's b-value scheme, calibrating against external literature
-priors risks a lambda that is optimal for a hypothetical scenario set
-rather than for the data actually being fit.
+The two constants of Stage A's penalised NNLS are chosen from the data being
+fitted, with no tissue priors: the design matrix A (bvals/bvecs), a sample of
+the dataset's own brain-mask voxels (`sample_calibration_voxels`, 1000 voxels,
+seed 0, Rician-corrected and S0-normalised) and the noise level sigma in the
+same units (the RMS over the sample of noise_map / S0, see that function).
 
-This module computes (lambda_aniso, lambda_iso) using ONLY quantities
-already derived from the actual data being processed: the design matrix
-A (depends only on bvals/bvecs, already known), the observed signal y
-(via `sample_calibration_voxels`, drawn directly from the dataset's own
-brain-mask voxels — no tissue model assumed), and the noise sigma
-(already estimated, or computed directly from sampled b0 volumes). No
-tissue-fraction priors are used. This is now the ONLY calibration path
-in the package: the Monte Carlo alternative was removed on 2026-09-21.
+THE PROCEDURE (`select_lambdas_data_driven`, as called by DBSI_Adaptive.fit)
+-------------------------------------------------------------------------
+1. lambda_iso, preliminary: GCV of the isotropic block on the full signal
+   (closed form via the SVD of A_iso: filter factors s^2 / (s^2 + lambda)),
+       GCV(lambda) = (||y - A w_lambda||^2 / N) / (1 - tr(H_lambda)/N)^2 .
+2. lambda_aniso, preliminary: discrepancy principle (Morozov), the lambda at
+   which the mean NNLS residual over the sample equals N * sigma^2, found by
+   bisection on log10(lambda), with a safety floor. Used ONLY for step 3.
+3. The fiber contribution is removed with those two lambdas: the isotropic
+   residual r = y - A_aniso w_aniso is what the isotropic block must explain.
+4. lambda_iso: GCV on the residual, capped by the discrepancy ceiling
+   `lambda_iso_discrepancy_cap` (the largest lambda whose iso-block residual
+   stays at the noise level N * sigma^2): min(GCV, ceiling).
+5. lambda_aniso: GCV on the full signal with the RIDGE degrees of freedom
+   tr(A M^-1 A^T), M = A^T A + diag(lambda, lambda_iso)
+   (`select_lambda_aniso_gcv_lcurve`, method 'gcv', the toolbox default). The
+   ridge dof, not the NNLS active set: the NNLS dof is dominated by the active
+   set and does not see the ill-conditioning, so a GCV on it slides to 0.
+   'discrepancy' and 'lcurve' remain selectable.
 
-TWO DIFFERENT METHODS FOR TWO DIFFERENT BLOCKS
-----------------------------------------------------
-lambda_iso (isotropic spectrum block) — Generalized Cross-Validation (GCV)
-    The isotropic block is a classic Tikhonov-regularized linear inverse
-    problem (no non-negativity constraint enforced at this stage of the
-    estimate; the constraint is applied later by the actual NNLS solve,
-    but GCV's ridge-regression selection of lambda is a standard,
-    well-validated proxy for the constrained problem's regularization
-    strength — see module docstring discussion of this approximation's
-    scope). GCV chooses lambda to minimize a leave-one-out cross-
-    validation estimate of out-of-sample prediction error, computed in
-    closed form via the SVD of the design matrix — no need to refit N
-    times.
+sigma enters only steps 2 and 4 (and, through the Rician correction, every
+sampled signal); the GCVs themselves are sigma-free. Protocol-level
+aggregation of the per-acquisition curves is in `calibration.protocol`.
 
-        GCV(lambda) = (||y - A w_lambda||^2 / N) / (1 - tr(H_lambda)/N)^2
-
-    where H_lambda = A (A^T A + lambda I)^-1 A^T is the "hat matrix".
-
-lambda_aniso (Stage A anisotropic detection block) — Discrepancy Principle
-    Stage A's job is sparse direction DETECTION, not spectral recovery
-    (see model_Niso_adaptive_ff_thr.py module docstring) — a simpler,
-    more binary objective (fiber present in this direction: yes/no) than
-    the isotropic block's continuous spectrum recovery. For this simpler
-    objective, the discrepancy principle (Morozov 1966) is an adequate
-    and very cheap choice: select lambda such that the residual norm of
-    the regularized fit matches the expected noise level,
-
-        ||A w_lambda - y||^2 ~= N * sigma^2
-
-    found via 1D bisection on lambda (a handful of NNLS solves, not
-    thousands of Monte Carlo samples).
-
-CAVEATS (stated explicitly per project methodology: no number is used
-without a documented source, and limitations are not silently elided)
------------------------------------------------------------------------------
-- GCV and the discrepancy principle were both originally derived for
-  UNCONSTRAINED linear least squares. Applying them to NNLS (non-
-  negativity constrained) is common and empirically reasonable in the
-  inverse-problems literature, but the asymptotic optimality guarantees
-  of classical GCV theory do not strictly transfer to the constrained
-  case. This should be validated empirically against synthetic recovery
-  and against the Monte Carlo cross-validation scenarios before being
-  trusted in place of the (slower but constraint-aware) Monte Carlo
-  selection for a given protocol.
-- GCV is known to occasionally under-regularize when the noise is not
-  well-approximated as i.i.d. Gaussian (the Rician-corrected residual
-  noise floor is not exactly Gaussian even after correction). The
-  discrepancy principle requires an accurate sigma estimate — an error in
-  the noise map propagates directly into the targets it sets.
-- Both methods, as implemented here, choose a single GLOBAL
-  lambda_aniso/lambda_iso per protocol (matching the existing
-  calibration's scope), not a per-voxel value. Per-voxel adaptive
-  regularization (e.g. SNR-weighted, voxel-local discrepancy) is a
-  documented possible extension, not implemented here.
-- EMPIRICAL VALIDATION SUMMARY (project records, synthetic testing):
-  when both methods are calibrated FRESH on the exact same protocol and
-  Stage A dictionary, lambda_aniso selected by the discrepancy principle
-  (~2-3.6 in one tested configuration) landed close to the value
-  independently found by a fresh Monte Carlo calibration (~3.6 for the
-  same configuration) — i.e. the two methods are not in fundamental
-  disagreement when compared fairly. Synthetic AD/RD recovery accuracy
-  was comparable between the two (neither uniformly dominated the
-  other across 5 independent test seeds), with the discrepancy-principle
-  selection showing lower median RD error but higher median AD error in
-  that specific comparison. The discrepancy-principle estimate's main
-  weakness identified was VARIANCE, not bias: coefficient of variation
-  of the selected lambda_aniso across repeated calibration samples was
-  ~51% at 15 calibration voxels, dropping to ~14% at 150 voxels. With
-  real datasets (hundreds of thousands of brain-mask voxels available
-  for sampling via `sample_calibration_voxels`), this variance is
-  expected to shrink further; this has not yet been confirmed on real
-  (non-synthetic) data and should be checked before relying on the
-  data-driven selection as the sole source of lambda for a given
-  dataset. The Monte Carlo cross-check that used to be recommended
-  alongside it was removed on 2026-09-21 (it never worked), so this
-  caveat currently has no mitigation other than inspecting the
-  calibrated values against other protocols on the same scanner.
-
-References
-----------
-Golub GH, Heath M, Wahba G (1979). Generalized cross-validation as a
-    method for choosing a good ridge parameter. Technometrics, 21(2),
-    215-223.
-Hansen PC (1992). Analysis of discrete ill-posed problems by means of
-    the L-curve. SIAM Review, 34(4), 561-580.
-Morozov VA (1966). On the solution of functional equations by the
-    method of regularization. Soviet Math. Dokl., 7, 414-417.
+CAVEATS
+-------
+- GCV and the discrepancy principle are derived for unconstrained linear least
+  squares; here they are applied as proxies for an NNLS estimator. The SURE
+  cross-check (`calibration.mc_sure`, off by default) evaluates the risk of
+  the actual NNLS estimator around the chosen lambda_iso.
+- One global pair per acquisition (or per protocol), not per voxel; the
+  per-voxel adaptation is the concentration modulation of lambda_aniso in
+  the model kernel.
 """
 
 import numpy as np
@@ -1115,7 +1039,7 @@ def select_lambdas_data_driven(bvals, bvecs, fiber_dirs, diff_pairs, iso_grid,
                                 y_voxels, sigma,
                                 lambda_iso_grid=None,
                                 lambda_aniso_bracket=(1e-6, 1e4),
-                                lambda_aniso_method='discrepancy',
+                                lambda_aniso_method='gcv',
                                 lambda_aniso_grid=None):
     """
     Convenience wrapper: select (lambda_aniso, lambda_iso) for a given

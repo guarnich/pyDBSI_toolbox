@@ -46,7 +46,8 @@ Usage
 
 `DBSI_Adaptive.fit` already calls this and stores the result in the
 `fit_r2` / `fit_rmse` output channels; call it directly only to recompute
-against different data or a different fiber_threshold.
+against different data or different isotropic centroids (`fiber_threshold`
+is accepted but no longer used, see the function docstring).
 
 References
 ----------
@@ -551,6 +552,7 @@ def format_run_report(report, saved_channels=None):
 
     p = R.get('protocol', {})
     block("Protocol", p)
+    block("Input", R.get('input'))
     block("Noise", R.get('noise'))
     block("Rician clamp", R.get('rician_clamp'))
     block("Protocol calibration", R.get('protocol_calibration'))
@@ -607,6 +609,7 @@ def format_run_report(report, saved_channels=None):
         add("     determine: report the bound-active fraction, do not average over it)")
 
     # Test di rilevamento (v1.6.1): era nel dict ma non veniva stampato.
+    block("Fiber threshold on the final FF (v1.8.0)", R.get('fiber_threshold_final'))
     block("Fiber detection test", R.get('fiber_detection'))
 
     un = R.get('uncertainty') or {}

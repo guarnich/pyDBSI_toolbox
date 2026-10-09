@@ -2044,6 +2044,22 @@ class DBSI_Adaptive:
         bvecs = np.asarray(bvecs, dtype=np.float64)
         if bvecs.shape[0] == 3 and bvecs.shape[1] != 3:
             bvecs = bvecs.T
+        # ── Tabella dei gradienti coerente con i dati (v1.8.0) ───────────────
+        # I kernel numba non controllano i limiti degli array: con un bvec in
+        # meno dei volumi il fit girava fino in fondo leggendo memoria fuori
+        # dalla tabella, senza errori e con mappe senza senso (FF = 0 ovunque);
+        # con un bval in meno si fermava su un IndexError incomprensibile.
+        bvals = np.asarray(bvals, dtype=np.float64).ravel()
+        if np.ndim(data) != 4:
+            raise ValueError(f"data deve essere 4D (X, Y, Z, volumi), ha forma {np.shape(data)}")
+        n_vol = data.shape[3]
+        if bvals.size != n_vol or bvecs.ndim != 2 or bvecs.shape != (n_vol, 3):
+            raise ValueError(f"tabella dei gradienti incoerente con i dati: {n_vol} volumi, "
+                             f"{bvals.size} b-value, bvec di forma {bvecs.shape} (attesa ({n_vol}, 3))")
+        _dw0 = (bvals >= B0_THRESHOLD) & (np.linalg.norm(bvecs, axis=1) < 1e-6)
+        if _dw0.any():
+            raise ValueError(f"{int(_dw0.sum())} volumi pesati (b >= {B0_THRESHOLD:g}) hanno bvec "
+                             f"nullo: tabella dei gradienti sbagliata")
         norms = np.linalg.norm(bvecs, axis=1, keepdims=True)
         norms[norms == 0] = 1.0
         bvecs = bvecs / norms

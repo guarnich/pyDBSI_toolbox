@@ -236,7 +236,8 @@ in mm^2/s, FA adimensionale). NaN dove la mappa non esiste.
 
 Come e' calcolato: informazione di Fisher del modello con cui le mappe sono
 riportate (fibre con AD, RD, direzione e peso liberi + centroidi isotropi fissi
-di Stage D), valutata alla stima, rumore gaussiano sigma_raw / S0 del voxel;
+di Stage D), valutata alla stima, rumore gaussiano sigma / S0 del voxel (sigma =
+la mappa di rumore termico in ingresso);
 metodo delta per frazioni normalizzate, FA e tensore pesato. E' il limite di
 Cramer-Rao: la precisione che uno stimatore NON distorto potrebbe raggiungere
 con questo protocollo e questo rumore. NON contiene il bias.
@@ -257,9 +258,9 @@ Altri file:
   residual_over_sigma.nii.gz
         sqrt(RSS / (N - P)) / sigma del voxel, sul segnale corretto per Rician, per
         il modello riportato. ~1 se il modello descrive il voxel e sigma e' giusta;
-        sopra 1: il modello non basta, o il rumore locale e' piu' alto di sigma
-        globale (fattore g dell'imaging parallelo). Nei crossing sta sopra 1 per
-        costruzione: la FF di Stage A tenuta fissa non e' quella del miglior fit.
+        sopra 1: il modello non basta, o il rumore locale e' piu' alto di quello
+        della mappa di rumore. Con crossing_ff_kappa = 0 (FF dei crossing presa da
+        Stage A e tenuta fissa) nei crossing sta sopra 1 per costruzione.
 
 Uso: per una regione di N voxel l'errore della media scende fino a SE/sqrt(N)
 (meno, con la correlazione spaziale). Voxel con flag 1, 2 o 4: l'errore e' una

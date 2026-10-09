@@ -77,8 +77,8 @@ without a documented source, and limitations are not silently elided)
 - GCV is known to occasionally under-regularize when the noise is not
   well-approximated as i.i.d. Gaussian (the Rician-corrected residual
   noise floor is not exactly Gaussian even after correction). The
-  discrepancy principle requires an accurate sigma estimate — error in
-  `estimate_snr_robust`'s sigma propagates directly into lambda_aniso.
+  discrepancy principle requires an accurate sigma estimate — an error in
+  the noise map propagates directly into the targets it sets.
 - Both methods, as implemented here, choose a single GLOBAL
   lambda_aniso/lambda_iso per protocol (matching the existing
   calibration's scope), not a per-voxel value. Per-voxel adaptive
@@ -603,9 +603,9 @@ def select_lambda_aniso_discrepancy(AtA, At, y_voxels, n_aniso_cols,
         [0:n_aniso_cols) get lambda_aniso, columns [n_aniso_cols:) get
         lambda_iso_fixed.
     sigma : float
-        Noise standard deviation (already estimated via
-        `estimate_snr_robust`), in the same normalised (S/S0) units as
-        y_voxels.
+        Noise level in the same normalised (S/S0) units as y_voxels: the RMS
+        of sigma_v / S0_v over the sampled voxels (`sample_calibration_voxels`),
+        so that N * sigma^2 is the noise part of the MEAN squared residual.
     lambda_iso_fixed : float
         The lambda_iso value to hold fixed during the lambda_aniso
         search (typically the output of `select_lambda_iso_gcv`).
@@ -961,13 +961,10 @@ def sample_calibration_voxels(data, mask, bvals, b0_thr=B0_THRESHOLD,
     y_voxels : ndarray (n_sampled, N)
         S0-normalised signals (S/S0) for the sampled voxels.
     sigma_normalised : float
-        An estimate of the noise standard deviation in the SAME
-        normalised (S/S0) units as y_voxels, obtained by dividing the
-        per-voxel temporal/spatial sigma by each voxel's own S0 and
-        taking the median — consistent with how `estimate_snr_robust`
-        characterises noise, but rescaled into normalised-signal units
-        since that is the space `select_lambda_aniso_discrepancy`
-        operates in.
+        The noise level in the SAME normalised (S/S0) units as y_voxels.
+        With a noise map: the RMS over the sampled voxels of
+        noise_map / S0 (see the comment in the body). Without (synthetic
+        tests only): the de-biased median spread of the b=0 volumes.
     """
     rng = np.random.default_rng(seed)
 
@@ -1007,10 +1004,8 @@ def sample_calibration_voxels(data, mask, bvals, b0_thr=B0_THRESHOLD,
     raw_signals = data[xs, ys, zs, :].astype(np.float64)
     y_voxels = raw_signals / sampled_s0[:, None]
 
-    # Noise sigma in normalised units: use the spread of the b0 volumes
-    # themselves (already S0-normalised) as a simple, direct estimate
-    # consistent with the temporal method in estimate_snr_robust, but
-    # expressed in the normalised-signal space used here.
+    # Noise sigma in normalised units: from the noise map (production), or
+    # from the spread of the b=0 volumes (synthetic tests, _ALLOW_B0_SIGMA).
     if noise_map is not None:
         # RMS, not the median (v1.8.0). Every consumer compares the MEAN over
         # the sampled voxels of a squared residual with N * sigma^2 (lambda_iso
@@ -1149,9 +1144,8 @@ def select_lambdas_data_driven(bvals, bvecs, fiber_dirs, diff_pairs, iso_grid,
         Using multiple voxels (10-50 is typically sufficient) gives a
         more stable protocol-level estimate than a single voxel.
     sigma : float
-        Noise standard deviation in normalised (S/S0) units (already
-        estimated via `estimate_snr_robust`, then divided by the same
-        S0 normalisation used for y_voxels).
+        Noise level in normalised (S/S0) units, as returned by
+        `sample_calibration_voxels` (RMS of noise_map / S0).
     lambda_iso_grid : array or None
         Candidate grid for the GCV search (see `select_lambda_iso_gcv`).
     lambda_aniso_bracket : tuple (float, float)

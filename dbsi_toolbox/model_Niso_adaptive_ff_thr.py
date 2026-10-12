@@ -475,7 +475,7 @@ _DEFAULT_STAGEC_REFINE = True
 # angular quantisation, Stage C fixes the fraction/tensor bias -- so they
 # compose.
 #
-# VALIDATED 2026-09-19 (`experiments/exp_cone_multiproto.py`): 3 protocols
+# VALIDATED 2026-09-19 (`experiments/exp_cone_multiproto.py`, out of the repository): 3 protocols
 # (n_dirs 36/62/78, i.e. 22.8/17.2/15.4 deg grid spacing) x 3 SNR (20/30/50),
 # 200 synthetic single-fiber voxels each, AD and RD swept per voxel, true
 # directions uniform on the hemisphere so they fall between grid nodes. Paired,

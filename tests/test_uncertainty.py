@@ -16,7 +16,7 @@ COSA SI PROTEGGE.
      dice perche'.
   4. Copertura su mono-fibra sana a SNR 26 (P3-like): SE mediana / sd empirica
      fra 0.8 e 1.6 per FF, RD e FA, e verita' entro 1.96 SE in >= 90% dei voxel.
-     (Misura completa: experiments/uncertainty/copertura.py.)
+     (Misura completa: experiments/uncertainty/copertura.py, fuori dal repository dal 2026-10-12.)
   5. Residuo / sigma: ~1 col modello giusto (mediana fra 0.9 e 1.1, flag 16 su
      meno del 3% dei voxel); nei crossing, dove la FF di Stage A resta fissa,
      sopra quello della mono-fibra.
@@ -39,7 +39,7 @@ from dbsi_toolbox.model_Niso_adaptive_ff_thr import (
 NOMI = DBSI_Adaptive.output_map_names(3)
 IX = {n: i for i, n in enumerate(NOMI)}
 LAM = dict(lambda_aniso=8.376776400682925, lambda_iso=0.017012542798525893, n_iso=6)
-EXP = Path(__file__).resolve().parents[1] / 'experiments' / 'uncertainty'
+EXP = Path(__file__).resolve().parent / 'data'          # protocollo tipo P3 (sintetico)
 ISO = np.array([0.15e-3, 1.0e-3, 3.0e-3])
 
 

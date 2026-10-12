@@ -22,7 +22,7 @@ import numpy as np
 import dbsi_toolbox
 from dbsi_toolbox import DBSI_Adaptive
 
-EXP = Path(__file__).resolve().parents[1] / 'experiments' / 'uncertainty'
+EXP = Path(__file__).resolve().parent / 'data'          # protocollo tipo P3 (sintetico)
 LAM = dict(lambda_aniso=9.8, lambda_iso=0.015, n_iso=6)
 
 

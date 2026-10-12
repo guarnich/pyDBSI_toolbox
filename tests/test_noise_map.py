@@ -30,7 +30,7 @@ import dbsi_toolbox.model_Niso_adaptive_ff_thr as M
 
 NOMI = DBSI_Adaptive.output_map_names(3); IX = {n: i for i, n in enumerate(NOMI)}
 LAM = dict(lambda_aniso=9.805121767832382, lambda_iso=0.015117750706156615, n_iso=6)
-EXP = Path(__file__).resolve().parents[1] / 'experiments' / 'uncertainty'
+EXP = Path(__file__).resolve().parent / 'data'          # protocollo tipo P3 (sintetico)
 S0, SIG_T, FATT_B0 = 1500.0, 1500.0 / 20, 1.6       # SNR termico 20, b=0 piu' rumorosi di 1.6x
 
 

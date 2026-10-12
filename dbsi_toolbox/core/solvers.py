@@ -1580,7 +1580,7 @@ def compute_fiber_fa(AD, RD):
 #   beforehand on the detected support (`crossing_ff_resolve`, ridge
 #   kappa * (sigma/S0)^2), and Stage D re-solves the final fractions with the
 #   tensors fitted here. MEASURED 2026-09-30 (experiments/crossing_asymmetry/,
-#   P3, SNR 26, FF 0.6): given the true fractions the LM is unbiased (RD bias
+#   outside the repository since 2026-10-12; P3, SNR 26, FF 0.6): given the true fractions the LM is unbiased (RD bias
 #   +0.01e-3, 0% on the floor); given Stage A's shrunk FF (x0.70) RD went to the
 #   floor in 91% of crossings -- the reason the FF is re-solved first. Per-
 #   population AD stays not quantitative (Cramer-Rao sd ~0.6e-3).
@@ -1907,8 +1907,8 @@ def estimate_AD_RD_mrds(bvals, bvecs, sig_norm, directions, fractions,
 # kappa * (sigma / S0)^2: the ridge that centres healthy crossing FF was found
 # constant across protocols (P3, HCP-like, 2-shell) and proportional to the noise
 # variance (x3 from SNR 26 to 15), i.e. sigma^2 / tau^2 with a fixed prior scale
-# on the weights. Validation: experiments/crossing_asymmetry/ on branch
-# `ispezione-crossing` (ff_corretta, scala_ridge_fine, scala_kappa,
+# on the weights. Validation: experiments/crossing_asymmetry/ (outside the
+# repository) and branch `ispezione-crossing` (ff_corretta, scala_ridge_fine, scala_kappa,
 # exp_ms_crossing, fantoccio_spaziale, batteria_modo10) and notebook 11 on a
 # healthy subject (crossings on the RD floor 75% -> 20%, i.e. 10-12% per
 # population like single fibers; crossing/neighbouring-single RD ratio 0.63 -> 1.00).

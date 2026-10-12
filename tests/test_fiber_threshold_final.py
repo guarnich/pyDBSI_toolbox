@@ -25,7 +25,7 @@ from dbsi_toolbox import DBSI_Adaptive
 
 NOMI = DBSI_Adaptive.output_map_names(3); IX = {n: i for i, n in enumerate(NOMI)}
 LAM = dict(lambda_aniso=8.376776400682925, lambda_iso=0.017012542798525893, n_iso=6)
-EXP = Path(__file__).resolve().parents[1] / 'experiments' / 'uncertainty'
+EXP = Path(__file__).resolve().parent / 'data'          # protocollo tipo P3 (sintetico)
 SNR, NV = 26.0, 60
 TENSORE = ('n_fiber_populations', 'axial_diffusivity_pop1', 'radial_diffusivity_pop1',
            'fiber_fa_pop1', 'axial_diffusivity_weighted')

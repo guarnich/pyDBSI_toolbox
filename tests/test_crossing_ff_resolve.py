@@ -31,7 +31,7 @@ from dbsi_toolbox.core.solvers import _TENSOR_RD_FLOOR
 
 NOMI = DBSI_Adaptive.output_map_names(3); IX = {n: i for i, n in enumerate(NOMI)}
 LAM = dict(lambda_aniso=9.805121767832382, lambda_iso=0.015117750706156615, n_iso=6)
-EXP = Path(__file__).resolve().parents[1] / 'experiments' / 'uncertainty'
+EXP = Path(__file__).resolve().parent / 'data'          # protocollo tipo P3 (sintetico)
 _CACHE = {}
 
 

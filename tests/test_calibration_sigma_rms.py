@@ -24,7 +24,7 @@ from dbsi_toolbox.calibration.data_driven import (sample_calibration_voxels, sel
                                                   lambda_iso_discrepancy_cap)
 from dbsi_toolbox.core.basis import generate_anchored_isotropic_grid
 
-EXP = Path(__file__).resolve().parents[1] / 'experiments' / 'uncertainty'
+EXP = Path(__file__).resolve().parent / 'data'          # protocollo tipo P3 (sintetico)
 
 
 def _volume(nv=1000, seed=0):

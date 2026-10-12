@@ -16,3 +16,5 @@ dist/
 .Rhistory
 validation/
 *.bak*
+# risultati dei notebook (figure, csv, cache delle condizioni)
+notebooks/risultati_*/

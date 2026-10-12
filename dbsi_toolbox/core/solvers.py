@@ -172,7 +172,7 @@ def nnls_batch(AtA, Aty_rows, reg_lambda):
     """`nnls_coordinate_descent` on every row of Aty_rows (n, cols) with the SAME
     matrix, voxels in parallel. Returns (W (n, cols), iterations (n,)).
 
-    The calibration (v1.8.2) spent ~90% of its time in a Python loop calling the
+    The calibration (until 2026-10-12) spent ~90% of its time in a Python loop calling the
     solver once per voxel: ~20 min for 1000 voxels, mostly the voxels that hit
     the iteration cap at lambda_aniso ~ 0. Each voxel's problem is independent,
     so it runs on all cores; the solver, its inputs and the per-voxel arithmetic

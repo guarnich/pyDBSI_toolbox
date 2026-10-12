@@ -626,7 +626,7 @@ def select_lambda_aniso_discrepancy(AtA, At, y_voxels, n_aniso_cols,
         AtA_reg = AtA + np.diag(reg_vec)
 
         # The voxels' NNLS problems are independent: solved in parallel
-        # (nnls_batch, v1.8.2), bit for bit the serial solutions. The residual
+        # (nnls_batch, 2026-10-12), bit for bit the serial solutions. The residual
         # and its sum keep the serial order and arithmetic.
         W, _ = nnls_batch(AtA_reg, Aty_rows, 0.0)
         total_resid2 = 0.0

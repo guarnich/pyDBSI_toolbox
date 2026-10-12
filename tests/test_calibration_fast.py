@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-Calibrazione veloce (v1.8.2): le NNLS per voxel girano in parallelo, con gli STESSI risultati.
+Calibrazione veloce (2026-10-12): le NNLS per voxel girano in parallelo, con gli STESSI risultati.
 
 IL PROBLEMA. La calibrazione libera costava ~20 minuti per 1000 voxel, sui dati veri come nelle
 simulazioni: il ~90% era un ciclo Python che chiamava la NNLS voxel per voxel nel primo passaggio di

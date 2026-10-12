@@ -227,11 +227,19 @@ its own optimum. `lambda_iso` is capped by the acquisitions' discrepancy ceiling
   voxels.
 - **Three populations** are out of scope (`MAX_FIBER_POPULATIONS = 2`).
 
+## Notebooks
+
+`notebooks/` holds two self-contained notebooks, each run once to produce all its figures (see
+`notebooks/README.md`): `simulazioni_pyDBSI.ipynb` measures accuracy against ground truth on synthetic
+phantoms through the production chain (images true / estimated / error, error per tissue scenario and SNR,
+estimate versus truth, coverage of the uncertainty maps); `matematica_pyDBSI.ipynb` draws the mathematics of
+the fit section by section, from the toolbox's own recorded inputs and calibration steps.
+
 ## Version history
 
 | version | |
 |---|---|
-| **1.8.1** | `fit` checks that bvals/bvecs match the number of volumes (a bvec table one volume short used to run silently, reading past the end of the table in the numba kernels, and return meaningless maps); the run report now prints the `input` and `fiber_threshold_final` blocks (they were in the dict only); `select_lambdas_data_driven` defaults to `lambda_aniso_method='gcv'` like the model; optional paths, off by default, made consistent with the fit: the n_iso SVD counts modes on the fit's grid range [0.1, 5.0]e-3 (was 3.0e-3), the n_iso bootstrap replicates get the fit's Rician correction, the concentration-gate MC null warns that it is computed before the λ_aniso modulation; `experiments/` scripts pass the noise map again; `setup.py` no longer declares a non-existent `model` module; package, calibration, CLI and uncertainty-README texts updated; after the `v1.8.1` tag, still 1.8.1: code the fit never called removed (`calibration/optimizer.py`, `select_n_iso_with_gcv_crosscheck`, `select_n_iso_data_driven_sweep`, `generate_isotropic_grid`, `compute_weighted_centroids`, `generate_fibonacci_sphere`), maps identical bit for bit; `experiments/` moved out of the repository (the tests' synthetic P3 table is now in `tests/data/`) |
+| **1.8.1** | `fit` checks that bvals/bvecs match the number of volumes (a bvec table one volume short used to run silently, reading past the end of the table in the numba kernels, and return meaningless maps); the run report now prints the `input` and `fiber_threshold_final` blocks (they were in the dict only); `select_lambdas_data_driven` defaults to `lambda_aniso_method='gcv'` like the model; optional paths, off by default, made consistent with the fit: the n_iso SVD counts modes on the fit's grid range [0.1, 5.0]e-3 (was 3.0e-3), the n_iso bootstrap replicates get the fit's Rician correction, the concentration-gate MC null warns that it is computed before the λ_aniso modulation; `experiments/` scripts pass the noise map again; `setup.py` no longer declares a non-existent `model` module; package, calibration, CLI and uncertainty-README texts updated; after the `v1.8.1` tag, still 1.8.1: code the fit never called removed (`calibration/optimizer.py`, `select_n_iso_with_gcv_crosscheck`, `select_n_iso_data_driven_sweep`, `generate_isotropic_grid`, `compute_weighted_centroids`, `generate_fibonacci_sphere`), maps identical bit for bit; `experiments/` moved out of the repository (the tests' synthetic P3 table is now in `tests/data/`); the free calibration's per-voxel NNLS solved in parallel (`core.solvers.nnls_batch`), ~4x faster and bit for bit the same lambdas; `notebooks/`: accuracy simulations against ground truth and the toolbox mathematics in figures |
 | 1.8.0 | `fiber_threshold` applied to the final fiber fraction; calibration sigma = RMS of σ/S0 over the sample (the median made the λ_iso ceiling collapse to its grid floor); tSNR removed (one b=0 is enough); single b=0 threshold (100) everywhere, protocol fingerprints included; stale channel map `DBSI_Adaptive.CH` removed |
 | 1.7.1 | thermal noise map **required** (`noise_map` / `--noise`); crossings whose population Stage D zeroes become single fibers |
 | 1.7.0 | crossing fiber fraction re-solved before the tensor fit; uncertainty maps; `mean_iso_adc` removed (27 channels); detection threshold kept off |

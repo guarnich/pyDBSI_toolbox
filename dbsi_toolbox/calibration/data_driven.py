@@ -45,7 +45,7 @@ CAVEATS
 
 import numpy as np
 from ..core.basis import build_isotropic_dictionary
-from ..core.solvers import nnls_coordinate_descent, compute_regularization_matrix
+from ..core.solvers import nnls_coordinate_descent, nnls_batch, compute_regularization_matrix
 from ..utils.tools import _chi_median_factor, B0_THRESHOLD
 
 
@@ -617,6 +617,7 @@ def select_lambda_aniso_discrepancy(AtA, At, y_voxels, n_aniso_cols,
                        'min_floor_factor')
 
     n_total_cols = AtA.shape[0]
+    Aty_rows = np.stack([At @ y_voxels[v] for v in range(n_voxels)])   # once, not per lambda
 
     def _residual2_for_lambda(lambda_aniso):
         reg_vec = np.zeros(n_total_cols, dtype=np.float64)
@@ -624,11 +625,13 @@ def select_lambda_aniso_discrepancy(AtA, At, y_voxels, n_aniso_cols,
         reg_vec[n_aniso_cols:] = lambda_iso_fixed
         AtA_reg = AtA + np.diag(reg_vec)
 
+        # The voxels' NNLS problems are independent: solved in parallel
+        # (nnls_batch, v1.8.2), bit for bit the serial solutions. The residual
+        # and its sum keep the serial order and arithmetic.
+        W, _ = nnls_batch(AtA_reg, Aty_rows, 0.0)
         total_resid2 = 0.0
         for v in range(n_voxels):
-            y = y_voxels[v]
-            Aty = At @ y
-            w, _ = nnls_coordinate_descent(AtA_reg, Aty, 0.0)
+            y, w, Aty = y_voxels[v], W[v], Aty_rows[v]
             # Residual computed via At/AtA identity to avoid needing A
             # explicitly: ||Aw - y||^2 = w^T AtA w - 2 w^T Aty + y^T y
             resid2 = float(w @ (AtA @ w) - 2.0 * w @ Aty + y @ y)
@@ -1038,9 +1041,9 @@ def fiber_subtracted_residual(bvals, bvecs, fiber_dirs, diff_pairs, iso_grid,
     AtA_reg = compute_regularization_matrix(AtA, n_aniso_cols, lam_aniso_1, lam_iso_1)
 
     y_resid = np.empty_like(y2d)
+    W, _ = nnls_batch(AtA_reg, np.stack([At @ y2d[v] for v in range(y2d.shape[0])]), 0.0)
     for v in range(y2d.shape[0]):
-        w, _ = nnls_coordinate_descent(AtA_reg, At @ y2d[v], 0.0)
-        y_resid[v] = y2d[v] - A_aniso @ w[:n_aniso_cols]
+        y_resid[v] = y2d[v] - A_aniso @ W[v, :n_aniso_cols]
     return y_resid, dict(lambda_iso_prelim=float(lam_iso_1),
                          lambda_aniso_prelim=float(lam_aniso_1),
                          n_aniso_cols=int(n_aniso_cols))
@@ -1146,9 +1149,9 @@ def select_lambdas_data_driven(bvals, bvecs, fiber_dirs, diff_pairs, iso_grid,
         AtA, n_aniso_cols, lambda_aniso_pass1, lambda_iso_pass1
     )
     y_iso_resid = np.empty_like(y2d)
+    W, _ = nnls_batch(AtA_reg_prelim, np.stack([At @ y2d[v] for v in range(y2d.shape[0])]), 0.0)
     for v in range(y2d.shape[0]):
-        w, _ = nnls_coordinate_descent(AtA_reg_prelim, At @ y2d[v], 0.0)
-        y_iso_resid[v] = y2d[v] - A_aniso @ w[:n_aniso_cols]
+        y_iso_resid[v] = y2d[v] - A_aniso @ W[v, :n_aniso_cols]
 
     lambda_iso_gcv, gcv_diag = select_lambda_iso_gcv(
         bvals, iso_grid, y_iso_resid, lambda_grid=lambda_iso_grid

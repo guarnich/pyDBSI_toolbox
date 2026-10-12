@@ -66,7 +66,7 @@ v2 incorrectly demanded of the same penalty).
 """
 
 import numpy as np
-from numba import njit
+from numba import njit, prange
 from .._numba_flags import FASTMATH
 
 
@@ -165,6 +165,28 @@ def nnls_coordinate_descent(AtA, Aty, reg_lambda, tol=1e-7,
             break
 
     return x, iteration
+
+
+@njit(parallel=True, cache=True, fastmath=FASTMATH)
+def nnls_batch(AtA, Aty_rows, reg_lambda):
+    """`nnls_coordinate_descent` on every row of Aty_rows (n, cols) with the SAME
+    matrix, voxels in parallel. Returns (W (n, cols), iterations (n,)).
+
+    The calibration (v1.8.2) spent ~90% of its time in a Python loop calling the
+    solver once per voxel: ~20 min for 1000 voxels, mostly the voxels that hit
+    the iteration cap at lambda_aniso ~ 0. Each voxel's problem is independent,
+    so it runs on all cores; the solver, its inputs and the per-voxel arithmetic
+    are unchanged (tests/test_calibration_fast.py checks the solutions bit for
+    bit against the serial loop).
+    """
+    n = Aty_rows.shape[0]
+    W = np.empty((n, AtA.shape[0]), dtype=np.float64)
+    it = np.empty(n, dtype=np.int64)
+    for v in prange(n):
+        w, k = nnls_coordinate_descent(AtA, Aty_rows[v], reg_lambda)
+        W[v] = w
+        it[v] = k
+    return W, it
 
 
 def compute_regularization_matrix(AtA, n_aniso_cols, lambda_aniso, lambda_iso):

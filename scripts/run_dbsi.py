@@ -105,6 +105,15 @@ def main():
                              "by less than this many noise variances (dRSS/sigma^2). Default: "
                              "off. The statistic is always written to "
                              "fiber_detection_stat.nii.gz. See DBSI_Adaptive.")
+    parser.add_argument("--two-vs-one-threshold", type=float,
+                        dest="two_vs_one_threshold", default=None,
+                        help="Decide crossing vs single fiber by model selection: keep the crossing "
+                             "only where it lowers the Stage D residual by at least this many noise "
+                             "variances. Default: off (min_peak_ratio decides). Use together with "
+                             "--crossing-dir-refine. See DBSI_Adaptive.")
+    parser.add_argument("--crossing-dir-refine", action="store_true", dest="crossing_dir_refine",
+                        help="Refine each crossing population's direction with a cone search "
+                             "(default: crossing directions stay on Stage A's grid nodes).")
     parser.add_argument("--crossing-ff-kappa", type=float, dest="crossing_ff_kappa", default=None,
                         help=f"Crossing fiber fraction re-solved before the crossing tensors are "
                              f"fitted, with ridge kappa x (sigma/S0)^2. Default: {_D['crossing_ff_kappa']}. "
@@ -243,8 +252,10 @@ def model_kwargs(args):
               stagec_refine=not args.disable_stagec,
               iso_resolve=not args.disable_iso_resolve,
               uncertainty=not getattr(args, 'no_uncertainty', False))
+    if getattr(args, 'crossing_dir_refine', False):
+        kw['crossing_dir_refine'] = True
     opt = ('min_weight_fraction', 'target_angular_resolution_deg', 'fiber_detection_threshold',
-           'crossing_ff_kappa')
+           'crossing_ff_kappa', 'two_vs_one_threshold')
     if not args.protocol_calibration:
         opt = opt + ('n_iso', 'lambda_aniso', 'lambda_iso', 'n_dirs') + _DICTIONARY_OPTS
     for k in opt:

@@ -331,8 +331,7 @@ _DEFAULT_CROSSING_DIR_REFINE = False
 # RD MAE up at SNR 15-26 (heterogeneous crossings demoted at low SNR).
 # Off by default until the cohort-level decision.
 _DEFAULT_TWO_VS_ONE_THRESHOLD = None
-_TWO_VS_ONE_CANDIDATE_RATIO = 0.0     # pass 1: any separated secondary peak is a candidate
-_TWO_VS_ONE_SINGLE_RATIO = 1.01       # pass 2: no secondary peak can pass (ratio <= 1)
+_TWO_VS_ONE_CANDIDATE_RATIO = 0.0     # any separated secondary peak is a candidate
 
 # Local-maxima peak-finding neighbourhood size for `select_dominant_directions`
 # (see core.solvers module notes just above that function). Re-validated
@@ -757,6 +756,219 @@ def _apply_conc_modulation(w, AtA_reg, Aty, n_aniso_cols, n_dirs, n_pairs,
     return w2
 
 
+@njit(cache=True, fastmath=FASTMATH)
+def _single_fiber_2iso(arr, x, y, z, dominant_dir, sig_norm, bvals, bvecs, b0_thr,
+                       f_fib, f_res, f_nonrf, D_res_c, D_nonrf_c,
+                       stagec_enabled, stagec_dir_refine, enable_direction_refinement,
+                       cone1_half_angle, n1_cone, cone2_half_angle, n2_cone,
+                       data_raw, stagec_iso_grid, iso_forward, iso_gram,
+                       stagec_ad_grid, stagec_rd_grid, stagec_aniso_ratio):
+    """Single-fiber Stage B/C for one voxel, written into `arr` at (x, y, z): cone on
+    the direction, then Stage C (or the closed-form Stage B without it). The body of the
+    kernels' n_pop == 1 branch, COPIED here (v1.9.0) so that the two-vs-one test can fit
+    the single-fiber alternative of a crossing candidate from the same Stage A. A copy, not
+    a move: with the kernels calling this helper the default fit moved by 1 float32 ulp
+    (~6e-8, 17 channels, same machine): fastmath optimises the helper differently from the
+    inlined code, and the default must stay bit-identical to 1.8.1. Keep the two in step
+    when editing either.
+    2-ISO."""
+
+    if stagec_enabled:
+        # Refine the direction first, then hand the refined one to
+        # Stage C (see _DEFAULT_STAGEC_DIR_REFINE).
+        if stagec_dir_refine and enable_direction_refinement:
+            dominant_dir, _, _ = refine_fiber_direction_cone(
+                bvals, bvecs, sig_norm, dominant_dir,
+                f_fib, f_res, f_nonrf, 0.0,
+                D_res_c, D_nonrf_c, 0.0, False,
+                cone1_half_angle, n1_cone, cone2_half_angle, n2_cone
+            )
+        # ── STAGE C: joint (VARPRO) tensor+fraction re-solve ──
+        # Replaces the raw over-complete-block fractions AND the
+        # decoupled Stage B tensor with a residual-minimising joint
+        # fit on [fiber_col(AD,RD,dir) | iso_grid]. Fixes the
+        # fiber_fraction inflation + restricted collapse + AD
+        # under-estimation (see stagec_varpro_single_fiber).
+        # Uses the RAW normalised signal (data_raw), not data_corr:
+        # the Rician noise-floor subtraction biases the tensor low.
+        sig_raw = data_raw[x, y, z]
+        s0_raw = 0.0
+        cnt_raw = 0
+        for ii in range(len(bvals)):
+            if bvals[ii] < b0_thr:
+                s0_raw += sig_raw[ii]
+                cnt_raw += 1
+        if cnt_raw > 0:
+            s0_raw /= cnt_raw
+        if s0_raw < 1e-6:
+            s0_raw = 1e-6
+        sig_norm_raw = (sig_raw / s0_raw).astype(np.float64)
+        n_iso_sc = stagec_iso_grid.shape[0]
+        w_sc = np.zeros(1 + n_iso_sc)
+        AD_est, RD_est = stagec_varpro_single_fiber(
+            sig_norm_raw, bvals, bvecs, dominant_dir,
+            iso_forward, iso_gram, stagec_ad_grid, stagec_rd_grid,
+            stagec_aniso_ratio, w_sc
+        )
+        tot_sc = 0.0
+        for i in range(1 + n_iso_sc):
+            tot_sc += w_sc[i]
+        if tot_sc > 1e-10:
+            res_sc = 0.0
+            nonrf_sc = 0.0
+            wd_sc = 0.0
+            for i in range(n_iso_sc):
+                wi = w_sc[1 + i]
+                adc = stagec_iso_grid[i]
+                if adc <= THRESH_RES:
+                    res_sc += wi
+                else:
+                    nonrf_sc += wi
+                wd_sc += wi * adc
+            f_fib = w_sc[0] / tot_sc
+            f_res = res_sc / tot_sc
+            f_nonrf = nonrf_sc / tot_sc
+            sum_iso_sc = res_sc + nonrf_sc
+            arr[x, y, z, _C_FF] = f_fib
+            arr[x, y, z, _C_RF] = f_res
+            arr[x, y, z, _C_NRF] = f_nonrf
+            arr[x, y, z, _C_ADC_ISO] = wd_sc / sum_iso_sc if sum_iso_sc > 1e-10 else 0.0
+    elif enable_direction_refinement:
+        # the refined direction is what AD/RD were fitted at, so it
+        # is also what gets stored (it used to be discarded, and the
+        # coarse grid node written to dir1 instead -- leaving the
+        # stored direction inconsistent with the stored tensor).
+        dominant_dir, AD_est, RD_est = refine_fiber_direction_cone(
+            bvals, bvecs, sig_norm, dominant_dir,
+            f_fib, f_res, f_nonrf, 0.0,
+            D_res_c, D_nonrf_c, 0.0, False,
+            cone1_half_angle, n1_cone, cone2_half_angle, n2_cone
+        )
+    else:
+        AD_est, RD_est = estimate_AD_RD_conditioned(
+            bvals, bvecs, sig_norm, dominant_dir,
+            f_fib, f_res, f_nonrf, 0.0,
+            D_res_c, D_nonrf_c, 0.0, False
+        )
+
+    FA = np.nan
+    if not np.isnan(AD_est) and not np.isnan(RD_est):
+        FA = compute_fiber_fa(AD_est, RD_est)
+
+    arr[x, y, z, _C_AD1] = AD_est
+    arr[x, y, z, _C_RD1] = RD_est
+    arr[x, y, z, _C_FA1] = FA
+    arr[x, y, z, _C_DIR1] = dominant_dir[0]
+    arr[x, y, z, _C_DIR1 + 1] = dominant_dir[1]
+    arr[x, y, z, _C_DIR1 + 2] = dominant_dir[2]
+
+@njit(cache=True, fastmath=FASTMATH)
+def _single_fiber_3iso(arr, x, y, z, dominant_dir, sig_norm, bvals, bvecs, b0_thr,
+                       f_fib, f_res, f_hin, f_wat, D_res_c, D_hin_c, D_wat_c,
+                       stagec_enabled, stagec_dir_refine, enable_direction_refinement,
+                       cone1_half_angle, n1_cone, cone2_half_angle, n2_cone,
+                       data_raw, stagec_iso_grid, iso_forward, iso_gram,
+                       stagec_ad_grid, stagec_rd_grid, stagec_aniso_ratio):
+    """Single-fiber Stage B/C for one voxel, written into `arr` at (x, y, z): cone on
+    the direction, then Stage C (or the closed-form Stage B without it). The body of the
+    kernels' n_pop == 1 branch, COPIED here (v1.9.0) so that the two-vs-one test can fit
+    the single-fiber alternative of a crossing candidate from the same Stage A. A copy, not
+    a move: with the kernels calling this helper the default fit moved by 1 float32 ulp
+    (~6e-8, 17 channels, same machine): fastmath optimises the helper differently from the
+    inlined code, and the default must stay bit-identical to 1.8.1. Keep the two in step
+    when editing either.
+    3-ISO."""
+
+    if stagec_enabled:
+        # Refine the direction first, then hand the refined one to
+        # Stage C (see _DEFAULT_STAGEC_DIR_REFINE).
+        if stagec_dir_refine and enable_direction_refinement:
+            dominant_dir, _, _ = refine_fiber_direction_cone(
+                bvals, bvecs, sig_norm, dominant_dir,
+                f_fib, f_res, f_hin, f_wat,
+                D_res_c, D_hin_c, D_wat_c, True,
+                cone1_half_angle, n1_cone, cone2_half_angle, n2_cone
+            )
+        # ── STAGE C: joint (VARPRO) tensor+fraction re-solve (3-ISO
+        # binning RES/HIN/WAT). Uses the RAW normalised signal
+        # (data_raw), not data_corr. See stagec_varpro_single_fiber. ──
+        sig_raw = data_raw[x, y, z]
+        s0_raw = 0.0
+        cnt_raw = 0
+        for ii in range(len(bvals)):
+            if bvals[ii] < b0_thr:
+                s0_raw += sig_raw[ii]
+                cnt_raw += 1
+        if cnt_raw > 0:
+            s0_raw /= cnt_raw
+        if s0_raw < 1e-6:
+            s0_raw = 1e-6
+        sig_norm_raw = (sig_raw / s0_raw).astype(np.float64)
+        n_iso_sc = stagec_iso_grid.shape[0]
+        w_sc = np.zeros(1 + n_iso_sc)
+        AD_est, RD_est = stagec_varpro_single_fiber(
+            sig_norm_raw, bvals, bvecs, dominant_dir,
+            iso_forward, iso_gram, stagec_ad_grid, stagec_rd_grid,
+            stagec_aniso_ratio, w_sc
+        )
+        tot_sc = 0.0
+        for i in range(1 + n_iso_sc):
+            tot_sc += w_sc[i]
+        if tot_sc > 1e-10:
+            res_sc = 0.0
+            hin_sc = 0.0
+            wat_sc = 0.0
+            wd_sc = 0.0
+            for i in range(n_iso_sc):
+                wi = w_sc[1 + i]
+                adc = stagec_iso_grid[i]
+                if adc <= THRESH_RES:
+                    res_sc += wi
+                elif adc <= THRESH_WAT:
+                    hin_sc += wi
+                else:
+                    wat_sc += wi
+                wd_sc += wi * adc
+            f_fib = w_sc[0] / tot_sc
+            f_res = res_sc / tot_sc
+            f_hin = hin_sc / tot_sc
+            f_wat = wat_sc / tot_sc
+            sum_iso_sc = res_sc + hin_sc + wat_sc
+            arr[x, y, z, _C_FF] = f_fib
+            arr[x, y, z, _C_RF] = f_res
+            arr[x, y, z, _C_HF] = f_hin
+            arr[x, y, z, _C_WF] = f_wat
+            arr[x, y, z, _C_NRF] = f_hin + f_wat
+            arr[x, y, z, _C_ADC_ISO] = wd_sc / sum_iso_sc if sum_iso_sc > 1e-10 else 0.0
+    elif enable_direction_refinement:
+        # the refined direction is what AD/RD were fitted at, so it
+        # is also what gets stored (it used to be discarded, and the
+        # coarse grid node written to dir1 instead -- leaving the
+        # stored direction inconsistent with the stored tensor).
+        dominant_dir, AD_est, RD_est = refine_fiber_direction_cone(
+            bvals, bvecs, sig_norm, dominant_dir,
+            f_fib, f_res, f_hin, f_wat,
+            D_res_c, D_hin_c, D_wat_c, True,
+            cone1_half_angle, n1_cone, cone2_half_angle, n2_cone
+        )
+    else:
+        AD_est, RD_est = estimate_AD_RD_conditioned(
+            bvals, bvecs, sig_norm, dominant_dir,
+            f_fib, f_res, f_hin, f_wat,
+            D_res_c, D_hin_c, D_wat_c, True
+        )
+
+    FA = np.nan
+    if not np.isnan(AD_est) and not np.isnan(RD_est):
+        FA = compute_fiber_fa(AD_est, RD_est)
+
+    arr[x, y, z, _C_AD1] = AD_est
+    arr[x, y, z, _C_RD1] = RD_est
+    arr[x, y, z, _C_FA1] = FA
+    arr[x, y, z, _C_DIR1] = dominant_dir[0]
+    arr[x, y, z, _C_DIR1 + 1] = dominant_dir[1]
+    arr[x, y, z, _C_DIR1 + 2] = dominant_dir[2]
+
 @njit(parallel=True, cache=True, fastmath=FASTMATH)
 def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         fiber_dirs, diff_pairs, n_dirs, iso_grid, b0_thr,
@@ -770,7 +982,8 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         stagec_enabled, iso_forward, iso_gram,
                         stagec_ad_grid, stagec_rd_grid, stagec_aniso_ratio,
                         data_raw, stagec_iso_grid, stagec_dir_refine,
-                        crossing_ff_kappa, sigma_map, crossing_dir_refine=False):
+                        crossing_ff_kappa, sigma_map, crossing_dir_refine,
+                        two_vs_one, alt_out):
     """
     v3 parallel fitting kernel — two-compartment isotropic model (2-ISO).
 
@@ -782,9 +995,11 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                    (`estimate_AD_RD_mrds`), from Stage A's grid-node
                    directions; with `crossing_dir_refine` (v1.9.0) each
                    population is then moved off its node by a cone search.
-    How many populations reach this kernel is `min_peak_ratio`'s call, or,
-    with the two-vs-one test (v1.9.0), the caller runs the kernel twice and
-    keeps the better Stage D model (see _DEFAULT_TWO_VS_ONE_THRESHOLD).
+    How many populations reach this kernel is `min_peak_ratio`'s call. With the
+    two-vs-one test (v1.9.0, `two_vs_one`) every crossing candidate is ALSO fitted
+    as a single fiber, from the same Stage A, into `alt_out`; the caller keeps the
+    better Stage D model (see _DEFAULT_TWO_VS_ONE_THRESHOLD). `alt_out` is never
+    touched when `two_vs_one` is False.
 
     Output layout: see module docstring "Output Channels". Channels 0-10
     are written exactly as before (backward compatible); channels 11-28
@@ -1072,6 +1287,28 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                 out[x, y, z, _C_DIR2] = directions[1, 0]
                 out[x, y, z, _C_DIR2 + 1] = directions[1, 1]
                 out[x, y, z, _C_DIR2 + 2] = directions[1, 2]
+                if two_vs_one:
+                    # v1.9.0: the single-fiber alternative of this crossing candidate, from the
+                    # SAME Stage A (a second kernel pass would redo Stage A, ~40% of its cost):
+                    # Stage A's state (locals: out[_C_FF] now holds the crossing's re-solved FF),
+                    # then a copy of the n_pop == 1 branch. Verified: with the test off the fit
+                    # is bit-identical to the two-pass version (same machine); with it on the
+                    # decisions are identical and 6/4992 crossing voxels move by 1 float32 ulp.
+                    # See _two_vs_one_pass.
+                    alt_out[x, y, z, _C_FF] = f_fib
+                    alt_out[x, y, z, _C_RF] = f_res
+                    alt_out[x, y, z, _C_NRF] = f_nonrf
+                    alt_out[x, y, z, _C_ADC_ISO] = mean_iso_adc
+                    alt_out[x, y, z, _C_CONC] = out[x, y, z, _C_CONC]
+                    alt_out[x, y, z, _C_NNLS_IT] = out[x, y, z, _C_NNLS_IT]
+                    alt_out[x, y, z, _C_NPOP] = 1
+                    _single_fiber_2iso(
+                        alt_out, x, y, z, fiber_dirs[dir_indices[0]], sig_norm, bvals, bvecs, b0_thr,
+                        f_fib, f_res, f_nonrf, D_res_c, D_nonrf_c,
+                        stagec_enabled, stagec_dir_refine, enable_direction_refinement,
+                        cone1_half_angle, n1_cone, cone2_half_angle, n2_cone,
+                        data_raw, stagec_iso_grid, iso_forward, iso_gram,
+                        stagec_ad_grid, stagec_rd_grid, stagec_aniso_ratio)
 
 
 @njit(parallel=True, cache=True, fastmath=FASTMATH)
@@ -1087,7 +1324,8 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         stagec_enabled, iso_forward, iso_gram,
                         stagec_ad_grid, stagec_rd_grid, stagec_aniso_ratio,
                         data_raw, stagec_iso_grid, stagec_dir_refine,
-                        crossing_ff_kappa, sigma_map, crossing_dir_refine=False):
+                        crossing_ff_kappa, sigma_map, crossing_dir_refine,
+                        two_vs_one, alt_out):
     """v3 parallel fitting kernel — three-compartment isotropic model
     (3-ISO). Same Stage A / Stage B (+ MRDS multi-fiber) structure as
     `_fit_voxels_2iso_v3`; see that kernel's docstring for the full
@@ -1375,6 +1613,30 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                 out[x, y, z, _C_DIR2] = directions[1, 0]
                 out[x, y, z, _C_DIR2 + 1] = directions[1, 1]
                 out[x, y, z, _C_DIR2 + 2] = directions[1, 2]
+                if two_vs_one:
+                    # v1.9.0: the single-fiber alternative of this crossing candidate, from the
+                    # SAME Stage A (a second kernel pass would redo Stage A, ~40% of its cost):
+                    # Stage A's state (locals: out[_C_FF] now holds the crossing's re-solved FF),
+                    # then a copy of the n_pop == 1 branch. Verified: with the test off the fit
+                    # is bit-identical to the two-pass version (same machine); with it on the
+                    # decisions are identical and 6/4992 crossing voxels move by 1 float32 ulp.
+                    # See _two_vs_one_pass.
+                    alt_out[x, y, z, _C_FF] = f_fib
+                    alt_out[x, y, z, _C_RF] = f_res
+                    alt_out[x, y, z, _C_HF] = f_hin
+                    alt_out[x, y, z, _C_WF] = f_wat
+                    alt_out[x, y, z, _C_NRF] = f_hin + f_wat
+                    alt_out[x, y, z, _C_ADC_ISO] = mean_iso_adc
+                    alt_out[x, y, z, _C_CONC] = out[x, y, z, _C_CONC]
+                    alt_out[x, y, z, _C_NNLS_IT] = out[x, y, z, _C_NNLS_IT]
+                    alt_out[x, y, z, _C_NPOP] = 1
+                    _single_fiber_3iso(
+                        alt_out, x, y, z, fiber_dirs[dir_indices[0]], sig_norm, bvals, bvecs, b0_thr,
+                        f_fib, f_res, f_hin, f_wat, D_res_c, D_hin_c, D_wat_c,
+                        stagec_enabled, stagec_dir_refine, enable_direction_refinement,
+                        cone1_half_angle, n1_cone, cone2_half_angle, n2_cone,
+                        data_raw, stagec_iso_grid, iso_forward, iso_gram,
+                        stagec_ad_grid, stagec_rd_grid, stagec_aniso_ratio)
 
 
 @njit(parallel=True, cache=True, fastmath=FASTMATH)
@@ -1690,8 +1952,9 @@ def _two_vs_one_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, sigma_map,
     """
     Two-vs-one population test (v1.9.0, see _DEFAULT_TWO_VS_ONE_THRESHOLD).
 
-    `out` holds the crossing fit of every candidate voxel (pass 1), `alt` the
-    single-fiber fit of the same voxels (pass 2). On the Stage D model,
+    `out` holds the crossing fit of every candidate voxel, `alt` the single-fiber
+    fit of the same voxels from the same Stage A (both written by the kernel). On
+    the Stage D model,
 
         stat21 = (RSS_1pop - RSS_2pop) / sigma_voxel^2,
 
@@ -2956,7 +3219,18 @@ class DBSI_Adaptive:
         if _test21:
             print(f"   Two-vs-one population test: ENABLED (threshold "
                   f"{float(self.two_vs_one_threshold):g} noise variances; every separated "
-                  f"secondary peak is a candidate, refitted as a single fiber)")
+                  f"secondary peak is a candidate, also fitted as a single fiber)")
+        # The single-fiber alternative of every crossing candidate is written here by
+        # the kernel itself, from the same Stage A (see _two_vs_one_pass). Without
+        # the test the kernel never touches it: a 1-voxel placeholder.
+        if _test21:
+            _alt = np.zeros_like(results)
+            _alt[..., _C_NPOP:] = np.nan
+            if not use_3iso:
+                _alt[..., _C_HF] = np.nan
+                _alt[..., _C_WF] = np.nan
+        else:
+            _alt = np.zeros((1, 1, 1, results.shape[3]), dtype=results.dtype)
 
         def _run_kernel(run_coords, out_arr, peak_ratio, desc):
             with tqdm(total=len(run_coords), desc=desc, unit="vox") as pbar:
@@ -2978,7 +3252,8 @@ class DBSI_Adaptive:
                         bool(self.stagec_refine), iso_forward, iso_gram,
                         stagec_ad_grid, stagec_rd_grid, float(_STAGEC_ANISO_RATIO),
                         data, stagec_iso_grid, bool(self.stagec_dir_refine),
-                        float(_kappa), sigma_map, bool(self.crossing_dir_refine)
+                        float(_kappa), sigma_map, bool(self.crossing_dir_refine),
+                        _test21, _alt
                     )
                     pbar.update(end - start)
 
@@ -2988,22 +3263,14 @@ class DBSI_Adaptive:
                     "   Progress")
 
         # ── Two-vs-one population test (v1.9.0) ─────────────────────────────
-        # Pass 2 refits every crossing candidate as a single fiber (same Stage A,
-        # no secondary population can pass), then the Stage D residuals decide.
+        # The kernel has fitted every crossing candidate both ways (crossing in
+        # `results`, single fiber in `_alt`); the Stage D residuals decide.
         # See _DEFAULT_TWO_VS_ONE_THRESHOLD.
         self.two_vs_one_stat_ = None
         self.two_vs_one_ = None
         if _test21:
             _cand = coords[results[coords[:, 0], coords[:, 1], coords[:, 2], _C_NPOP] >= 2]
-            _alt = np.zeros_like(results)
-            _alt[..., _C_NPOP:] = np.nan
-            if not use_3iso:
-                _alt[..., _C_HF] = np.nan
-                _alt[..., _C_WF] = np.nan
             _t21 = time.time()
-            if len(_cand):
-                _run_kernel(_cand, _alt, _TWO_VS_ONE_SINGLE_RATIO,
-                            "   Single-fiber refit of the crossing candidates")
             _stat21 = np.full(results.shape[:3], np.nan, dtype=np.float32)
             _iso_d21 = np.array(_ISO_RESOLVE_D_3ISO if use_3iso else _ISO_RESOLVE_D_2ISO,
                                 dtype=np.float64)

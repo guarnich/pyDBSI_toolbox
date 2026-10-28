@@ -186,6 +186,23 @@ save_protocol_calibration(cal, 'P3_calibration.json')              # returns the
 model = DBSI_Adaptive.from_calibration('P3_calibration.json')      # every acquisition
 ```
 
+**Step by step: `scripts/calibration.ipynb`.** Point it at the acquisitions (a glob or a list of
+directories) and at the file names *as your study names them* (one glob pattern per input,
+relative to each acquisition directory); it checks every input without fitting (grids,
+orientation of mask and noise map, one protocol fingerprint for the whole sample), calibrates each
+acquisition and keeps its record (an interrupted run resumes), aggregates, writes
+`<protocol>_calibration.json`, plots the GCV curves behind the choice and prints the command line:
+
+```bash
+python scripts/run_dbsi.py --dwi ... --bval ... --bvec ... --mask ... --noise ... --out ... \
+    --protocol-calibration P3_calibration.json                  # recommended
+python scripts/run_dbsi.py --dwi ... --bval ... --bvec ... --mask ... --noise ... --out ... \
+    --skip-calibration --lambda-aniso 5.2233 --lambda-iso 0.1 --n-iso 6 --n-dirs 62   # the same fit
+```
+
+The two give identical maps on an acquisition of the protocol; only the file refuses an
+acquisition with a different fingerprint and records its sha256 in the run report.
+
 `calibrate_protocol` refuses records calibrated without a noise map. `from_calibration` imposes
 the λ, `n_iso`, the gate and the dictionary options, refuses data with a different protocol
 fingerprint (`strict=True`) and refuses overrides of calibrated parameters; the run report states

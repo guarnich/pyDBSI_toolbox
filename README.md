@@ -1,4 +1,4 @@
-# pyDBSI Toolbox — v1.8.1
+# pyDBSI Toolbox — v1.9.0
 
 **Diffusion Basis Spectrum Imaging (DBSI): adaptive implementation with Numba acceleration**
 
@@ -108,9 +108,9 @@ dictionary, uncertainty maps).
    (isotropic leakage), the anisotropic penalty is boosted and the voxel re-solved
    (concentration modulation).
 3. **Populations.** Local maxima on an axial direction graph, basin masses, greedy selection with
-   angular non-maximum suppression: 0, 1 or at most 2 populations. The angular-concentration gate
-   is off by default (since 1.4.0): it rejected exactly the wide-angle crossings the dictionary can
-   resolve.
+   angular non-maximum suppression: 0, 1 or at most 2 candidate populations. The angular-concentration
+   gate is off by default (since 1.4.0): it rejected exactly the wide-angle crossings the dictionary can
+   resolve. Whether a candidate crossing stays a crossing is decided by the two-vs-one test (step 7).
 4. **Single fiber.** The direction is refined inside a cone tied to the dictionary spacing, then
    **Stage C** re-solves the fiber tensor and the compartment fractions jointly (variable
    projection over a 14×12 (AD, RD) grid with local refinement) on the raw normalised signal.
@@ -119,7 +119,10 @@ dictionary, uncertainty maps).
    isotropic grid) with a light ridge κ·(σ/S0)², then both tensors are fitted jointly by a bounded
    Levenberg–Marquardt with fractions and directions fixed. Stage A's own crossing fraction is
    shrunk by its sparsity penalty: held fixed, the tensors compensated by turning more anisotropic
-   and 75% of real crossings had their RD on the floor.
+   and 75% of real crossings had their RD on the floor. Then each population's direction leaves its
+   grid node by a **cone search**, one population at a time, the two tensors re-fitted at every
+   candidate (`crossing_dir_refine`, since 1.9.0): on randomly oriented crossings at SNR 26 the median
+   angular error halves (10 → 5°).
 6. **Stage D.** For every fitted voxel the final compartment fractions are re-estimated by NNLS
    over `[fitted fibers | three fixed isotropic centroids (0.15, 1.0, 3.0)×10⁻³ mm²/s]` on the
    Rician-corrected signal (RF/NRF centroids in 2-ISO), crossings included. A crossing whose
@@ -127,10 +130,15 @@ dictionary, uncertainty maps).
    this final fiber fraction**: where it is ≤ 0.15 the fiber is removed and the fractions are
    re-solved on the isotropic centroids alone, so a tensor is reported only where the reported
    FF > 0.15 (counted in the run report as `fiber_threshold_final`).
-7. **Fiber detection statistic.** `(RSS_iso_only − RSS_fibers+iso) / σ_voxel²` on the Stage D
+7. **Two-vs-one test** (since 1.9.0). Every voxel with a separated secondary peak is fitted both as a
+   crossing and as a single fiber from the same Stage A; the crossing is kept only where
+   `(RSS_1pop − RSS_2pop) / σ_voxel² ≥ 12` on the Stage D model, before the fiber threshold. It replaces
+   the hand-set basin-mass cut (`min_peak_ratio` 0.35) that gave false second populations and missed
+   unbalanced crossings at every SNR. Statistic in `two_vs_one_stat.nii.gz`.
+8. **Fiber detection statistic.** `(RSS_iso_only − RSS_fibers+iso) / σ_voxel²` on the Stage D
    model, always computed and written; the rejection threshold is off by default (see
    `fiber_detection_threshold`).
-8. **Derived channels, fit quality and uncertainty.** Population-1 fraction, FF-weighted tensor,
+9. **Derived channels, fit quality and uncertainty.** Population-1 fraction, FF-weighted tensor,
    R²/RMSE of the reconstructed signal, and the per-voxel standard errors.
 
 ## Outputs
@@ -215,6 +223,8 @@ its own optimum. `lambda_iso` is capped by the acquisitions' discrepancy ceiling
 
 | parameter | default | |
 |---|---|---|
+| `two_vs_one_threshold` | 12 | keep a crossing only where it lowers the Stage D residual by ≥ 12 noise variances; `None` (CLI `--no-two-vs-one`) = the pre-1.9 `min_peak_ratio` cut. Synthetic P3 battery: false second populations 36/16/4.5% → 3.3/1.1/0.2%, crossings found 64/51/40% → 64/80/91% at SNR 15/26/40. Real P3 (BR 000148): crossings in GM 35% → 14%, new crossings in the centrum semiovale, midline corpus callosum unchanged. Needs `iso_resolve` (the default switches itself off without it). Fit ×1.3 |
+| `crossing_dir_refine` | `True` | cone search on each crossing population's direction (CLI `--no-crossing-dir-refine`) |
 | `crossing_ff_kappa` | 30 | ridge of the crossing fraction re-solve, × (σ/S0)²; 0 keeps Stage A's crossing fraction. 65 centres healthy crossing FF on three protocols at SNR 15 and 26; 30 keeps more demyelination contrast at low SNR |
 | `fiber_detection_threshold` | `None` (off) | reject fibers whose detection statistic is below it. Off by decision (Oct 2026): adoptable on the synthetic battery (threshold 15), but its real-data control failed and the crossing re-solve changes the statistic |
 | `uncertainty` | `True` | write the uncertainty maps |
@@ -256,7 +266,8 @@ the fit section by section, from the toolbox's own recorded inputs and calibrati
 
 | version | |
 |---|---|
-| **1.8.1** | `fit` checks that bvals/bvecs match the number of volumes (a bvec table one volume short used to run silently, reading past the end of the table in the numba kernels, and return meaningless maps); the run report now prints the `input` and `fiber_threshold_final` blocks (they were in the dict only); `select_lambdas_data_driven` defaults to `lambda_aniso_method='gcv'` like the model; optional paths, off by default, made consistent with the fit: the n_iso SVD counts modes on the fit's grid range [0.1, 5.0]e-3 (was 3.0e-3), the n_iso bootstrap replicates get the fit's Rician correction, the concentration-gate MC null warns that it is computed before the λ_aniso modulation; `experiments/` scripts pass the noise map again; `setup.py` no longer declares a non-existent `model` module; package, calibration, CLI and uncertainty-README texts updated; after the `v1.8.1` tag, still 1.8.1: code the fit never called removed (`calibration/optimizer.py`, `select_n_iso_with_gcv_crosscheck`, `select_n_iso_data_driven_sweep`, `generate_isotropic_grid`, `compute_weighted_centroids`, `generate_fibonacci_sphere`), maps identical bit for bit; `experiments/` moved out of the repository (the tests' synthetic P3 table is now in `tests/data/`); the free calibration's per-voxel NNLS solved in parallel (`core.solvers.nnls_batch`), ~4x faster and bit for bit the same lambdas; `notebooks/`: accuracy simulations against ground truth and the toolbox mathematics in figures |
+| **1.9.0** | **crossings, two defaults changed**: the cone search on each crossing population's direction (`crossing_dir_refine=True`) and the two-vs-one population test (`two_vs_one_threshold=12`) replace grid-node directions and the `min_peak_ratio` cut; the single-fiber alternative is fitted inside the kernel from the same Stage A (fit ×1.3–1.8); `two_vs_one_stat.nii.gz` and a run-report block; CLI `--no-two-vs-one`, `--[no-]crossing-dir-refine`; with both off the fit is 1.8.1's up to 1 float32 ulp in ~1% of crossing voxels. Protocol calibrations made with 1.8 stay valid (the λ do not depend on these options). `scripts/calibration.ipynb`: from the study folders to the fixed-λ command. `notebooks/`: a third simulation arm and two sections (cone, two-vs-one test) in the mathematics |
+| 1.8.1 | `fit` checks that bvals/bvecs match the number of volumes (a bvec table one volume short used to run silently, reading past the end of the table in the numba kernels, and return meaningless maps); the run report now prints the `input` and `fiber_threshold_final` blocks (they were in the dict only); `select_lambdas_data_driven` defaults to `lambda_aniso_method='gcv'` like the model; optional paths, off by default, made consistent with the fit: the n_iso SVD counts modes on the fit's grid range [0.1, 5.0]e-3 (was 3.0e-3), the n_iso bootstrap replicates get the fit's Rician correction, the concentration-gate MC null warns that it is computed before the λ_aniso modulation; `experiments/` scripts pass the noise map again; `setup.py` no longer declares a non-existent `model` module; package, calibration, CLI and uncertainty-README texts updated; after the `v1.8.1` tag, still 1.8.1: code the fit never called removed (`calibration/optimizer.py`, `select_n_iso_with_gcv_crosscheck`, `select_n_iso_data_driven_sweep`, `generate_isotropic_grid`, `compute_weighted_centroids`, `generate_fibonacci_sphere`), maps identical bit for bit; `experiments/` moved out of the repository (the tests' synthetic P3 table is now in `tests/data/`); the free calibration's per-voxel NNLS solved in parallel (`core.solvers.nnls_batch`), ~4x faster and bit for bit the same lambdas; `notebooks/`: accuracy simulations against ground truth and the toolbox mathematics in figures |
 | 1.8.0 | `fiber_threshold` applied to the final fiber fraction; calibration sigma = RMS of σ/S0 over the sample (the median made the λ_iso ceiling collapse to its grid floor); tSNR removed (one b=0 is enough); single b=0 threshold (100) everywhere, protocol fingerprints included; stale channel map `DBSI_Adaptive.CH` removed |
 | 1.7.1 | thermal noise map **required** (`noise_map` / `--noise`); crossings whose population Stage D zeroes become single fibers |
 | 1.7.0 | crossing fiber fraction re-solved before the tensor fit; uncertainty maps; `mean_iso_adc` removed (27 channels); detection threshold kept off |

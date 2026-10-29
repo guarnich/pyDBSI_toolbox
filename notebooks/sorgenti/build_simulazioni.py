@@ -32,7 +32,7 @@ P3_BVEC = (QUI / 'protocolli' / 'P3.bvec').read_text().strip()
 
 # ═════════════════════════════════════════════════════════════════════════════
 md(r'''
-# pyDBSI — Simulazioni di accuratezza (toolbox ≥ 1.8.1)
+# pyDBSI — Simulazioni di accuratezza (toolbox ≥ 1.9.0)
 
 **Domanda.** Quanto le mappe del toolbox si avvicinano alla verità? Sui dati veri non c'è una ground
 truth (asse 3 del disegno dei 5P: l'accuratezza si misura **solo** in simulazione). Qui la verità è nota
@@ -51,8 +51,13 @@ vera; il braccio **produzione** passa da dwidenoise. Sul fantoccio MP-PCA è tro
 92–96% del rumore (il fantoccio è a basso rango, il tessuto vero no), e la calibrazione libera scende a
 λ_aniso ≈ 0.5 contro 8.4 del grezzo e 5–13 dei dati veri, che **sono** denoisati (prova del 2026-10-12, P3,
 SNR 26). Il braccio grezzo riproduce il regime di λ dei dati veri, quindi è quello delle figure principali; il
-braccio con dwidenoise gira a `SNR_PRODUZIONE` come **analisi di sensibilità su un caso idealizzato**: dice
+braccio con dwidenoise gira a `SNR_BRACCI['produzione']` come **analisi di sensibilità su un caso idealizzato**: dice
 cosa farebbe il fit se il denoising fosse così efficace, non cosa fa sui dati veri.
+
+**Il terzo braccio, `grezzo_18`**: la catena grezza col fit della 1.8, cioè la 1.9.0 con le due opzioni dei
+crossing spente (`crossing_dir_refine=False`, `two_vs_one_threshold=None`). Dalla 1.9.0 sono il default il
+cono per popolazione e il test 2-contro-1; stesso rumore (stesso seme) e stessa calibrazione del grezzo, quindi
+la sezione 6b misura esattamente cosa hanno cambiato. Toglierlo da `BRACCI` risparmia le sue tre condizioni.
 
 **Un volume per condizione.** I tre fantocci stanno affiancati in un unico volume, così ogni condizione
 (protocollo × SNR × braccio) ha **una** calibrazione e **un** dwidenoise, come un cervello con molti tessuti:
@@ -89,8 +94,10 @@ RIFARE      = False                 # True: ignora le condizioni gia' salvate
 D_VARIABILE = True                  # diffusivita' isotrope vere estratte per voxel (vedi sopra)
 SNR_LISTA   = [15, 26, 40]          # SNR termico (S0 / sigma) delle condizioni sul P3
 SNR_RIF     = 26                    # SNR delle figure principali e del confronto fra protocolli
-BRACCI      = ['grezzo', 'produzione']  # il primo e' quello delle figure principali (vedi sopra)
-SNR_PRODUZIONE = [26]               # SNR a cui gira anche il braccio con dwidenoise (sensibilita')
+BRACCI      = ['grezzo', 'produzione', 'grezzo_18']  # il primo e' quello delle figure principali (vedi sopra);
+                                    # 'grezzo_18' = opzioni dei crossing spente, il confronto della sezione 6b
+SNR_BRACCI  = {'produzione': [26],  # SNR a cui girano i bracci dopo il primo (non elencato: SNR_RIF)
+               'grezzo_18': [15, 26, 40]}
 DWIDENOISE  = None                  # None = cercato da solo (PATH, /usr/local/mrtrix3); oppure il percorso
 N_CAL       = 1000                  # voxel di calibrazione (default del toolbox, come nei fit veri)
 
@@ -123,11 +130,18 @@ stile()
 
 VER = versione()
 _vt = tuple(int(x) for x in VER.split('.')[:3])
-assert _vt >= (1, 8, 1), f'serve pyDBSI >= 1.8.1, trovata {VER}'
+assert _vt >= (1, 9, 0), f'serve pyDBSI >= 1.9.0, trovata {VER}'
 DN = trova_dwidenoise(DWIDENOISE)
 print(f'pyDBSI {VER}\ndwidenoise: {DN or "NON TROVATO -> solo il braccio grezzo"}')
 if DN is None:
-    BRACCI = ['grezzo']
+    BRACCI = [b for b in BRACCI if BRACCI_DEF[b][0] != 'produzione']
+_ignoti = [b for b in BRACCI if b not in BRACCI_DEF]
+assert not _ignoti, f'bracci sconosciuti {_ignoti}: quelli definiti sono {list(BRACCI_DEF)}'
+_non_supp = [b for b in BRACCI if not braccio_supportato(b)]
+assert not _non_supp, (f'il toolbox installato non ha le opzioni dei bracci {_non_supp} '
+                       f'({ {b: BRACCI_DEF[b][1] for b in _non_supp} }): serve il branch crossing-cono-e-test21')
+for b in BRACCI:
+    print(f'  braccio {b:<16} catena {BRACCI_DEF[b][0]:<11} opzioni {BRACCI_DEF[b][1] or "default"}')
 
 P3_BVAL = """''' + P3_BVAL + r'''"""
 P3_BVEC = """''' + P3_BVEC + r'''"""
@@ -161,7 +175,7 @@ seme per tutti): le condizioni differiscono **solo** per rumore e catena, quindi
 ''')
 code(r'''
 CONDIZIONI = [('P3', s, BRACCI[0]) for s in SNR_LISTA]
-CONDIZIONI += [('P3', s, b) for b in BRACCI[1:] for s in SNR_PRODUZIONE]
+CONDIZIONI += [('P3', s, b) for b in BRACCI[1:] for s in SNR_BRACCI.get(b, [SNR_RIF])]
 CONDIZIONI += [(p, SNR_RIF, BRACCI[0]) for p in PROTOCOLLI if p != 'P3']
 
 VOLUMI = {p: volume_composito(prot, d_variabile=D_VARIABILE, piccolo=RAPIDO) for p, prot in PROTOCOLLI.items()}
@@ -180,7 +194,10 @@ def condizione(p, snr, braccio):
     info.update(protocollo=p, secondi=round(time.time() - t0), versione=VER, d_variabile=D_VARIABILE,
                 rapido=RAPIDO)
     se = m.uncertainty_['se'].astype(np.float32)
-    np.savez_compressed(f, res=res.astype(np.float32), se=se, info=json.dumps(info))
+    extra = {}
+    if getattr(m, 'two_vs_one_stat_', None) is not None:      # solo col test 2-contro-1 acceso
+        extra['stat21'] = m.two_vs_one_stat_.astype(np.float32)
+    np.savez_compressed(f, res=res.astype(np.float32), se=se, info=json.dumps(info), **extra)
     return res, se, info
 
 RIS, INFO = {}, []
@@ -190,7 +207,7 @@ for i, (p, snr, b) in enumerate(CONDIZIONI, 1):
     res, se, info = condizione(p, snr, b)
     RIS[(p, snr, b)] = (res, se)
     INFO.append(info)
-    print(f'[{i}/{len(CONDIZIONI)}] {p} SNR {snr:>2} {b:<10}  lambda_aniso {info["lambda_aniso"]:.4g}  '
+    print(f'[{i}/{len(CONDIZIONI)}] {p} SNR {snr:>2} {b:<15}  lambda_aniso {info["lambda_aniso"]:.4g}  '
           f'lambda_iso {info["lambda_iso"]:.4g}  sigma mappa/vera {info["sigma_mappa_mediana"] / info["sigma_vera"]:.3f}  '
           f'({time.time() - t0:.0f} s; totale {(time.time() - t_tot) / 60:.0f} min)', flush=True)
 CAL = pd.DataFrame(INFO)[['protocollo', 'snr', 'braccio', 'lambda_aniso', 'lambda_iso', 'n_iso',
@@ -349,17 +366,81 @@ Stessa batteria, stesso rumore, a SNR_RIF: con `dwidenoise` + sua mappa (produzi
 (non lo stimatore) a cambiare il numero.
 ''')
 code(r'''
-if sum(('P3', SNR_RIF, b) in RIS for b in BRACCI) > 1:
-    sel2 = VB[(VB.protocollo == 'P3') & (VB.SNR == SNR_RIF)]
-    errori_per_scenario(sel2, FRAZIONI, gruppo_col='braccio', ordine=BRACCI,
+BR_DN = [b for b in BRACCI if not BRACCI_DEF[b][1] and ('P3', SNR_RIF, b) in RIS]   # niente opzioni del modello
+if len(BR_DN) > 1:
+    sel2 = VB[(VB.protocollo == 'P3') & (VB.SNR == SNR_RIF) & VB.braccio.isin(BR_DN)]
+    errori_per_scenario(sel2, FRAZIONI, gruppo_col='braccio', ordine=BR_DN,
                         titolo=f'Denoising — frazioni (P3, SNR {SNR_RIF})',
                         file=FIG / f'07_denoising_frazioni_P3_snr{SNR_RIF}.png'); plt.show()
-    errori_per_scenario(sel2, TENSORE, gruppo_col='braccio', ordine=BRACCI,
+    errori_per_scenario(sel2, TENSORE, gruppo_col='braccio', ordine=BR_DN,
                         titolo=f'Denoising — tensore (P3, SNR {SNR_RIF})',
                         file=FIG / f'08_denoising_tensore_P3_snr{SNR_RIF}.png'); plt.show()
-    D = pd.concat([riassunto(sel2[sel2.braccio == b]).assign(braccio=b) for b in BRACCI])
+    D = pd.concat([riassunto(sel2[sel2.braccio == b]).assign(braccio=b) for b in BR_DN])
     print('MAE medio sui 13 scenari, per braccio:')
     display(D.groupby(['braccio', 'metrica']).mae.mean().unstack()[list(METRICHE)].round(3))
+''')
+
+# ═════════════════════════════════════════════════════════════════════════════
+md(r'''
+## 6b — Cosa cambia la 1.9.0 nei crossing: cono per popolazione e test 2-contro-1
+
+Solo se `'grezzo_18'` è in `BRACCI`: il braccio grezzo (1.9.0) contro lo stesso fit con le due opzioni spente
+(come nella 1.8). Stesso rumore e stessa calibrazione, quindi ogni differenza viene dalle due opzioni. Tre
+domande, con le attese della batteria del 2026-10-14:
+- **quante popolazioni**: quota di voxel col numero giusto (attesa: sale di ~15 punti a ogni SNR; il crossing
+  eterogeneo può perdere a SNR 15, perché la seconda fibra è debole e diffusa);
+- **dove puntano**: errore angolare di entrambe le popolazioni nei crossing (atteso: la mediana circa si
+  dimezza; la batteria ha una direzione quasi su un nodo della griglia, quindi qui il guadagno è sottostimato);
+- **quanto costa**: MAE per mappa e tempo del fit (atteso: FF e RF migliori, RD un po' peggio a SNR 15–26).
+
+La GM della batteria ha una fibra vera con FF 0.10, sotto la soglia di fibra: il suo numero di popolazioni
+"giusto" (1) non è raggiungibile e il suo tensore è mal definito, quindi la tabella la mostra a parte.
+''')
+code(r'''
+if 'grezzo_18' in BRACCI:
+    COPPIE = [s for s in SNR_LISTA if ('P3', s, 'grezzo') in RIS and ('P3', s, 'grezzo_18') in RIS]
+    cross = [n for n in NOMI_SC if n.startswith('Crossing')]
+    righe, rang = [], []
+    for s in COPPIE:
+        for b in ('grezzo_18', 'grezzo'):
+            d = VB[(VB.protocollo == 'P3') & (VB.SNR == s) & (VB.braccio == b)]
+            n = d[d.metrica == 'npop']; giusto = np.round(n.stima) == np.round(n.vero)
+            r = riassunto(d[d.scenario != 'GM'])
+            riga = dict(SNR=s, braccio=b, npop_giusto_pct=100 * giusto.mean(),
+                        npop_giusto_senza_GM_pct=100 * giusto[n.scenario != 'GM'].mean(),
+                        npop_giusto_crossing_pct=100 * giusto[n.scenario.isin(cross)].mean(),
+                        secondi=next(i['secondi'] for i in INFO if i['protocollo'] == 'P3' and i['snr'] == s
+                                     and i['braccio'] == b))
+            riga.update({f'MAE_{k}_senza_GM': r[r.metrica == k].mae.mean() for k in METRICHE})
+            righe.append(riga)
+            E = mappe('P3', s, b, 'batteria')
+            ang = errore_angolare(E['_res'], BA['verita']['dirs'])
+            for sc in cross:
+                m_ = INN & (BA['etichette'] == NOMI_SC.index(sc))
+                for q in (0, 1):
+                    v = ang[..., q][m_]
+                    rang.append(dict(SNR=s, braccio=b, scenario=sc, popolazione=q + 1,
+                                     mediana=np.nanmedian(v) if np.isfinite(v).any() else np.nan,
+                                     trovata_pct=100 * np.mean(np.isfinite(v))))
+    CRX = pd.DataFrame(righe); ANGX = pd.DataFrame(rang)
+    CRX.to_csv(OUT / 'crossing_opzioni_riepilogo.csv', index=False)
+    ANGX.to_csv(OUT / 'crossing_opzioni_errore_angolare.csv', index=False)
+    print('numero di popolazioni, MAE (senza la GM della batteria) e tempo, per SNR e braccio:')
+    display(CRX.set_index(['SNR', 'braccio']).T.round(3))
+    print('errore angolare mediano (gradi) nei crossing, per popolazione:')
+    display(ANGX.pivot_table(index=['scenario', 'popolazione'], columns=['SNR', 'braccio'], values='mediana').round(1))
+    sel3 = VB[(VB.protocollo == 'P3') & (VB.SNR == SNR_RIF) & VB.braccio.isin(['grezzo_18', 'grezzo'])]
+    conteggio_popolazioni(sel3[sel3.metrica == 'npop'], gruppo_col='braccio',
+                          titolo=f'1.8 contro 1.9.0 nei crossing — popolazioni stimate (P3, SNR {SNR_RIF})',
+                          file=FIG / f'07b_crossing_popolazioni_P3_snr{SNR_RIF}.png'); plt.show()
+    errori_per_scenario(sel3, FRAZIONI, gruppo_col='braccio', ordine=['grezzo_18', 'grezzo'],
+                        titolo=f'1.8 contro 1.9.0 nei crossing — frazioni (P3, SNR {SNR_RIF})',
+                        file=FIG / f'07c_crossing_frazioni_P3_snr{SNR_RIF}.png'); plt.show()
+    errori_per_scenario(sel3, TENSORE, gruppo_col='braccio', ordine=['grezzo_18', 'grezzo'],
+                        titolo=f'1.8 contro 1.9.0 nei crossing — tensore (P3, SNR {SNR_RIF})',
+                        file=FIG / f'07d_crossing_tensore_P3_snr{SNR_RIF}.png'); plt.show()
+else:
+    print("braccio 'grezzo_18' non richiesto: sezione saltata")
 ''')
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -437,7 +518,9 @@ RIEP = pd.DataFrame(righe)
 RIEP.to_csv(OUT / 'riepilogo.csv', index=False)
 display(RIEP.round(3))
 (OUT / 'leggimi.json').write_text(json.dumps(dict(
-    versione=VER, rapido=RAPIDO, d_variabile=D_VARIABILE, snr=SNR_LISTA, snr_rif=SNR_RIF, bracci=BRACCI,
+    versione=VER, rapido=RAPIDO, d_variabile=D_VARIABILE, snr=SNR_LISTA, snr_rif=SNR_RIF,
+    bracci={b: dict(catena=BRACCI_DEF[b][0], opzioni=BRACCI_DEF[b][1], snr=SNR_LISTA if i == 0 else SNR_BRACCI.get(b, [SNR_RIF]))
+            for i, b in enumerate(BRACCI)},
     protocolli={k: descrivi_protocollo(v) for k, v in PROTOCOLLI.items()}, dwidenoise=DN), indent=2))
 print('figure in', FIG)
 for f in sorted(FIG.glob('*.png')):

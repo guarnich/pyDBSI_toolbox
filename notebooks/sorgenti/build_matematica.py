@@ -75,7 +75,8 @@ from IPython.display import display
 warnings.filterwarnings('ignore', category=RuntimeWarning)
 stile()
 VER = dbsi_toolbox.__version__
-assert tuple(int(x) for x in VER.split('.')[:3]) >= (1, 8, 1), f'serve pyDBSI >= 1.8.1, trovata {VER}'
+assert tuple(int(x) for x in VER.split('.')[:3]) >= (1, 9, 0), f'serve pyDBSI >= 1.9.0, trovata {VER}'
+OPZ_18 = dict(crossing_dir_refine=False, two_vs_one_threshold=None)   # i crossing come fino alla 1.8 (§14-18)
 FIG = Path.cwd() / 'risultati_matematica' / f'v{VER.replace(".", "")}'
 FIG.mkdir(parents=True, exist_ok=True)
 
@@ -152,7 +153,7 @@ dipende dall'angolo fra gradiente e fibra), quelle isotrope lisce (dipendono sol
 code(r'''
 fig, GRIGLIA = fig_griglia(file=FIG / '03_griglia_isotropa.png'); plt.show()
 print('griglia (e-3 mm^2/s):', np.round(GRIGLIA * 1e3, 3))
-K = intercetta_fit(P3, MB, MASK_B, np.full(MASK_B.shape, SIG_B), lam=(9.8, 0.015))
+K = intercetta_fit(P3, MB, MASK_B, np.full(MASK_B.shape, SIG_B), lam=(9.8, 0.015), opzioni=OPZ_18)
 print(f"dizionario: {int(K['n_dirs'])} direzioni x {K['n_pairs']} coppie = {K['n_aniso']} colonne di fibra + "
       f"{len(K['iso_grid'])} isotrope; coppie (AD, RD) e-3: {np.round(np.asarray(K['diff_pairs']) * 1e3, 2).tolist()}")
 fig_matrice_A(K, file=FIG / '04_matrice_A_P3.png'); plt.show()
@@ -340,7 +341,8 @@ Stage A); la banda è su tutti i crossing del fantoccio, la linea nera su un vox
 **I due tensori.** Con direzioni e frazioni fissate, si cercano (D∥, D⊥) delle due popolazioni: 3 iterazioni
 alternate (una popolazione alla volta, per rompere la simmetria) e poi Levenberg–Marquardt. Al centro il costo
 che scende e si ferma; a destra le quattro diffusività iterazione per iterazione (punteggiate quelle vere). La
-traiettoria finisce esattamente sui tensori che il fit del toolbox ha scritto (controllato).
+traiettoria finisce esattamente sui tensori che il fit del toolbox ha scritto (controllato). Qui il fit ha il
+cono dei crossing spento (come nella 1.8): dalla 1.9.0 dopo questo passo le direzioni lasciano la griglia (§18b).
 ''')
 code(r'''
 cand = [tuple(c) for c in np.argwhere((LAB == NOMI_SC.index('Crossing bil.')) & interno(LAB))]
@@ -353,6 +355,124 @@ fin = TRAI.iloc[-1]
 assert np.allclose([fin.AD1, fin.AD2, fin.RD1, fin.RD2], INFO18['AD_finale'] + INFO18['RD_finale'], rtol=1e-4), \
     'traiettoria MRDS diversa dai tensori del toolbox'
 print({k: (np.round(v, 5) if not isinstance(v, list) else np.round(v, 5).tolist()) for k, v in INFO18.items()})
+''')
+
+md(r'''
+## §18b — Il cono per popolazione nei crossing (opzione `crossing_dir_refine`)
+
+**Il problema.** Nei voxel a una fibra Stage C toglie la direzione dalla griglia del dizionario con il cono
+(§17.2). Nei crossing no: le due direzioni restano sui nodi di Stage A, a qualche grado da quelle vere (la
+spaziatura della griglia), e l'MRDS compensa l'errore di direzione con i tensori.
+
+**L'opzione.** Dopo l'MRDS, una popolazione alla volta: candidati su due coni attorno alla direzione attuale
+(gli stessi angoli del cono di Stage C); per ogni candidato si rifanno i due tensori con qualche passo di LM a
+caldo, e si tiene il candidato che abbassa l'errore del modello a due popolazioni. Due giri, perché raffinare la
+prima popolazione mentre la seconda è ancora sul suo nodo lascia una parte dell'errore. Un candidato che si
+avvicina all'altra popolazione più della separazione minima è scartato.
+
+**Cosa guardare.** Un crossing bilanciato (quello con l'errore mediano della griglia): a sinistra e al centro
+le due popolazioni attorno alla direzione vera (×): stella = nodo di Stage A, cerchio = dopo il cono. A destra
+l'errore mediano sui crossing della batteria e su 400 crossing orientati a caso. Le direzioni e i tensori ricalcolati sono **controllati** contro
+quelli scritti dal fit con l'opzione accesa.
+
+**Perché qui il cono sembra non servire.** Nella batteria le direzioni dei crossing cadono per costruzione
+vicino ai nodi della griglia (errore della griglia ~4°, una popolazione dello sbilanciato a 1°): è già il
+pavimento del rumore a questo SNR, e il cono non può scendere sotto. Dove la griglia è casualmente quasi
+giusta e la popolazione è debole, il cono può anzi allontanarsi un po' (la stima segue il rumore). Il guadagno
+vero si vede su orientamenti **casuali**, quando la direzione vera cade fra i nodi: la seconda tabella (crossing
+bilanciati a 60–90° orientati a caso, stesso SNR) è il caso che conta per il tessuto.
+
+Dalla 1.9.0 cono e test 2-contro-1 sono il default. Qui il fit di riferimento K (§14–18) li ha spenti, come nella
+1.8: la §18 mostra l'MRDS sulle direzioni della griglia, la 18b accende il solo cono (K2), la 18c anche il test.
+''')
+code(r'''
+HA_CROSSING = 'two_vs_one_threshold' in inspect.signature(DBSI_Adaptive).parameters
+if not HA_CROSSING:
+    print('toolbox senza le opzioni dei crossing (serve il branch crossing-cono-e-test21): 18b e 18c saltate')
+else:
+    K2 = intercetta_fit(P3, MB, MASK_B, np.full(MASK_B.shape, SIG_B), lam=(9.8, 0.015),
+                        opzioni=dict(crossing_dir_refine=True, two_vs_one_threshold=None))   # stessi crossing di K
+    CROSS = [n for n in NOMI_SC if n.startswith('Crossing')]
+    E0 = errore_angolare(K['res'], TRU['dirs']); E1 = errore_angolare(K2['res'], TRU['dirs'])
+    npk = lambda R, c: R[c][IX['n_fiber_populations']]
+    cand = [tuple(c) for c in np.argwhere((LAB == NOMI_SC.index('Crossing bil.')) & interno(LAB))
+            if npk(K['res'], tuple(c)) == 2 and npk(K2['res'], tuple(c)) == 2]
+    ij = cand[int(np.argsort([np.nanmax(E0[c]) for c in cand])[len(cand) // 2])]
+    C18 = cono_crossing_voxel(K, ij)
+    fin = K2['res'][ij]
+    d_tb = np.array([[fin[IX[f'dir{p}_{c}']] for c in 'xyz'] for p in (1, 2)])
+    assert all(_ang(C18['dirs1'][k], d_tb[k]) < 0.05 for k in (0, 1)), 'cono ricalcolato diverso dal toolbox'
+    assert np.allclose(C18['AD1'], [fin[IX['axial_diffusivity_pop1']], fin[IX['axial_diffusivity_pop2']]], rtol=1e-3), \
+        'tensori dopo il cono diversi dal toolbox'
+    righe = []
+    for sc in CROSS:
+        m_ = interno(LAB) & (LAB == NOMI_SC.index(sc))
+        for br, E in (('griglia', E0), ('cono', E1)):
+            for q in (1, 2):
+                righe.append(dict(scenario=sc, popolazione=q, braccio=br, mediana=float(np.nanmedian(E[..., q - 1][m_]))))
+    rc = []
+    for br, opz in (('griglia', None), ('cono', dict(crossing_dir_refine=True))):
+        e = crossing_casuali(P3, 400, SNR_FANTOCCIO, (9.8, 0.015), seed=7, opzioni=opz)
+        for q in (0, 1):
+            rc.append(dict(scenario='Casuali (bil.)', braccio=br, popolazione=q + 1, mediana=np.nanmedian(e[:, q]),
+                           p90=np.nanpercentile(e[:, q], 90), visti_pct=100 * np.mean(np.isfinite(e[:, q]))))
+    CAS18B = pd.DataFrame(rc)
+    TAB18B = pd.concat([pd.DataFrame(righe), CAS18B[['scenario', 'popolazione', 'braccio', 'mediana']]], ignore_index=True)
+    fig_cono_crossing(K, C18, dir_vere(ij), TAB18B, file=FIG / '12b_cono_crossing.png'); plt.show()
+    display(TAB18B.pivot_table(index=['scenario', 'popolazione'], columns='braccio', values='mediana', sort=False).round(1))
+    print(f'crossing bilanciati a orientamento casuale (400, SNR {SNR_FANTOCCIO}), errore angolare in gradi:')
+    display(CAS18B.drop(columns='scenario').set_index(['popolazione', 'braccio']).round(1))
+''')
+
+md(r'''
+## §18c — Quante popolazioni: il test 2-contro-1 (opzione `two_vs_one_threshold`)
+
+**Il problema.** Fino alla 1.8 il numero di popolazioni lo decideva Stage A: c'è un crossing se il secondo bacino
+pesa almeno il 35% del primo (`min_peak_ratio`). È una soglia scelta a mano su distribuzioni che si
+sovrappongono: un crossing sbilanciato vero (0.20 contro 0.45, rapporto 0.44) col rumore finisce sotto soglia
+metà delle volte, e una fibra sola con un po' di rumore a volte la supera.
+
+**Il test.** Ogni voxel con un secondo picco qualsiasi è un candidato: il fit stima **entrambi** i modelli, a una
+e a due popolazioni (stesso Stage A), e li confronta sul modello finale di Stage D, prima della soglia di fibra:
+$$\mathrm{stat21} = \frac{\mathrm{RSS}_{\text{1 pop}} - \mathrm{RSS}_{\text{2 pop}}}{\sigma_{\text{voxel}}^2}.$$
+Se il voxel ha una fibra sola, il modello a due popolazioni spiega in più solo rumore: stat21 è piccola (circa
+una χ² con pochi gradi di libertà, perché la seconda popolazione aggiunge una manciata di parametri). Con due
+fibre vere la differenza cresce con l'SNR e con la seconda fibra. Si tiene il crossing se stat21 ≥ T (T = 12).
+Il cono di 18b è acceso insieme: senza, il modello a due popolazioni parte svantaggiato (direzioni sulla
+griglia) e il nullo diventa negativo.
+
+**Cosa guardare.** A sinistra la statistica dei candidati con una e con due fibre vere. Al centro e a destra,
+a tre SNR, la quota di voxel con due popolazioni stimate: deve **scendere** dove la fibra vera è una (falsi
+crossing) e **salire** dove sono due (crossing trovati). La cella controlla che il toolbox abbia tenuto come
+crossing esattamente i candidati con stat21 ≥ T.
+''')
+code(r'''
+if HA_CROSSING:
+    T21 = 12.0
+    VERO = np.nan_to_num(TRU['npop']); INN_B = interno(LAB) & MASK_B
+    rs, rn = [], []
+    for snr in (15, 26, 40):
+        if snr == SNR_FANTOCCIO:
+            Mn, sg, Kd = MB, SIG_B, K
+        else:
+            Mn, sg = rumore_rician(A_b, snr, seed=1)
+            Kd = intercetta_fit(P3, Mn, MASK_B, np.full(MASK_B.shape, sg), lam=(9.8, 0.015), opzioni=OPZ_18)
+        Kt = intercetta_fit(P3, Mn, MASK_B, np.full(MASK_B.shape, sg), lam=(9.8, 0.015),
+                            opzioni=dict(crossing_dir_refine=True, two_vs_one_threshold=T21))
+        st = Kt['model'].two_vs_one_stat_
+        npt = Kt['res'][..., IX['n_fiber_populations']]
+        ok = np.isfinite(st) & np.isfinite(npt)
+        assert np.array_equal(npt[ok] >= 2, st[ok] >= T21), 'decisione del toolbox diversa da stat21 >= T'
+        for v in (1, 2):
+            sel = INN_B & np.isfinite(st) & (VERO == v)
+            rs += [dict(SNR=snr, vero=v, stat21=float(x)) for x in st[sel]]
+            for nome, R in (('1.8', Kd['res']), ('test', Kt['res'])):
+                n_ = np.nan_to_num(R[..., IX['n_fiber_populations']])[INN_B & (VERO == v)]
+                rn.append(dict(SNR=snr, vero=v, fit=nome, due_pct=100 * float(np.mean(n_ >= 2))))
+    STAT21, NPOP21 = pd.DataFrame(rs), pd.DataFrame(rn)
+    fig_test21(STAT21, NPOP21, T21, SNR_FANTOCCIO, file=FIG / '12c_test_2contro1.png'); plt.show()
+    display(NPOP21.pivot_table(index=['vero', 'fit'], columns='SNR', values='due_pct').round(1))
+    display(STAT21.groupby(['SNR', 'vero']).stat21.describe(percentiles=[0.05, 0.5, 0.95]).round(1))
 ''')
 
 md(r'''

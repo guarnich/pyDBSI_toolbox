@@ -1,5 +1,5 @@
 """
-Simulazioni di accuratezza per pyDBSI (>= 1.8.1): quanto le mappe del toolbox si avvicinano alla verita'.
+Simulazioni di accuratezza per pyDBSI (>= 1.9.0): quanto le mappe del toolbox si avvicinano alla verita'.
 
 Tutto passa per la CATENA DI PRODUZIONE, non per una scorciatoia:
 
@@ -419,10 +419,30 @@ def denoise(M, eseguibile, voxel_mm=2.0):
     return D, nm
 
 
-def fit(data, prot, noise_map, mask=None, **kw_fit):
-    """Fit di produzione (calibrazione libera salvo kw_fit): ritorna (risultati, modello)."""
+# Un braccio = la catena del rumore ('grezzo' o 'produzione') + le opzioni del modello ({} = i default del
+# toolbox installato). 'grezzo_18' = la 1.9.0 con le due opzioni dei crossing spente, cioe' il fit della 1.8.
+# braccio_supportato() dice prima di fittare se il toolbox installato conosce le opzioni di un braccio.
+BRACCI_DEF = {
+    'grezzo':     ('grezzo', {}),
+    'produzione': ('produzione', {}),
+    'grezzo_18':  ('grezzo', dict(crossing_dir_refine=False, two_vs_one_threshold=None)),
+}
+
+
+def braccio_supportato(braccio):
+    """Il toolbox installato accetta le opzioni del braccio? (False = opzioni che non conosce)."""
+    try:
+        DBSI_Adaptive(**BRACCI_DEF[braccio][1])
+    except TypeError:
+        return False
+    return True
+
+
+def fit(data, prot, noise_map, mask=None, opzioni=None, **kw_fit):
+    """Fit di produzione (calibrazione libera salvo kw_fit; opzioni = argomenti di DBSI_Adaptive, vuoto =
+    default): ritorna (risultati, modello)."""
     mask = np.ones(data.shape[:3], bool) if mask is None else mask
-    m = DBSI_Adaptive()
+    m = DBSI_Adaptive(**(opzioni or {}))
     kw = dict(run_calibration=True)
     kw.update(kw_fit)
     with contextlib.redirect_stdout(io.StringIO()):
@@ -432,22 +452,28 @@ def fit(data, prot, noise_map, mask=None, **kw_fit):
 
 
 def esegui(A, prot, snr, braccio, dwidenoise=None, seed=0, mask=None, **kw_fit):
-    """Un braccio della catena. braccio = 'produzione' (dwidenoise + sua mappa) o 'grezzo' (sigma vera).
-    Il rumore e' aggiunto a TUTTO il volume, fondo compreso (come in uno scanner); il fit solo nella maschera."""
+    """Un braccio della catena (chiave di BRACCI_DEF). Catena 'produzione' = dwidenoise + sua mappa, 'grezzo'
+    = sigma vera; le opzioni del braccio vanno al modello. Il rumore e' aggiunto a TUTTO il volume, fondo
+    compreso (come in uno scanner); il fit solo nella maschera. Stesso seme = stesso rumore in ogni braccio."""
+    catena, opzioni = BRACCI_DEF[braccio]
     M, sig = rumore_rician(A, snr, seed)
-    if braccio == 'produzione':
+    if catena == 'produzione':
         if dwidenoise is None:
             raise RuntimeError('dwidenoise non trovato: braccio di produzione impossibile')
         D, nm = denoise(M, dwidenoise)
         data, noise = D, nm
-    elif braccio == 'grezzo':
+    elif catena == 'grezzo':
         data, noise = M, np.full(A.shape[:3], sig)
     else:
-        raise ValueError(braccio)
-    res, m = fit(data, prot, noise, mask=mask, **kw_fit)
+        raise ValueError(catena)
+    res, m = fit(data, prot, noise, mask=mask, opzioni=opzioni, **kw_fit)
     dentro = np.ones(A.shape[:3], bool) if mask is None else mask
     info = dict(snr=snr, braccio=braccio, sigma_vera=sig, sigma_mappa_mediana=float(np.median(noise[dentro])),
-                lambda_aniso=float(m.lambda_aniso), lambda_iso=float(m.lambda_iso), n_iso=int(m.n_iso))
+                lambda_aniso=float(m.lambda_aniso), lambda_iso=float(m.lambda_iso), n_iso=int(m.n_iso),
+                catena=catena, opzioni=opzioni)
+    t21 = getattr(m, 'two_vs_one_', None)
+    if t21:
+        info['two_vs_one'] = {k: v for k, v in t21.items() if isinstance(v, (int, float, str, bool)) or v is None}
     return res, m, info
 
 

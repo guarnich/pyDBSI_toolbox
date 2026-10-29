@@ -611,6 +611,7 @@ def format_run_report(report, saved_channels=None):
     # Test di rilevamento (v1.6.1): era nel dict ma non veniva stampato.
     block("Fiber threshold on the final FF (v1.8.0)", R.get('fiber_threshold_final'))
     block("Fiber detection test", R.get('fiber_detection'))
+    block("Two-vs-one population test", R.get('two_vs_one'))
 
     un = R.get('uncertainty') or {}
     if un:
@@ -682,6 +683,9 @@ def save_output_maps(results, channel_names, affine, output_dir,
         fiber_detection_stat.nii.gz  (when `model` is given, v1.6.1+) the fiber
                                 detection statistic, dRSS/sigma^2, NaN where no
                                 fiber was tested
+        two_vs_one_stat.nii.gz  (when the two-vs-one test is on, v1.9.0+) the
+                                crossing-vs-single-fiber statistic, NaN where no
+                                crossing candidate was tested
         toolbox_report/        what produced these maps (when `model` is given):
             run_report.txt           see below
             design_matrix.png        image of the dictionary A = [A_aniso | A_iso]
@@ -762,6 +766,13 @@ def save_output_maps(results, channel_names, affine, output_dir,
         if stat is not None:
             nib.save(nib.Nifti1Image(np.asarray(stat, np.float32), affine),
                      os.path.join(output_dir, 'fiber_detection_stat.nii.gz'))
+        # Statistica del test 2-contro-1 (v1.9.0), solo se il test e' acceso: per
+        # ogni crossing candidato, di quanto il modello a due fibre abbassa il
+        # residuo rispetto a quello a una, in unita' di sigma^2.
+        stat21 = getattr(model, 'two_vs_one_stat_', None)
+        if stat21 is not None:
+            nib.save(nib.Nifti1Image(np.asarray(stat21, np.float32), affine),
+                     os.path.join(output_dir, 'two_vs_one_stat.nii.gz'))
         from .toolbox_report import save_toolbox_report, save_uncertainty_maps
         save_toolbox_report(model, output_dir, saved_channels=saved)
         # Errore standard di ogni mappa continua (v1.7.0), stessa numerazione.

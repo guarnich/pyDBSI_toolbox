@@ -73,7 +73,7 @@ Vavasour IM, et al. (2022). Characterisation of multiple sclerosis
     basis spectrum imaging. Multiple Sclerosis Journal, 28(3), 418-428.
 """
 
-__version__ = "1.8.1"
+__version__ = "1.9.0"
 __author__ = "DBSI Toolbox Contributors"
 
 

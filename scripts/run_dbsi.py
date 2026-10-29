@@ -59,7 +59,7 @@ _D = {k: v.default for k, v in inspect.signature(DBSI_Adaptive.__init__).paramet
 _DICTIONARY_OPTS = ('n_ad', 'n_rd', 'anisotropy_ratio')
 
 
-def main():
+def build_parser():
     parser = argparse.ArgumentParser(description="pyDBSI: DBSI Adaptive fit of one session")
     parser.add_argument("--dwi", required=True)
     parser.add_argument("--bval", required=True)
@@ -105,6 +105,19 @@ def main():
                              "by less than this many noise variances (dRSS/sigma^2). Default: "
                              "off. The statistic is always written to "
                              "fiber_detection_stat.nii.gz. See DBSI_Adaptive.")
+    parser.add_argument("--two-vs-one-threshold", type=float,
+                        dest="two_vs_one_threshold", default=None,
+                        help="Crossing vs single fiber by model selection: the crossing is kept "
+                             "only where it lowers the Stage D residual by at least this many noise "
+                             f"variances. Default: {_D['two_vs_one_threshold']}. See DBSI_Adaptive.")
+    parser.add_argument("--no-two-vs-one", action="store_true", dest="no_two_vs_one",
+                        help="Switch the two-vs-one test off: the population count is decided by "
+                             "min_peak_ratio alone, as before 1.9.0.")
+    parser.add_argument("--crossing-dir-refine", action=argparse.BooleanOptionalAction,
+                        dest="crossing_dir_refine", default=None,
+                        help="Cone search on each crossing population's direction. Default: "
+                             f"{'on' if _D['crossing_dir_refine'] else 'off'}; --no-crossing-dir-refine "
+                             "keeps the crossing directions on Stage A's grid nodes, as before 1.9.0.")
     parser.add_argument("--crossing-ff-kappa", type=float, dest="crossing_ff_kappa", default=None,
                         help=f"Crossing fiber fraction re-solved before the crossing tensors are "
                              f"fitted, with ridge kappa x (sigma/S0)^2. Default: {_D['crossing_ff_kappa']}. "
@@ -167,6 +180,11 @@ def main():
                         help="Desired final angular precision (degrees) for direction refinement. "
                              f"Default: {_D['target_angular_resolution_deg']}. Ignored if "
                              "--disable-direction-refinement is set.")
+    return parser
+
+
+def main():
+    parser = build_parser()
     args = parser.parse_args()
     if args.protocol_calibration:
         _fissati = [k for k in ('n_iso', 'lambda_aniso', 'lambda_iso', 'n_dirs') + _DICTIONARY_OPTS
@@ -243,8 +261,14 @@ def model_kwargs(args):
               stagec_refine=not args.disable_stagec,
               iso_resolve=not args.disable_iso_resolve,
               uncertainty=not getattr(args, 'no_uncertainty', False))
+    if getattr(args, 'crossing_dir_refine', None) is not None:
+        kw['crossing_dir_refine'] = bool(args.crossing_dir_refine)
+    if getattr(args, 'no_two_vs_one', False):
+        if args.two_vs_one_threshold is not None:
+            raise SystemExit('--no-two-vs-one and --two-vs-one-threshold together: choose one')
+        kw['two_vs_one_threshold'] = None
     opt = ('min_weight_fraction', 'target_angular_resolution_deg', 'fiber_detection_threshold',
-           'crossing_ff_kappa')
+           'crossing_ff_kappa', 'two_vs_one_threshold')
     if not args.protocol_calibration:
         opt = opt + ('n_iso', 'lambda_aniso', 'lambda_iso', 'n_dirs') + _DICTIONARY_OPTS
     for k in opt:

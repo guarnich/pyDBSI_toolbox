@@ -1606,12 +1606,10 @@ def compute_fiber_fa(AD, RD):
 #   +0.01e-3, 0% on the floor); given Stage A's shrunk FF (x0.70) RD went to the
 #   floor in 91% of crossings -- the reason the FF is re-solved first. Per-
 #   population AD stays not quantitative (Cramer-Rao sd ~0.6e-3).
-# - Does NOT refine direction (unlike the existing single-fiber MRDS-lite
-#   cone search): directions passed in are Stage A's raw discrete-grid
-#   detections. Extending per-population cone refinement to 2-3 populations
-#   is architecturally possible (call `refine_fiber_direction_cone` per
-#   population before the joint fit) but has not been implemented or
-#   validated here.
+# - Does NOT refine direction itself: directions passed in are Stage A's raw
+#   discrete-grid detections. Since v1.9.0 the caller can hand the LM result to
+#   `refine_crossing_directions_cone` (option `crossing_dir_refine`), which
+#   moves each population off its grid node and re-fits the tensors.
 # - Validated (synthetic): 2-fiber crossings at 30/60/90 deg, symmetric and
 #   2.3:1 splits; ONE 3-fiber configuration at well-separated (60 deg
 #   apart) angles and roughly balanced fractions (comparable 4-16% errors).
@@ -1915,6 +1913,119 @@ def estimate_AD_RD_mrds(bvals, bvecs, sig_norm, directions, fractions,
         bvals, bvecs, sig_norm, directions, fractions, iso_signal,
         AD_init, RD_init, max_iter=lm_max_iter
     )
+
+
+@njit(cache=True, fastmath=FASTMATH)
+def _mrds_sse(bvals, bvecs, sig_norm, directions, fractions, iso_signal, AD, RD):
+    """Residual sum of squares of the multi-fiber model the LM fits."""
+    sse = 0.0
+    for i in range(len(bvals)):
+        b = bvals[i]
+        model = iso_signal[i]
+        for k in range(directions.shape[0]):
+            c = (bvecs[i, 0] * directions[k, 0] + bvecs[i, 1] * directions[k, 1]
+                 + bvecs[i, 2] * directions[k, 2])
+            model += fractions[k] * np.exp(-b * (RD[k] + (AD[k] - RD[k]) * c * c))
+        d = sig_norm[i] - model
+        sse += d * d
+    return sse
+
+
+# CROSSING DIRECTIONS (v1.9.0). Until 1.8.x a crossing kept Stage A's grid nodes
+# as directions (~16.6 deg apart on P3): measured on the 1.8.1 simulations (P3,
+# battery), median angular error ~4.5 deg in every crossing scenario and FLAT in
+# the SNR (4.4 / 4.3 deg at SNR 26 / 40), against 1.4 deg for single fibers, which
+# go through the cone. A tensor fitted along a wrong direction also turns broader
+# (RD up, AD down), so the error is not only angular.
+# Same two-level cone as the single fiber, one population at a time with the
+# others held fixed, but every candidate is scored by the residual of the JOINT
+# fit: the LM re-fits all the (AD, RD) from the current solution (warm start) and
+# the candidate is kept only if the residual decreases. Candidate zero is the
+# current direction, so the refinement can never do worse than the grid node.
+# A candidate closer than `min_separation_cos` to another population is skipped:
+# without it the two cones (each up to ~21 deg) could pull two populations that
+# Stage A found 35+ deg apart onto the same fiber.
+@njit(cache=True, fastmath=FASTMATH)
+def _crossing_cone_level(bvals, bvecs, sig_norm, dirs, fractions, iso_signal,
+                         AD_b, RD_b, best, k, half_angle, n, min_separation_cos,
+                         lm_max_iter):
+    """One cone level for population k: `dirs` is updated in place, the
+    (possibly new) tensors and residual are returned."""
+    n_pop = dirs.shape[0]
+    a0, a1, a2 = dirs[k, 0], dirs[k, 1], dirs[k, 2]
+    if abs(a0) < 0.9:
+        t0, t1, t2 = 1.0, 0.0, 0.0
+    else:
+        t0, t1, t2 = 0.0, 1.0, 0.0
+    x0 = a1 * t2 - a2 * t1
+    x1 = a2 * t0 - a0 * t2
+    x2 = a0 * t1 - a1 * t0
+    xn = np.sqrt(x0 * x0 + x1 * x1 + x2 * x2)
+    x0 /= xn
+    x1 /= xn
+    x2 /= xn
+    y0 = a1 * x2 - a2 * x1
+    y1 = a2 * x0 - a0 * x2
+    y2 = a0 * x1 - a1 * x0
+    trial = dirs.copy()
+    best_d0, best_d1, best_d2 = a0, a1, a2
+    for q in range(n):
+        c0, c1, c2 = _fibonacci_cone_point(a0, a1, a2, x0, x1, x2, y0, y1, y2,
+                                           half_angle, q, n)
+        ok = True
+        for j in range(n_pop):
+            if j != k and abs(c0 * dirs[j, 0] + c1 * dirs[j, 1] + c2 * dirs[j, 2]) > min_separation_cos:
+                ok = False
+        if not ok:
+            continue
+        trial[k, 0] = c0
+        trial[k, 1] = c1
+        trial[k, 2] = c2
+        a_c, r_c = estimate_AD_RD_nfiber_joint(bvals, bvecs, sig_norm, trial, fractions,
+                                               iso_signal, AD_b, RD_b, max_iter=lm_max_iter)
+        sse = _mrds_sse(bvals, bvecs, sig_norm, trial, fractions, iso_signal, a_c, r_c)
+        if sse < best:
+            best = sse
+            best_d0, best_d1, best_d2 = c0, c1, c2
+            AD_b = a_c
+            RD_b = r_c
+    dirs[k, 0] = best_d0
+    dirs[k, 1] = best_d1
+    dirs[k, 2] = best_d2
+    return AD_b, RD_b, best
+
+
+@njit(cache=True, fastmath=FASTMATH)
+def refine_crossing_directions_cone(bvals, bvecs, sig_norm, directions, fractions,
+                                    iso_signal, AD, RD, min_separation_cos,
+                                    cone1_half_angle, n1, cone2_half_angle, n2,
+                                    lm_max_iter=10, n_sweeps=2):
+    """Per-population two-level cone refinement of a crossing's directions.
+
+    The populations are visited in turn, `n_sweeps` times: refining one while
+    the other still sits on its grid node leaves part of the error, which the
+    second sweep removes (noiseless P3 crossing, 7/6 deg from the truth: one
+    sweep 1.7/3.8 deg). Each level is centred on the current best direction.
+
+    Returns (directions, AD, RD), each a new array; with no improving candidate
+    they equal the inputs.
+    """
+    n_pop = directions.shape[0]
+    dirs = directions.copy()
+    AD_b = AD.copy()
+    RD_b = RD.copy()
+    best = _mrds_sse(bvals, bvecs, sig_norm, dirs, fractions, iso_signal, AD_b, RD_b)
+    for _sweep in range(n_sweeps):
+        for k in range(n_pop):
+            if n1 > 0:
+                AD_b, RD_b, best = _crossing_cone_level(
+                    bvals, bvecs, sig_norm, dirs, fractions, iso_signal, AD_b, RD_b,
+                    best, k, cone1_half_angle, n1, min_separation_cos, lm_max_iter)
+            if n2 > 0:
+                AD_b, RD_b, best = _crossing_cone_level(
+                    bvals, bvecs, sig_norm, dirs, fractions, iso_signal, AD_b, RD_b,
+                    best, k, cone2_half_angle, n2, min_separation_cos, lm_max_iter)
+    return dirs, AD_b, RD_b
 
 
 # CROSSING FIBER FRACTION, RE-SOLVED BEFORE THE MRDS LM (v1.7.0, default).

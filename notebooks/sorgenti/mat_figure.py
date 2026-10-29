@@ -25,7 +25,7 @@ import dbsi_toolbox.model_Niso_adaptive_ff_thr as M
 import dbsi_toolbox.calibration.data_driven as DD
 from dbsi_toolbox.core import solvers as SOL
 from dbsi_toolbox.core.basis import build_design_matrix_exhaustive, generate_anchored_isotropic_grid
-from sim_accuratezza import segnale, rumore_rician
+from sim_accuratezza import segnale, rumore_rician, ruota_verso, errore_angolare
 
 CAT = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#4a3aa7', '#e34948']
 INK, INK2, GRID = '#0b0b0b', '#52514e', '#e4e3df'
@@ -55,9 +55,10 @@ def _salva(fig, file):
 # ═════════════════════════════════════════════════════════════════════════════
 # strumenti: intercettare il fit e la calibrazione
 # ═════════════════════════════════════════════════════════════════════════════
-def intercetta_fit(prot, data, mask, noise_map, lam=None, **kw_fit):
+def intercetta_fit(prot, data, mask, noise_map, lam=None, opzioni=None, **kw_fit):
     """Fit vero; registra gli argomenti del kernel 3-ISO. lam=(lambda_aniso, lambda_iso) per congelarli
-    (niente calibrazione). Ritorna dict con gli argomenti per nome + 'res' + 'model'."""
+    (niente calibrazione); opzioni = altri argomenti di DBSI_Adaptive (es. quelle dei crossing). Ritorna dict
+    con gli argomenti per nome + 'res' + 'model'."""
     rec = {}
     orig = M._fit_voxels_3iso_v3
     nomi = list(inspect.signature(orig.py_func).parameters)
@@ -68,6 +69,7 @@ def intercetta_fit(prot, data, mask, noise_map, lam=None, **kw_fit):
         return orig(*a, **k)
 
     kwm = {} if lam is None else dict(lambda_aniso=lam[0], lambda_iso=lam[1], n_iso=6)
+    kwm.update(opzioni or {})
     m = DBSI_Adaptive(**kwm)
     M._fit_voxels_3iso_v3 = spia
     try:
@@ -921,6 +923,131 @@ def fig_crossing(K, ijk, verita=None, file=None, kappas=(0, 1, 3, 10, 30, 100, 3
                                       ridge=kap0 * (sigma_v / S['s0']) ** 2, quote=quote.tolist(),
                                       AD_finale=[fin[IX['axial_diffusivity_pop1']], fin[IX['axial_diffusivity_pop2']]],
                                       RD_finale=[fin[IX['radial_diffusivity_pop1']], fin[IX['radial_diffusivity_pop2']]])
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 18b  il cono per popolazione nei crossing (opzione crossing_dir_refine)
+# ═════════════════════════════════════════════════════════════════════════════
+def cono_crossing_voxel(K, ijk):
+    """Ripete per un voxel di crossing il percorso del kernel: FF ri-stimata sul supporto, MRDS sulle direzioni
+    della griglia, poi il cono per popolazione (refine_crossing_directions_cone). Ritorna prima e dopo."""
+    bv, bc = K['prot']
+    S = stage_a_voxel(K, ijk)
+    fd, nb, pairs, iso = (np.asarray(K[k]) for k in ('fiber_dirs', 'neighbor_idx', 'diff_pairs', 'iso_grid'))
+    na, nd, npair = K['n_aniso'], int(K['n_dirs']), K['n_pairs']
+    idx, wts = SOL.select_dominant_directions(S['w2'][:na], nd, npair, nb, fd, 2, K['min_weight_fraction'],
+                                              K['min_separation_cos'], K['min_peak_ratio'],
+                                              K['min_dominant_concentration'])
+    assert idx[1] >= 0, "il voxel scelto non e' un crossing per Stage A"
+    dirs = fd[idx[:2]].copy()
+    sigma_v = float(np.asarray(K['sigma_map'])[tuple(ijk)])
+    iso_out = np.empty(len(bv))
+    ff_r = SOL.crossing_ff_resolve(S['sn'], bv, bc, fd, dirs, 2, pairs, iso,
+                                   K['crossing_ff_kappa'] * (sigma_v / S['s0']) ** 2, iso_out)
+    fr = wts[:2] / wts[:2].sum() * ff_r
+    AD, RD = SOL.estimate_AD_RD_mrds(bv, bc, S['sn'], dirs, fr, iso_out, M._MRDS_INIT_N_ITER, M._MRDS_LM_MAX_ITER)
+    d2, AD2, RD2 = SOL.refine_crossing_directions_cone(
+        bv, bc, S['sn'], dirs, fr, iso_out, AD, RD, K['min_separation_cos'], K['cone1_half_angle'],
+        int(K['n1_cone']), K['cone2_half_angle'], int(K['n2_cone']), M._MRDS_CONE_LM_ITER)
+    return dict(dirs0=dirs, AD0=AD, RD0=RD, dirs1=d2, AD1=AD2, RD1=RD2,
+                sse0=float(SOL._mrds_sse(bv, bc, S['sn'], dirs, fr, iso_out, AD, RD)),
+                sse1=float(SOL._mrds_sse(bv, bc, S['sn'], d2, fr, iso_out, AD2, RD2)))
+
+
+def crossing_casuali(prot, n, snr, lam, seed=0, opzioni=None):
+    """n crossing bilanciati (0.30 + 0.30, AD 1.7 RD 0.4 e-3, 60-90 gradi) con orientamento CASUALE: errore
+    angolare delle due popolazioni dopo il fit a lambda congelati (NaN dove il fit non vede il crossing)."""
+    rng = np.random.default_rng(seed)
+    bv, bc = prot
+    A = np.zeros((n, 1, 1, len(bv)), np.float32)
+    vere = np.full((n, 1, 1, 2, 3), np.nan)
+    for i in range(n):
+        u = rng.normal(size=3); u /= np.linalg.norm(u)
+        v = ruota_verso(u, rng.uniform(60, 90), rng.normal(size=3))
+        S = segnale(prot, [(0.3, u, 1.7e-3, 0.4e-3), (0.3, v, 1.7e-3, 0.4e-3)], dict(R=0.1, H=0.2, W=0.1), D_NOM)
+        A[i, 0, 0] = S / S[bv < 100].mean()
+        vere[i, 0, 0] = u, v
+    Mm, sg = rumore_rician(A, snr, seed + 1)
+    m = DBSI_Adaptive(lambda_aniso=lam[0], lambda_iso=lam[1], n_iso=6, **(opzioni or {}))
+    with contextlib.redirect_stdout(io.StringIO()):
+        res, _ = m.fit(Mm, bv, bc, np.ones(A.shape[:3], bool), run_calibration=False,
+                       noise_map=np.full(A.shape[:3], sg))
+    return errore_angolare(res, vere).reshape(n, 2)
+
+
+def _ang(u, v):
+    return float(np.degrees(np.arccos(np.clip(abs(np.dot(u, v)), 0, 1))))
+
+
+def fig_cono_crossing(K, C, vere, tab_err, file=None):
+    """C = cono_crossing_voxel; vere = (2, 3) direzioni vere; tab_err: scenario, popolazione, braccio, mediana."""
+    fd = np.asarray(K['fiber_dirs'])
+    fig, axs = plt.subplots(1, 3, figsize=(15, 4.4), constrained_layout=True,
+                            gridspec_kw=dict(width_ratios=[1, 1, 1.5]))
+    for k in (0, 1):
+        a = axs[k]
+        t = vere[np.argmax([abs(C['dirs0'][k] @ v) for v in vere])]      # la vera piu' vicina a questa popolazione
+        ex, ey = _base(t)
+
+        def loc(v):
+            v = np.atleast_2d(v); v = v * np.sign(v @ t)[:, None]
+            return np.degrees(np.arctan2(v @ ex, v @ t)), np.degrees(np.arctan2(v @ ey, v @ t))
+        vic = fd[np.argsort(-np.abs(fd @ t))[:7]]
+        a.scatter(*loc(vic), s=70, color='#d9d7d0', label='nodi del dizionario')
+        a.scatter(*loc(C['dirs0'][k]), s=130, marker='*', color=INK, zorder=4,
+                  label=f"Stage A + MRDS ({_ang(C['dirs0'][k], t):.1f}°)")
+        a.scatter(*loc(C['dirs1'][k]), s=120, facecolors='none', edgecolors=CAT[2], lw=2.2, zorder=5,
+                  label=f"dopo il cono ({_ang(C['dirs1'][k], t):.1f}°)")
+        a.scatter(0, 0, s=90, marker='x', color=CAT[7], lw=2, zorder=5, label='direzione vera')
+        a.set_aspect('equal'); a.set_xlabel('gradi'); a.set_ylabel('gradi')
+        a.set_title(f'popolazione {k + 1}: AD/RD {C["AD0"][k]*1e3:.2f}/{C["RD0"][k]*1e3:.2f} → '
+                    f'{C["AD1"][k]*1e3:.2f}/{C["RD1"][k]*1e3:.2f}', fontsize=9)
+        a.legend(fontsize=7.5, loc='upper center', bbox_to_anchor=(0.5, -0.15), ncol=2)
+    a = axs[2]
+    sc = list(dict.fromkeys(tab_err.scenario))
+    x = np.arange(len(sc) * 2)
+    for j, (br, col) in enumerate((('griglia', INK2), ('cono', CAT[2]))):
+        v = [tab_err[(tab_err.scenario == s) & (tab_err.popolazione == q) & (tab_err.braccio == br)].mediana.iloc[0]
+             for s in sc for q in (1, 2)]
+        a.bar(x + (j - 0.5) * 0.38, v, width=0.38, color=col, label=br)
+    a.set_xticks(x, [f'{s}\npop {q}' for s in sc for q in (1, 2)], fontsize=7.5)
+    a.set_ylabel('errore angolare mediano [gradi]'); a.legend(fontsize=8)
+    a.set_title('Errore mediano: crossing della batteria e orientamenti casuali')
+    fig.suptitle(f"Il cono per popolazione: SSE {C['sse0']:.2e} → {C['sse1']:.2e} su questo voxel", fontsize=10)
+    return _salva(fig, file)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 18c  il test 2-contro-1 (opzione two_vs_one_threshold)
+# ═════════════════════════════════════════════════════════════════════════════
+def fig_test21(stat, npop, T, snr_fig, file=None):
+    """stat: DataFrame SNR, vero (popolazioni vere), stat21 dei candidati. npop: SNR, vero, fit ('1.8' o
+    'test'), due_pct (quota dei voxel con 2 popolazioni stimate)."""
+    fig, axs = plt.subplots(1, 3, figsize=(15, 4.1), constrained_layout=True)
+    a = axs[0]
+    tr = lambda x: np.sign(x) * np.log10(1 + np.abs(x))          # logaritmo con segno: stat21 puo' essere < 0
+    d = stat[stat.SNR == snr_fig]
+    b = np.linspace(tr(min(-10, d.stat21.min())), tr(max(1e3, d.stat21.max())), 60)
+    for v, col, nome in ((1, CAT[0], 'una fibra vera'), (2, CAT[1], 'due fibre vere')):
+        q = d[d.vero == v].stat21.to_numpy()
+        if q.size:
+            a.hist(tr(q), bins=b, color=col, alpha=0.55, weights=np.full(q.size, 100 / q.size),
+                   label=f'{nome} (n={q.size})')
+    a.axvline(tr(T), color=INK, ls='--', lw=1.2)
+    a.text(tr(T) * 1.05, a.get_ylim()[1] * 0.9, f'T = {T:g}', fontsize=8)
+    tk = [v for v in (-10, -1, 0, 1, 10, 100, 1000, 10000) if b[0] <= tr(v) <= b[-1]]
+    a.set_xticks([tr(v) for v in tk], [str(v) for v in tk])
+    a.set_xlabel('stat21 = (RSS_1pop − RSS_2pop) / σ²  (scala log con segno)'); a.set_ylabel('% dei voxel')
+    a.set_title(f'I candidati crossing, SNR {snr_fig}'); a.legend(fontsize=7.5)
+    for a, v, tit in ((axs[1], 1, 'Falsi crossing (una fibra vera)'), (axs[2], 2, 'Crossing trovati (due fibre vere)')):
+        for fit_, ls in (('1.8', '--'), ('test', '-')):
+            s = npop[(npop.vero == v) & (npop.fit == fit_)].sort_values('SNR')
+            a.plot(s.SNR, s.due_pct, ls, marker='o', color=INK if fit_ == '1.8' else CAT[2], lw=1.8,
+                   label='min_peak_ratio 0.35 (fino alla 1.8)' if fit_ == '1.8' else f'test 2-contro-1, T = {T:g} (1.9.0)')
+        a.set_xlabel('SNR'); a.set_ylabel('% con 2 popolazioni stimate'); a.set_title(tit); a.set_ylim(0, 100)
+        a.grid(alpha=0.5)
+    axs[1].legend(fontsize=7.5)
+    return _salva(fig, file)
 
 
 # ═════════════════════════════════════════════════════════════════════════════

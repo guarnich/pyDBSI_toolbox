@@ -19,6 +19,8 @@ COSA SI PROTEGGE.
   2. Il cono non porta due popolazioni piu' vicine della separazione minima.
   3. Il passo 2-contro-1 tiene il crossing vero e declassa quello falso.
   4. Con soglia altissima nessun crossing sopravvive al fit intero; opzioni validate.
+  5. Dalla 1.9.0 entrambe accese di default (soglia 12); senza Stage D il DEFAULT si spegne
+     da solo, una soglia esplicita e' un errore; la CLI le spegne con --no-*.
 
     python tests/test_crossing_cone_and_2vs1.py
 """
@@ -150,10 +152,27 @@ def test_opzioni_validate():
         pass
     else:
         raise AssertionError('two_vs_one_threshold senza Stage D accettato')
-    m = DBSI_Adaptive(two_vs_one_threshold=12.0, crossing_dir_refine=True)
-    assert m.two_vs_one_threshold == 12.0 and m.crossing_dir_refine
-    assert DBSI_Adaptive().two_vs_one_threshold is None and not DBSI_Adaptive().crossing_dir_refine
-    print('  soglia <= 0 e test senza Stage D rifiutati; default spenti')
+    m = DBSI_Adaptive(two_vs_one_threshold=None, crossing_dir_refine=False)
+    assert m.two_vs_one_threshold is None and not m.crossing_dir_refine
+    d = DBSI_Adaptive()
+    assert d.two_vs_one_threshold == 12.0 and d.crossing_dir_refine, 'default 1.9.0: entrambe accese'
+    assert DBSI_Adaptive(iso_resolve=False).two_vs_one_threshold is None, 'senza Stage D il default si spegne'
+    print('  soglia <= 0 e soglia esplicita senza Stage D rifiutate; default accesi (12), spento senza Stage D')
+
+
+def test_cli_spegne_e_accende():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('run_dbsi', Path(__file__).resolve().parents[1] / 'scripts' / 'run_dbsi.py')
+    cli = importlib.util.module_from_spec(spec); spec.loader.exec_module(cli)
+    p = cli.build_parser()
+    base = ['--dwi', 'x', '--bval', 'x', '--bvec', 'x', '--mask', 'x', '--noise', 'x', '--out', 'o']
+    for extra, atteso in (([], (12.0, True)), (['--no-two-vs-one'], (None, True)),
+                          (['--no-crossing-dir-refine'], (12.0, False)),
+                          (['--two-vs-one-threshold', '20'], (20.0, True))):
+        args = p.parse_args(base + extra)
+        m = DBSI_Adaptive(**cli.model_kwargs(args))
+        assert (m.two_vs_one_threshold, m.crossing_dir_refine) == atteso, (extra, m.two_vs_one_threshold)
+    print('  CLI: default acceso, --no-two-vs-one, --no-crossing-dir-refine, soglia esplicita')
 
 
 def test_soglia_altissima_niente_crossing():
@@ -182,7 +201,7 @@ def test_soglia_altissima_niente_crossing():
 if __name__ == '__main__':
     falliti = 0
     for fn in (test_cono_non_peggiora_e_avvicina, test_cono_rispetta_la_separazione,
-               test_passo_2vs1_sceglie, test_opzioni_validate,
+               test_passo_2vs1_sceglie, test_opzioni_validate, test_cli_spegne_e_accende,
                test_soglia_altissima_niente_crossing):
         print(f'\n=== {fn.__name__} ===')
         try:

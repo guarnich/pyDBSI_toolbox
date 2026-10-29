@@ -27,9 +27,9 @@ STAGE B/C — tensors.
   - n_pop == 2: the crossing FF is re-solved on the detected support with a
     light ridge kappa * (sigma/S0)^2 (`crossing_ff_resolve`), then a bounded
     joint Levenberg-Marquardt fits both tensors (`estimate_AD_RD_mrds`). The
-    directions stay on the Stage A dictionary grid unless `crossing_dir_refine`
-    (v1.9.0) moves each population off its node by a cone search.
-  - two_vs_one_threshold (v1.9.0, off by default): instead of `min_peak_ratio`,
+    directions leave the Stage A dictionary grid by a cone search per
+    population (`crossing_dir_refine`, v1.9.0, on by default).
+  - two_vs_one_threshold (v1.9.0, default 12): instead of `min_peak_ratio`,
     every voxel with a separated secondary peak is fitted both ways and the
     crossing is kept only where it lowers the Stage D residual by at least the
     threshold, in noise variances.
@@ -304,9 +304,13 @@ _N_CHANNELS_INTERNAL = 28
 _MRDS_INIT_N_ITER = 3        # short, deliberately non-converged alternating warm start
 _MRDS_LM_MAX_ITER = 25
 # Cone over the crossing directions (v1.9.0): LM iterations per candidate, warm
-# started from the current solution, and the default of the option.
+# started from the current solution, and the default of the option. ON by default
+# from 1.9.0: crossings orientated at random, SNR 26, median angular error 10.2/8.9
+# -> 5.1/5.0 deg (pop 1/2); on real data (BR 000148) the crossing directions move
+# by 8.3 deg median. Where the grid node happens to sit on the true direction the
+# cone cannot gain and may follow the noise (weak population: 1.2 -> 5.2 deg).
 _MRDS_CONE_LM_ITER = 10
-_DEFAULT_CROSSING_DIR_REFINE = False
+_DEFAULT_CROSSING_DIR_REFINE = True
 
 # TWO-VS-ONE POPULATION TEST (v1.9.0). How many populations a voxel has was
 # decided by `min_peak_ratio` alone: a second fiber is accepted when its angular
@@ -329,8 +333,15 @@ _DEFAULT_CROSSING_DIR_REFINE = False
 # behaves (median 1-5, p95 7-18). Emulated at threshold 12 with the cone:
 # populations right 57->73.5 / 69->85 / 73->90 % at SNR 15/26/40, FF MAE down,
 # RD MAE up at SNR 15-26 (heterogeneous crossings demoted at low SNR).
-# Off by default until the cohort-level decision.
-_DEFAULT_TWO_VS_ONE_THRESHOLD = None
+# ON by default from 1.9.0 (threshold 12), after the real-data check on BR 000148
+# (P3, 2026-10-28; tissue from DTI FA/MD): crossings in GM 34.6 -> 13.7%, removed
+# fibers almost all in GM (DTI FA 0.13); crossings ADDED in coherent-looking WM
+# (DTI FA 0.6-0.8: 7.7 -> 17.3%) sit in the centrum semiovale with the second
+# population at ~85 deg and 18% share, while the midline corpus callosum does not
+# change (1.2% -> 1.2%): real crossings, not single-fiber misfit. Cost: fit x1.3.
+# Off with two_vs_one_threshold=None. Needs Stage D: with iso_resolve=False the
+# DEFAULT turns itself off, an explicit threshold is an error.
+_DEFAULT_TWO_VS_ONE_THRESHOLD = 12.0
 _TWO_VS_ONE_CANDIDATE_RATIO = 0.0     # any separated secondary peak is a candidate
 
 # Local-maxima peak-finding neighbourhood size for `select_dominant_directions`
@@ -767,10 +778,11 @@ def _single_fiber_2iso(arr, x, y, z, dominant_dir, sig_norm, bvals, bvecs, b0_th
     the direction, then Stage C (or the closed-form Stage B without it). The body of the
     kernels' n_pop == 1 branch, COPIED here (v1.9.0) so that the two-vs-one test can fit
     the single-fiber alternative of a crossing candidate from the same Stage A. A copy, not
-    a move: with the kernels calling this helper the default fit moved by 1 float32 ulp
-    (~6e-8, 17 channels, same machine): fastmath optimises the helper differently from the
-    inlined code, and the default must stay bit-identical to 1.8.1. Keep the two in step
-    when editing either.
+    a move: with the kernels calling this helper the fit moved by 1 float32 ulp (~6e-8,
+    17 channels, same machine): fastmath optimises the helper differently from the inlined
+    code. Keep the two in step when editing either. (With both crossing options off the
+    1.9.0 kernels reproduce 1.8.1 up to 1 ulp in ~1% of crossing voxels, measured
+    2026-10-28: the added branches alone change fastmath's code.)
     2-ISO."""
 
     if stagec_enabled:
@@ -873,10 +885,11 @@ def _single_fiber_3iso(arr, x, y, z, dominant_dir, sig_norm, bvals, bvecs, b0_th
     the direction, then Stage C (or the closed-form Stage B without it). The body of the
     kernels' n_pop == 1 branch, COPIED here (v1.9.0) so that the two-vs-one test can fit
     the single-fiber alternative of a crossing candidate from the same Stage A. A copy, not
-    a move: with the kernels calling this helper the default fit moved by 1 float32 ulp
-    (~6e-8, 17 channels, same machine): fastmath optimises the helper differently from the
-    inlined code, and the default must stay bit-identical to 1.8.1. Keep the two in step
-    when editing either.
+    a move: with the kernels calling this helper the fit moved by 1 float32 ulp (~6e-8,
+    17 channels, same machine): fastmath optimises the helper differently from the inlined
+    code. Keep the two in step when editing either. (With both crossing options off the
+    1.9.0 kernels reproduce 1.8.1 up to 1 ulp in ~1% of crossing voxels, measured
+    2026-10-28: the added branches alone change fastmath's code.)
     3-ISO."""
 
     if stagec_enabled:
@@ -2300,8 +2313,11 @@ class DBSI_Adaptive:
         if two_vs_one_threshold is not None and not two_vs_one_threshold > 0:
             raise ValueError('two_vs_one_threshold must be None (off) or > 0')
         if two_vs_one_threshold is not None and not iso_resolve:
-            raise ValueError('two_vs_one_threshold needs Stage D (iso_resolve=True): '
-                             'the test is defined on the Stage D model')
+            if two_vs_one_threshold is _DEFAULT_TWO_VS_ONE_THRESHOLD:
+                two_vs_one_threshold = None    # the default follows Stage D: off without it
+            else:
+                raise ValueError('two_vs_one_threshold needs Stage D (iso_resolve=True): '
+                                 'the test is defined on the Stage D model')
         self.two_vs_one_threshold = two_vs_one_threshold
 
         self.model_mode_ = None

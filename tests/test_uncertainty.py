@@ -18,8 +18,10 @@ COSA SI PROTEGGE.
      fra 0.8 e 1.6 per FF, RD e FA, e verita' entro 1.96 SE in >= 90% dei voxel.
      (Misura completa: experiments/uncertainty/copertura.py, fuori dal repository dal 2026-10-12.)
   5. Residuo / sigma: ~1 col modello giusto (mediana fra 0.9 e 1.1, flag 16 su
-     meno del 3% dei voxel); nei crossing, dove la FF di Stage A resta fissa,
-     sopra quello della mono-fibra.
+     meno del 3% dei voxel). Il residuo vede un difetto del modello: nei crossing con
+     le direzioni lasciate sui nodi della griglia (crossing_dir_refine=False, come fino
+     alla 1.8) e' piu' alto che col cono (default 1.9.0), che lo riporta al livello
+     della mono-fibra.
 
     python tests/test_uncertainty.py
 """
@@ -173,8 +175,12 @@ def test_fit_e_salvataggio():
         assert np.array_equal(np.isfinite(se) & ok, dove & ok), f'{nm}: dominio della SE sbagliato'
         assert np.all(se[np.isfinite(se)] >= 0), f'{nm}: SE negativa'
     rr = m.uncertainty_['residual_over_sigma'][..., 0]
-    print(f"  residuo/sigma mediano: mono {np.nanmedian(rr[0]):.3f}, crossing {np.nanmedian(rr[1]):.3f}")
-    assert np.nanmedian(rr[1]) > np.nanmedian(rr[0]), 'il residuo dei crossing non supera quello della mono-fibra'
+    m18, _, _ = _fit(d, bv, bc, crossing_dir_refine=False, two_vs_one_threshold=None)
+    rg = m18.uncertainty_['residual_over_sigma'][..., 0]
+    print(f"  residuo/sigma mediano: mono {np.nanmedian(rr[0]):.3f}, crossing {np.nanmedian(rr[1]):.3f} "
+          f"(direzioni sulla griglia: {np.nanmedian(rg[1]):.3f})")
+    assert np.nanmedian(rg[1]) > np.nanmedian(rr[1]), 'il residuo non vede le direzioni dei crossing sulla griglia'
+    assert abs(np.nanmedian(rr[1]) / np.nanmedian(rr[0]) - 1) < 0.05, 'col cono il crossing resta lontano dalla mono-fibra'
     rep = open(os.path.join(out, 'toolbox_report', 'run_report.txt')).read()
     assert 'Uncertainty maps' in rep and 'median standard error' in rep
     assert m.run_report_['uncertainty']['n_voxels'] == int(np.isfinite(m.uncertainty_['log10_cond']).sum())

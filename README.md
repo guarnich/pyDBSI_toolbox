@@ -198,7 +198,8 @@ model = DBSI_Adaptive.from_calibration('P3_calibration.json')      # every acqui
 directories) and at the file names *as your study names them* (one glob pattern per input,
 relative to each acquisition directory); it checks every input without fitting (grids,
 orientation of mask and noise map, one protocol fingerprint for the whole sample), calibrates each
-acquisition and keeps its record (an interrupted run resumes), aggregates, writes
+acquisition on fine λ grids (118 points containing the fit's 40, so the protocol λ is not tied to
+the fit's coarse steps; about 10% slower) and keeps its record (an interrupted run resumes), aggregates, writes
 `<protocol>_calibration.json`, plots the GCV curves behind the choice and prints the command line:
 
 ```bash

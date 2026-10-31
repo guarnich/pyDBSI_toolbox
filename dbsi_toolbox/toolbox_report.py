@@ -222,49 +222,51 @@ def save_toolbox_report(model, output_dir, saved_channels=None):
 
     mancano = [n for n, v in (('run_report_', report), ('dictionary_', D)) if not v]
     if mancano:
-        print(f"   [WARNING] toolbox_report incompleto: il modello non ha "
-              f"{', '.join(mancano)} (fit non completato?)")
+        print(f"   [WARNING] toolbox_report incomplete: the model has no "
+              f"{', '.join(mancano)} (fit not completed?)")
     return written
 
 
-_UNC_README = """Mappe di incertezza (pyDBSI {ver})
-================================
+_UNC_README = """Uncertainty maps (pyDBSI {ver})
+==============================
 
-Ogni file NN_<canale>_se.nii.gz e' l'ERRORE STANDARD per voxel della mappa
-NN_<canale>.nii.gz, nelle stesse unita' (frazioni adimensionali, diffusivita'
-in mm^2/s, FA adimensionale). NaN dove la mappa non esiste.
+Each file NN_<channel>_se.nii.gz is the per-voxel STANDARD ERROR of the map
+NN_<channel>.nii.gz, in the same units (dimensionless fractions, diffusivities
+in mm^2/s, dimensionless FA). NaN where the map does not exist.
 
-Come e' calcolato: informazione di Fisher del modello con cui le mappe sono
-riportate (fibre con AD, RD, direzione e peso liberi + centroidi isotropi fissi
-di Stage D), valutata alla stima, rumore gaussiano sigma / S0 del voxel (sigma =
-la mappa di rumore termico in ingresso);
-metodo delta per frazioni normalizzate, FA e tensore pesato. E' il limite di
-Cramer-Rao: la precisione che uno stimatore NON distorto potrebbe raggiungere
-con questo protocollo e questo rumore. NON contiene il bias.
+How it is computed: Fisher information of the model the maps are reported
+with (fibers with free AD, RD, direction and weight + the fixed isotropic
+centroids of Stage D), evaluated at the estimate, with Gaussian noise
+sigma / S0 of the voxel (sigma = the input thermal noise map); delta method
+for normalised fractions, FA and the weighted tensor. It is the Cramer-Rao
+bound: the precision an UNBIASED estimator could reach with this protocol and
+this noise. It does NOT contain the bias.
 
-Altri file:
+Other files:
   dir1_angle_se_deg.nii.gz, dir2_angle_se_deg.nii.gz
-        errore angolare RMS della direzione di ciascuna popolazione, in gradi
+        RMS angular error of each population's direction, in degrees
   fisher_log10_condition.nii.gz
-        log10 del numero di condizionamento della matrice di Fisher equilibrata:
-        sopra {lc:g} il modello e' quasi non identificabile nel voxel
+        log10 of the condition number of the equilibrated Fisher matrix:
+        above {lc:g} the model is nearly non-identifiable in the voxel
   uncertainty_flags.nii.gz   (bitmask, uint8)
-        1  RD di una popolazione su un limite (il pavimento, in pratica)
-        2  AD di una popolazione su un limite
-        4  Fisher mal condizionata (vedi sopra); NaN se singolare
-        8  AD dei crossing imposta, non stimata (SE = NaN)
-        16 residuo piu' grande di quanto il rumore spieghi (sopra il quantile
-           99.9% della chi-quadro): errori standard ottimistici di circa quel fattore
+        1  RD of a population on a bound (in practice the floor)
+        2  AD of a population on a bound
+        4  ill-conditioned Fisher matrix (see above); NaN if singular
+        8  crossing AD imposed, not estimated (SE = NaN)
+        16 residual larger than the noise explains (above the 99.9% quantile
+           of the chi-square): standard errors optimistic by about that factor
   residual_over_sigma.nii.gz
-        sqrt(RSS / (N - P)) / sigma del voxel, sul segnale corretto per Rician, per
-        il modello riportato. ~1 se il modello descrive il voxel e sigma e' giusta;
-        sopra 1: il modello non basta, o il rumore locale e' piu' alto di quello
-        della mappa di rumore. Con crossing_ff_kappa = 0 (FF dei crossing presa da
-        Stage A e tenuta fissa) nei crossing sta sopra 1 per costruzione.
+        sqrt(RSS / (N - P)) / sigma of the voxel, on the Rician-corrected
+        signal, for the reported model. ~1 if the model describes the voxel and
+        sigma is right; above 1: the model is not enough, or the local noise is
+        higher than the noise map's. With crossing_ff_kappa = 0 (crossing FF
+        taken from Stage A and held fixed) it is above 1 in crossings by
+        construction.
 
-Uso: per una regione di N voxel l'errore della media scende fino a SE/sqrt(N)
-(meno, con la correlazione spaziale). Voxel con flag 1, 2 o 4: l'errore e' una
-linearizzazione in un punto dove non vale, da escludere o riportare a parte.
+Use: for a region of N voxels the error of the mean shrinks down to SE/sqrt(N)
+(less, with spatial correlation). Voxels with flag 1, 2 or 4: the error is a
+linearisation at a point where it does not hold; exclude them or report them
+separately.
 """
 
 

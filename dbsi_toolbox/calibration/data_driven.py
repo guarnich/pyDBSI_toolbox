@@ -575,10 +575,9 @@ def select_lambda_aniso_discrepancy(AtA, At, y_voxels, n_aniso_cols,
         Fraction of `max_eig_aniso` used as the (new) primary floor
         component: lambda_aniso >= aniso_floor_fraction * max_eig_aniso
         / n_aniso_cols. If None (default), reads the module constant
-        `_ANISO_FLOOR_FRACTION` (validated value 1.0 as of 2026-07-24;
-        see that constant's note for the FF-leakage / SNR-robustness
-        basis, which supersedes the 2026-07-16 "unvalidated 0.075"
-        caveat in the SAFETY FLOOR section above). Only used if
+        `_ANISO_FLOOR_FRACTION` (0.075: a floor of 1.0 removed the FF
+        leakage but crushed genuine crossing fractions, so the original
+        value was restored; see that constant's note). Only used if
         max_eig_aniso is not None.
 
     Returns

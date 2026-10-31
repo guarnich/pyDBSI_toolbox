@@ -2233,13 +2233,13 @@ class DBSI_Adaptive:
     force_n_iso : int or None
         Override automatic isotropic-model selection (2 or 3).
     enable_direction_refinement : bool
-        Whether to refine Stage A's dominant direction estimate with a
-        two-level "MRDS-lite" cone search for SINGLE-fiber voxels
-        (n_pop == 1). Default: True. Crossings use Stage A's grid
-        directions as MRDS input.
+        Whether to refine Stage A's direction estimates with a two-level
+        "MRDS-lite" cone search. Default: True. Single fibers are always
+        refined; crossings only with `crossing_dir_refine` (on by default
+        since v1.9.0), otherwise they keep Stage A's grid directions.
     target_angular_resolution_deg : float
         Desired final angular precision (degrees) of the refined
-        direction (n_pop == 1 path only). Default: 1.0.
+        directions. Default: 1.0.
 
     """
 
@@ -2373,7 +2373,7 @@ class DBSI_Adaptive:
         else:
             cal = dict(calibration)
             if cal.get('kind') != 'pydbsi_protocol_calibration':
-                raise ValueError('non e una calibrazione di protocollo')
+                raise ValueError('not a protocol calibration')
         h, mo = cal['hyperparameters'], cal['model']
         fissati = dict(lambda_aniso=float(h['lambda_aniso']),
                        lambda_iso=float(h['lambda_iso']), n_iso=int(h['n_iso']),
@@ -2385,9 +2385,9 @@ class DBSI_Adaptive:
                        iso_range=tuple(float(x) for x in mo['iso_range']))
         conflitti = sorted(set(overrides) & set(fissati))
         if conflitti:
-            raise ValueError(f'{conflitti} sono fissati dalla calibrazione di protocollo: '
-                             f'ridefinirli romperebbe la riproducibilita. Se serve un '
-                             f'valore diverso, serve una calibrazione diversa.')
+            raise ValueError(f'{conflitti} are fixed by the protocol calibration: '
+                             f'overriding them would break reproducibility. A different '
+                             f'value needs a different calibration.')
         m = cls(**fissati, **overrides)
         src = cal.get('_source') or {}
         m.protocol_calibration_ = dict(
@@ -2483,15 +2483,15 @@ class DBSI_Adaptive:
         # con un bval in meno si fermava su un IndexError incomprensibile.
         bvals = np.asarray(bvals, dtype=np.float64).ravel()
         if np.ndim(data) != 4:
-            raise ValueError(f"data deve essere 4D (X, Y, Z, volumi), ha forma {np.shape(data)}")
+            raise ValueError(f"data must be 4D (X, Y, Z, volumes), got shape {np.shape(data)}")
         n_vol = data.shape[3]
         if bvals.size != n_vol or bvecs.ndim != 2 or bvecs.shape != (n_vol, 3):
-            raise ValueError(f"tabella dei gradienti incoerente con i dati: {n_vol} volumi, "
-                             f"{bvals.size} b-value, bvec di forma {bvecs.shape} (attesa ({n_vol}, 3))")
+            raise ValueError(f"gradient table inconsistent with the data: {n_vol} volumes, "
+                             f"{bvals.size} b-values, bvecs of shape {bvecs.shape} (expected ({n_vol}, 3))")
         _dw0 = (bvals >= B0_THRESHOLD) & (np.linalg.norm(bvecs, axis=1) < 1e-6)
         if _dw0.any():
-            raise ValueError(f"{int(_dw0.sum())} volumi pesati (b >= {B0_THRESHOLD:g}) hanno bvec "
-                             f"nullo: tabella dei gradienti sbagliata")
+            raise ValueError(f"{int(_dw0.sum())} diffusion-weighted volumes (b >= {B0_THRESHOLD:g}) have "
+                             f"a zero bvec: wrong gradient table")
         norms = np.linalg.norm(bvecs, axis=1, keepdims=True)
         norms[norms == 0] = 1.0
         bvecs = bvecs / norms
@@ -2512,8 +2512,8 @@ class DBSI_Adaptive:
             mask = mask.copy()
             _bx = _cm[_bad]
             mask[_bx[:, 0], _bx[:, 1], _bx[:, 2]] = False
-            print(f"\n  [WARNING] {int(_bad.sum()):,} voxel della maschera hanno valori non "
-                  f"finiti (NaN/inf) nel segnale: esclusi dal fit, come fuori maschera.")
+            print(f"\n  [WARNING] {int(_bad.sum()):,} mask voxels have non-finite signal values "
+                  f"(NaN/inf): excluded from the fit, as if outside the mask.")
 
         # ── Calibrazione di protocollo: questi dati hanno QUEL protocollo? ─────
         self.protocol_fingerprint_match_ = None
@@ -2523,17 +2523,17 @@ class DBSI_Adaptive:
             _mm = fingerprint_mismatches(_pc['protocol'], protocol_fingerprint(bvals))
             self.protocol_fingerprint_match_ = not _mm
             if _mm:
-                _msg = (f"impronta del protocollo diversa da quella della calibrazione "
+                _msg = (f"protocol fingerprint differs from that of calibration "
                         f"{_pc.get('name')!r}: " + '; '.join(
-                            f"{k}: calibrazione {a} / dati {b}" for k, a, b in _mm))
+                            f"{k}: calibration {a} / data {b}" for k, a, b in _mm))
                 if _pc.get('strict', True):
-                    raise ValueError(_msg + ". Questi iperparametri non valgono per "
-                                     "questa acquisizione (from_calibration(strict=False) "
-                                     "per forzare, e il run report lo dichiara).")
-                print(f"\n  [WARNING] {_msg} -- strict=False, si procede.")
+                    raise ValueError(_msg + ". These hyperparameters do not apply to "
+                                     "this acquisition (from_calibration(strict=False) "
+                                     "forces it, and the run report states it).")
+                print(f"\n  [WARNING] {_msg} -- strict=False, proceeding.")
             if calibrate_concentration_gate:
-                raise ValueError("calibrate_concentration_gate=True con una calibrazione "
-                                 "di protocollo: il gate e' fissato dal protocollo.")
+                raise ValueError("calibrate_concentration_gate=True with a protocol "
+                                 "calibration: the gate is fixed by the protocol.")
 
         # ── Isotropic model selection ──────────────────────────────────────
         b_max, n_shells, use_3iso, reason = analyse_protocol(bvals)
@@ -2609,7 +2609,8 @@ class DBSI_Adaptive:
 
         fiber_dirs = generate_fibonacci_sphere_hemisphere(self.n_dirs)
 
-        # ── MRDS-lite direction refinement schedule (single-fiber path only) ──
+        # ── MRDS-lite direction refinement schedule (single fibers; crossings
+        # too when crossing_dir_refine is on) ──
         self.hemisphere_spacing_deg_ = float(np.degrees(measure_hemisphere_spacing(fiber_dirs)))
         if self.enable_direction_refinement:
             _cone1, _n1, _cone2, _n2 = compute_cone_refinement_schedule(
@@ -2620,14 +2621,17 @@ class DBSI_Adaptive:
                 cone1_half_angle_deg=float(np.degrees(_cone1)), n1=int(_n1),
                 cone2_half_angle_deg=float(np.degrees(_cone2)), n2=int(_n2),
             )
-            print(f"\n   MRDS-lite direction refinement (n_pop==1 voxels only): ENABLED "
+            print(f"\n   MRDS-lite direction refinement: ENABLED "
                   f"(target resolution={self.target_angular_resolution_deg:.2f} deg)")
             print(f"   Dictionary spacing: {self.hemisphere_spacing_deg_:.2f} deg  |  "
                   f"Level 1 cone: +/-{np.degrees(_cone1):.2f} deg ({_n1} candidates)  |  "
                   f"Level 2 cone: +/-{np.degrees(_cone2):.2f} deg ({_n2} candidates)")
-            print(f"   NOTE: n_pop==2 voxels use Stage A's RAW grid directions as "
-                  f"MRDS joint Stage B input (no per-population cone refinement in "
-                  f"this release — see module docstring scope note).")
+            if self.crossing_dir_refine:
+                print(f"   Crossings: each population refined with the same cone after "
+                      f"the MRDS joint fit (crossing_dir_refine)")
+            else:
+                print(f"   Crossings: Stage A's grid directions, unrefined "
+                      f"(crossing_dir_refine off)")
         else:
             _cone1, _n1, _cone2, _n2 = 0.0, 1, 0.0, 0
             print(f"\n   MRDS-lite direction refinement: DISABLED "
@@ -2662,7 +2666,7 @@ class DBSI_Adaptive:
         if noise_map is None and not _ALLOW_B0_SIGMA:
             raise ValueError(_NOISE_MAP_HELP)
         if not np.any(np.asarray(bvals) < B0_THRESHOLD):
-            raise ValueError(f"nessun volume b=0 (b < {B0_THRESHOLD:g}): S0 non e' definito")
+            raise ValueError(f"no b=0 volume (b < {B0_THRESHOLD:g}): S0 is undefined")
         coords = np.argwhere(mask)
         xs, ys, zs = coords[:, 0], coords[:, 1], coords[:, 2]
         self.noise_ = {}
@@ -2671,14 +2675,14 @@ class DBSI_Adaptive:
             if noise_map.ndim == 4 and noise_map.shape[3] == 1:
                 noise_map = noise_map[..., 0]
             if noise_map.shape != data.shape[:3]:
-                raise ValueError(f"noise_map {noise_map.shape} non ha la griglia dei dati "
+                raise ValueError(f"noise_map {noise_map.shape} is not on the data grid "
                                  f"{data.shape[:3]}")
             _nm = noise_map[xs, ys, zs]
             _ok = np.isfinite(_nm) & (_nm > 0)
             if _ok.mean() < 0.5:
-                raise ValueError(f"noise_map: solo {_ok.mean():.0%} dei voxel della maschera "
-                                 f"ha un valore finito > 0. E' la mappa giusta, nella scala "
-                                 f"dei dati (divisa per il bias di N4)?")
+                raise ValueError(f"noise_map: only {_ok.mean():.0%} of the mask voxels "
+                                 f"have a finite value > 0. Is it the right map, in the "
+                                 f"intensity scale of the data (divided by the N4 bias)?")
             sigma_map = np.zeros(data.shape[:3], dtype=np.float64)
             sigma_map[xs, ys, zs] = np.where(_ok, _nm, np.median(_nm[_ok]))
             sigma = float(np.median(_nm[_ok]))
@@ -2993,8 +2997,8 @@ class DBSI_Adaptive:
                 lambda_iso_capped=bool(_dd_diag.get('lambda_iso_capped', False)))
             for _k, _v in self.lambda_edges_.items():
                 if _v in ('lower', 'upper'):
-                    print(f"   [NOTE] {_k}={_v}: il lambda scelto sta sull'ESTREMO "
-                          f"della griglia di ricerca, non e' un minimo interno.")
+                    print(f"   [NOTE] {_k}={_v}: the selected lambda is at the EDGE "
+                          f"of the search grid, not an interior minimum.")
             print(f"   Data-driven result: lambda_aniso={self.lambda_aniso:.4f}, "
                   f"lambda_iso={self.lambda_iso:.4f}  "
                   f"[lambda_aniso via {self.lambda_aniso_method}]")
@@ -3615,9 +3619,9 @@ class DBSI_Adaptive:
         import copy
         if self.lambda_aniso is not None or self.lambda_iso is not None:
             raise ValueError(
-                "calibrate() stima i lambda: costruisci il modello SENZA "
-                "lambda_aniso / lambda_iso. Con uno solo dei due la calibrazione "
-                "riscriverebbe comunque entrambi.")
+                "calibrate() estimates the lambdas: build the model WITHOUT "
+                "lambda_aniso / lambda_iso. With only one of the two, calibration "
+                "would still overwrite both.")
         m = copy.deepcopy(self)
         return m.fit(data, bvals, bvecs, mask, run_calibration=True,
                      n_calibration_voxels=n_calibration_voxels,

@@ -178,9 +178,10 @@ voxels the error of the mean shrinks by up to √N.
 
 ## Protocol calibration for a cohort
 
-Hyperparameters calibrated per acquisition follow that acquisition's noise (on 40 acquisitions of
-one protocol, Spearman with SNR −0.75 for `lambda_aniso`, −0.72 for `lambda_iso`): in a group
-comparison the pipeline would manufacture differences. Calibrate **once per protocol**, on a
+Hyperparameters calibrated per acquisition follow that acquisition's noise (on 68 acquisitions of
+one protocol, 34 matched healthy/MS pairs: Spearman with SNR −0.71 for `lambda_iso`, and its
+median differs between groups, 0.039 vs 0.027, Mann–Whitney p = 0.001): in a group comparison
+the pipeline would manufacture differences. Calibrate **once per protocol**, on a
 group-balanced sample, **with the noise maps**:
 
 ```python
@@ -206,7 +207,8 @@ the fit's coarse steps; about 10% slower) and keeps its record (an interrupted r
 python scripts/run_dbsi.py --dwi ... --bval ... --bvec ... --mask ... --noise ... --out ... \
     --protocol-calibration P3_calibration.json                  # recommended
 python scripts/run_dbsi.py --dwi ... --bval ... --bvec ... --mask ... --noise ... --out ... \
-    --skip-calibration --lambda-aniso 5.2233 --lambda-iso 0.1 --n-iso 6 --n-dirs 62   # the same fit
+    --skip-calibration --lambda-aniso 9.805121767832382 --lambda-iso 0.027283333764867666 \
+    --n-iso 6 --n-dirs 62                                                 # the same fit
 ```
 
 The two give identical maps on an acquisition of the protocol; only the file refuses an

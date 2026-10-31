@@ -190,7 +190,7 @@ def main():
         _fissati = [k for k in ('n_iso', 'lambda_aniso', 'lambda_iso', 'n_dirs') + _DICTIONARY_OPTS
                     if getattr(args, k) is not None]
         if _fissati:
-            parser.error(f"--protocol-calibration fissa gia {_fissati}: non passarli")
+            parser.error(f"--protocol-calibration already fixes {_fissati}: do not pass them")
     elif args.skip_calibration and (args.lambda_aniso is None or args.lambda_iso is None):
         print("WARNING: --skip-calibration without --lambda-aniso AND --lambda-iso (or "
               "--protocol-calibration): the missing lambda falls back to a fixed built-in "

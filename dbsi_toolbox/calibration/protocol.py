@@ -126,7 +126,7 @@ def _geomean_index(curves):
     C = np.asarray(curves, float)
     ok = np.all(np.isfinite(C) & (C > 0), axis=0)
     if not ok.any():
-        raise ValueError('nessun punto di griglia con curve finite per tutte le acquisizioni')
+        raise ValueError('no grid point where every acquisition has a finite curve')
     L = np.full(C.shape[1], np.inf)
     L[ok] = np.mean(np.log(C[:, ok]), axis=0)
     return int(np.argmin(L)), L
@@ -142,7 +142,7 @@ def _same(values, what):
     first = values[0]
     for i, v in enumerate(values[1:], 1):
         if v != first:
-            raise ValueError(f'{what} diverso fra le acquisizioni: #0 {first!r} contro #{i} {v!r}')
+            raise ValueError(f'{what} differs between acquisitions: #0 {first!r} vs #{i} {v!r}')
     return first
 
 
@@ -177,47 +177,47 @@ def calibrate_protocol(records, name=None, ids=None, rule='geomean',
     """
     import datetime as _dt
     if rule not in AGGREGATION_RULES:
-        raise ValueError(f'rule deve essere in {AGGREGATION_RULES}, trovato {rule!r}')
+        raise ValueError(f'rule must be one of {AGGREGATION_RULES}, got {rule!r}')
     if lambda_iso_cap_rule not in LAMBDA_ISO_CAP_RULES:
-        raise ValueError(f'lambda_iso_cap_rule deve essere in {LAMBDA_ISO_CAP_RULES}, '
-                         f'trovato {lambda_iso_cap_rule!r}')
+        raise ValueError(f'lambda_iso_cap_rule must be one of {LAMBDA_ISO_CAP_RULES}, '
+                         f'got {lambda_iso_cap_rule!r}')
     records = list(records)
     n = len(records)
     if n < 2:
-        raise ValueError('servono almeno 2 acquisizioni per una calibrazione di protocollo')
+        raise ValueError('a protocol calibration needs at least 2 acquisitions')
     from ..model_Niso_adaptive_ff_thr import _ALLOW_B0_SIGMA
     for i, r in enumerate(records):
         if r.get('kind') != 'pydbsi_acquisition_calibration':
-            raise ValueError(f'record #{i} non e un record di calibrate()')
+            raise ValueError(f'record #{i} is not a record from calibrate()')
         # v1.7.1: la calibrazione di una popolazione di studio usa il rumore TERMICO
         # (mappa di dwidenoise); un record calibrato col sigma dei b=0 porterebbe
         # nei lambda la variabilita' fisiologica, diversa per soggetto.
         src = (r.get('noise') or {}).get('sigma_source', 'b0_temporal')
         if src != 'noise_map' and not _ALLOW_B0_SIGMA:
-            raise ValueError(f'record #{i}: calibrato senza mappa di rumore (sigma_source={src!r}). '
-                             f'Rifare calibrate(..., noise_map=...) con la mappa di dwidenoise.')
+            raise ValueError(f'record #{i}: calibrated without a noise map (sigma_source={src!r}). '
+                             f'Redo calibrate(..., noise_map=...) with the dwidenoise noise map.')
     ids = [str(x) for x in ids] if ids is not None else [f'acq{i:03d}' for i in range(n)]
     if len(ids) != n:
-        raise ValueError('ids e records hanno lunghezze diverse')
+        raise ValueError('ids and records have different lengths')
 
     # ── stesso protocollo, stesso modello, stesse griglie ────────────────────
     fp0 = records[0]['protocol']
     for i, r in enumerate(records[1:], 1):
         mm = fingerprint_mismatches(fp0, r['protocol'])
         if mm:
-            raise ValueError(f'acquisizione {ids[i]}: impronta diversa da {ids[0]} su '
+            raise ValueError(f'acquisition {ids[i]}: protocol fingerprint differs from {ids[0]} in '
                              f'{[m[0] for m in mm]}')
-    model = {k: _same([r['model'][k] for r in records], f'opzione del modello {k}')
+    model = {k: _same([r['model'][k] for r in records], f'model option {k}')
              for k in _MODEL_KEYS}
     hp = [r['hyperparameters'] for r in records]
     n_iso = _same([h['n_iso'] for h in hp], 'n_iso')
     method = _same([h['lambda_aniso_method'] for h in hp], 'lambda_aniso_method')
     if rule == 'geomean' and method != 'gcv':
-        raise ValueError("rule='geomean' richiede lambda_aniso_method='gcv' (serve la "
-                         f"curva GCV), trovato {method!r}")
+        raise ValueError("rule='geomean' requires lambda_aniso_method='gcv' (it needs the "
+                         f"GCV curve), got {method!r}")
     gate_cal = [bool(h['concentration_gate_calibrated']) for h in hp]
     if any(gate_cal) and not all(gate_cal):
-        raise ValueError('gate calibrato in alcune acquisizioni e non in altre')
+        raise ValueError('concentration gate calibrated in some acquisitions and not in others')
     gate = (float(np.median([h['concentration_gate'] for h in hp])) if all(gate_cal)
             else float(_same([h['concentration_gate'] for h in hp], 'concentration_gate')))
 
@@ -226,7 +226,7 @@ def calibrate_protocol(records, name=None, ids=None, rule='geomean',
     for i, r in enumerate(records[1:], 1):
         if not (np.allclose(r['curves']['lambda_aniso']['lambda_grid'], ga, rtol=1e-12)
                 and np.allclose(r['curves']['lambda_iso']['lambda_grid'], gi, rtol=1e-12)):
-            raise ValueError(f'acquisizione {ids[i]}: griglie di lambda diverse da {ids[0]}')
+            raise ValueError(f'acquisition {ids[i]}: lambda grids differ from {ids[0]}')
 
     Ca = np.array([r['curves']['lambda_aniso']['gcv'] for r in records], float) \
         if method == 'gcv' else None
@@ -304,9 +304,9 @@ def calibrate_protocol(records, name=None, ids=None, rule='geomean',
             lambda_aniso_at_grid_edge=_edge(ka, ga),
             lambda_iso_at_grid_edge=_edge(ki_eff, gi),
             alternative=alt,
-            note=("la curva di lambda_aniso di ogni acquisizione e' calcolata al suo "
-                  "lambda_iso: aggregarle e' un'approssimazione di primo ordine")),
-        stability=(dict(n_boot=0, note='non calcolata (n_boot=0)') if not len(boot_a) else dict(
+            note=("each acquisition's lambda_aniso curve is computed at its own "
+                  "lambda_iso: aggregating them is a first-order approximation")),
+        stability=(dict(n_boot=0, note='not computed (n_boot=0)') if not len(boot_a) else dict(
             n_boot=int(n_boot), seed=int(seed),
             lambda_aniso_same=float(np.mean(boot_a == 0)),
             lambda_aniso_within_1_step=float(np.mean(np.abs(boot_a) <= 1)),
@@ -321,7 +321,7 @@ def calibrate_protocol(records, name=None, ids=None, rule='geomean',
             lambda_iso_frac_2plus=float(np.mean(np.abs(d_i) >= 2)),
             spearman_snr_vs_own_lambda_aniso_idx=rho_a,
             spearman_snr_vs_own_lambda_iso_idx=rho_i,
-            note='passi della griglia di aggregazione'),
+            note='steps of the aggregation grid'),
         acquisitions=[dict(id=ids[j], snr=float(snr[j]),
                            toolbox_version=records[j].get('toolbox_version'),
                            lambda_aniso=float(hp[j]['lambda_aniso']), lambda_aniso_idx=int(sel_a[j]),
@@ -335,7 +335,7 @@ def save_protocol_calibration(cal, path):
     """Scrive il JSON e ne restituisce lo sha256 (la sua identita' nei run report)."""
     import hashlib, json
     if cal.get('kind') != PROTOCOL_CALIBRATION_KIND:
-        raise ValueError('non e una calibrazione di protocollo')
+        raise ValueError('not a protocol calibration')
     txt = json.dumps(cal, indent=2, ensure_ascii=False)
     with open(path, 'w', encoding='utf-8') as fh:
         fh.write(txt)
@@ -349,12 +349,12 @@ def load_protocol_calibration(path):
         raw = fh.read()
     cal = json.loads(raw.decode('utf-8'))
     if cal.get('kind') != PROTOCOL_CALIBRATION_KIND:
-        raise ValueError(f'{path}: kind {cal.get("kind")!r}, atteso {PROTOCOL_CALIBRATION_KIND!r}')
+        raise ValueError(f'{path}: kind {cal.get("kind")!r}, expected {PROTOCOL_CALIBRATION_KIND!r}')
     if cal.get('format_version') != PROTOCOL_CALIBRATION_FORMAT:
-        raise ValueError(f'{path}: format_version {cal.get("format_version")} non supportato')
+        raise ValueError(f'{path}: format_version {cal.get("format_version")} not supported')
     for k in ('lambda_aniso', 'lambda_iso', 'n_iso', 'concentration_gate'):
         if k not in cal.get('hyperparameters', {}):
-            raise ValueError(f'{path}: manca hyperparameters.{k}')
+            raise ValueError(f'{path}: missing hyperparameters.{k}')
     cal['_source'] = dict(path=os.path.abspath(path),
                           sha256=hashlib.sha256(raw).hexdigest())
     return cal

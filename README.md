@@ -34,6 +34,22 @@ with known ground truth and checked on real acquisitions.
 isotropic block is split into RF / HF / WF (3-ISO); otherwise HF and WF are merged into a single
 non-restricted fraction NRF (2-ISO).
 
+**Compartment classes (v1.10.0).** Default boundaries RF ≤ 0.3 < HF ≤ 3.0 < WF μm²/ms (Wang et al.
+2015, *Brain* 138:1223; Ye et al. 2020, *Ann Clin Transl Neurol* 7:695). They are not a consensus:
+tumour studies use RF ≤ 1.0, HF 1.0–1.5, non-restricted > 1.5 (Han et al. 2023, *Neuro-Oncol Adv*
+5:vdad050). The reported fractions are the weights of the Stage D centroids (default 0.15 / 1.0 /
+3.0 μm²/ms, a modelling choice), not bins of a spectrum, so thresholds and centroids are set
+**together**, each centroid inside its class:
+
+```bash
+python scripts/run_dbsi.py ... --iso-thresholds 1.0 1.5 --iso-centroids 0.5 1.25 3.0
+```
+
+(`DBSI_Adaptive(iso_thresholds=(1.0e-3, 1.5e-3), iso_centroids=(0.5e-3, 1.25e-3, 3.0e-3))` in
+Python, mm²/s.) The classes shape Stage A's dictionary, so the λ must be calibrated with them; a
+protocol calibration records and imposes them. A single centroid cannot reproduce a wide class:
+check new classes on simulations of the tissue of interest before using them.
+
 ### The thermal noise map (required)
 
 The Rician correction subtracts 2σ² from the squared magnitude signal, so σ must be the
@@ -238,6 +254,7 @@ its own optimum. `lambda_iso` is capped by the acquisitions' discrepancy ceiling
 | `min_dominant_concentration` | 0.0 (off) | angular-concentration gate |
 | `anisotropy_ratio` | 2.0 | minimum AD/RD of Stage A's fiber atoms (drops the near-isotropic column that leaked into FF) |
 | `n_dirs`, `n_ad`, `n_rd` | auto, 3, 3 | Stage A dictionary; directions from the protocol |
+| `iso_thresholds`, `iso_centroids` | (0.3, 3.0), (0.15, 1.0, 3.0) ×10⁻³ mm²/s | compartment boundaries and Stage D centroids, set together (above); `iso_centroid_nrf` (1.5) for the 2-ISO fallback |
 | `fiber_threshold` | 0.15 | minimum fiber fraction for a tensor: on Stage A's FF (candidates) and on the final FF (reported) |
 | `force_n_iso` | `None` | force 2-ISO or 3-ISO |
 
@@ -269,6 +286,7 @@ the fit section by section, from the toolbox's own recorded inputs and calibrati
 
 | version | |
 |---|---|
+| **1.10.0** | **compartment classes configurable**: `iso_thresholds`, `iso_centroids`, `iso_centroid_nrf` (CLI `--iso-thresholds`, `--iso-centroids`, `--iso-centroid-nrf`, in μm²/ms), validated so that every Stage D centroid lies in its class; recorded in the run report and in calibration records, imposed by a protocol calibration (records written before count as the defaults). Stage D and the detection test assign the centroids to RF/HF/WF by position, no longer by comparison with the thresholds. With the defaults the maps are identical bit for bit |
 | **1.9.0** | **crossings, two defaults changed**: the cone search on each crossing population's direction (`crossing_dir_refine=True`) and the two-vs-one population test (`two_vs_one_threshold=12`) replace grid-node directions and the `min_peak_ratio` cut; the single-fiber alternative is fitted inside the kernel from the same Stage A (fit ×1.3–1.8); `two_vs_one_stat.nii.gz` and a run-report block; CLI `--no-two-vs-one`, `--[no-]crossing-dir-refine`; with both off the fit is 1.8.1's up to 1 float32 ulp in ~1% of crossing voxels. Protocol calibrations made with 1.8 stay valid (the λ do not depend on these options). `scripts/calibration.ipynb`: from the study folders to the fixed-λ command. `notebooks/`: a third simulation arm and two sections (cone, two-vs-one test) in the mathematics |
 | 1.8.1 | `fit` checks that bvals/bvecs match the number of volumes (a bvec table one volume short used to run silently, reading past the end of the table in the numba kernels, and return meaningless maps); the run report now prints the `input` and `fiber_threshold_final` blocks (they were in the dict only); `select_lambdas_data_driven` defaults to `lambda_aniso_method='gcv'` like the model; optional paths, off by default, made consistent with the fit: the n_iso SVD counts modes on the fit's grid range [0.1, 5.0]e-3 (was 3.0e-3), the n_iso bootstrap replicates get the fit's Rician correction, the concentration-gate MC null warns that it is computed before the λ_aniso modulation; `experiments/` scripts pass the noise map again; `setup.py` no longer declares a non-existent `model` module; package, calibration, CLI and uncertainty-README texts updated; after the `v1.8.1` tag, still 1.8.1: code the fit never called removed (`calibration/optimizer.py`, `select_n_iso_with_gcv_crosscheck`, `select_n_iso_data_driven_sweep`, `generate_isotropic_grid`, `compute_weighted_centroids`, `generate_fibonacci_sphere`), maps identical bit for bit; `experiments/` moved out of the repository (the tests' synthetic P3 table is now in `tests/data/`); the free calibration's per-voxel NNLS solved in parallel (`core.solvers.nnls_batch`), ~4x faster and bit for bit the same lambdas; `notebooks/`: accuracy simulations against ground truth and the toolbox mathematics in figures |
 | 1.8.0 | `fiber_threshold` applied to the final fiber fraction; calibration sigma = RMS of σ/S0 over the sample (the median made the λ_iso ceiling collapse to its grid floor); tSNR removed (one b=0 is enough); single b=0 threshold (100) everywhere, protocol fingerprints included; stale channel map `DBSI_Adaptive.CH` removed |

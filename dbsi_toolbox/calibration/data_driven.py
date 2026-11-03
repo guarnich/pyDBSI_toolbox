@@ -845,7 +845,7 @@ def select_lambda_aniso_gcv_lcurve(AtA, At, y_voxels, n_aniso_cols,
 
 def sample_calibration_voxels(data, mask, bvals, b0_thr=B0_THRESHOLD,
                               n_voxels=500, min_signal_fraction=0.05,
-                              seed=None, noise_map=None):
+                              seed=None, noise_map=None, return_coords=False):
     """
     Sample a representative set of S0-normalised voxel signals from the
     actual brain volume being processed, for use as `y_voxels` in
@@ -892,6 +892,9 @@ def sample_calibration_voxels(data, mask, bvals, b0_thr=B0_THRESHOLD,
         Thermal noise sigma per voxel, in the data's units. sigma_normalised
         is then the ROOT MEAN SQUARE of noise_map / S0 over the sampled voxels
         (v1.8.0; the median until 1.7.1), see below.
+    return_coords : bool
+        Also return the (n_sampled, 3) voxel coordinates (v1.10.0: the
+        two-vs-one noise ratio is measured on the same voxels).
 
     Returns
     -------
@@ -976,6 +979,8 @@ def sample_calibration_voxels(data, mask, bvals, b0_thr=B0_THRESHOLD,
         # direct temporal estimate.
         sigma_normalised = float(np.median(np.std(y_voxels, axis=1)) * 0.3)
 
+    if return_coords:
+        return y_voxels, sigma_normalised, sampled_coords
     return y_voxels, sigma_normalised
 
 

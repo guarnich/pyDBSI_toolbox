@@ -110,6 +110,13 @@ def build_parser():
                         help="Crossing vs single fiber by model selection: the crossing is kept "
                              "only where it lowers the Stage D residual by at least this many noise "
                              f"variances. Default: {_D['two_vs_one_threshold']}. See DBSI_Adaptive.")
+    parser.add_argument("--two-vs-one-noise-ratio", type=float,
+                        dest="two_vs_one_noise_ratio", default=None,
+                        help="c in the applied two-vs-one threshold (threshold x c): the noise in "
+                             "the data over the noise map, in (0, 1]. Default: measured on the "
+                             "calibration voxels when the lambdas are calibrated, fixed by "
+                             "--protocol-calibration, 1 with --skip-calibration. Pass the protocol's "
+                             "value with --skip-calibration and hand-given lambdas.")
     parser.add_argument("--no-two-vs-one", action="store_true", dest="no_two_vs_one",
                         help="Switch the two-vs-one test off: the population count is decided by "
                              "min_peak_ratio alone, as before 1.9.0.")
@@ -187,7 +194,8 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
     if args.protocol_calibration:
-        _fissati = [k for k in ('n_iso', 'lambda_aniso', 'lambda_iso', 'n_dirs') + _DICTIONARY_OPTS
+        _fissati = [k for k in ('n_iso', 'lambda_aniso', 'lambda_iso', 'n_dirs',
+                                'two_vs_one_noise_ratio') + _DICTIONARY_OPTS
                     if getattr(args, k) is not None]
         if _fissati:
             parser.error(f"--protocol-calibration already fixes {_fissati}: do not pass them")
@@ -270,9 +278,10 @@ def model_kwargs(args):
     opt = ('min_weight_fraction', 'target_angular_resolution_deg', 'fiber_detection_threshold',
            'crossing_ff_kappa', 'two_vs_one_threshold')
     if not args.protocol_calibration:
-        opt = opt + ('n_iso', 'lambda_aniso', 'lambda_iso', 'n_dirs') + _DICTIONARY_OPTS
+        opt = opt + ('n_iso', 'lambda_aniso', 'lambda_iso', 'n_dirs',
+                     'two_vs_one_noise_ratio') + _DICTIONARY_OPTS
     for k in opt:
-        if getattr(args, k) is not None:
+        if getattr(args, k, None) is not None:
             kw[k] = getattr(args, k)
     return kw
 

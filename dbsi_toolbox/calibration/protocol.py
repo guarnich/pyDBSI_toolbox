@@ -92,6 +92,14 @@ def fingerprint_mismatches(fp_a, fp_b):
 # LIMITE DICHIARATO: la curva di lambda_aniso di ogni acquisizione e' calcolata
 # al lambda_iso di QUELLA acquisizione. Aggregarle e' quindi un'approssimazione
 # di primo ordine; la misura dice quanto conta.
+#
+# c DEL TEST 2-CONTRO-1 (v1.10.0): il rumore vero dei dati diviso sigma_mappa^2,
+# misurato da ogni acquisizione (`two_vs_one.noise_ratio_measured` del record).
+# Per il protocollo: la MEDIANA sulle acquisizioni, poi il tetto a 1. Un valore
+# per protocollo, come i lambda e per la stessa ragione: un c per soggetto
+# farebbe dipendere dal soggetto il tasso di crossing falsi. Record scritti
+# prima della 1.10.0 non hanno c: la calibrazione allora non lo fissa (None) e
+# il fit usa c = 1, dichiarandolo.
 
 PROTOCOL_CALIBRATION_KIND = 'pydbsi_protocol_calibration'
 PROTOCOL_CALIBRATION_FORMAT = 1
@@ -186,6 +194,7 @@ def calibrate_protocol(records, name=None, ids=None, rule='geomean',
     if n < 2:
         raise ValueError('a protocol calibration needs at least 2 acquisitions')
     from ..model_Niso_adaptive_ff_thr import _ALLOW_B0_SIGMA
+    from ..model_Niso_adaptive_ff_thr import _TWO_VS_ONE_NOISE_RATIO_MAX as _C_MAX
     for i, r in enumerate(records):
         if r.get('kind') != 'pydbsi_acquisition_calibration':
             raise ValueError(f'record #{i} is not a record from calibrate()')
@@ -234,6 +243,10 @@ def calibrate_protocol(records, name=None, ids=None, rule='geomean',
     sel_a = np.array([_idx_on_grid(h['lambda_aniso'], ga) for h in hp])
     sel_i = np.array([_idx_on_grid(h['lambda_iso'], gi) for h in hp])
     caps = np.array([(r['selection'].get('lambda_iso_cap') or np.inf) for r in records], float)
+    c_acq = np.array([((r.get('two_vs_one') or {}).get('noise_ratio_measured') or np.nan)
+                      for r in records], float)
+    c_ok = bool(np.all(np.isfinite(c_acq)))
+    c_prot = float(min(np.median(c_acq), _C_MAX)) if c_ok else None
 
     def _cap(c):
         if lambda_iso_cap_rule == 'none':
@@ -292,7 +305,16 @@ def calibrate_protocol(records, name=None, ids=None, rule='geomean',
         toolbox_version=_v,
         protocol=fp0,
         hyperparameters=dict(lambda_aniso=lam_aniso, lambda_iso=lam_iso, n_iso=int(n_iso),
-                             concentration_gate=gate, lambda_aniso_method=method),
+                             concentration_gate=gate, lambda_aniso_method=method,
+                             two_vs_one_noise_ratio=c_prot),
+        two_vs_one=(dict(noise_ratio=c_prot, rule='median over acquisitions, capped at 1',
+                         noise_ratio_median=float(np.median(c_acq)),
+                         noise_ratio_min=float(np.min(c_acq)), noise_ratio_max=float(np.max(c_acq)),
+                         residual_over_sigma_median=float(np.sqrt(np.median(c_acq))),
+                         n_acquisitions_above_cap=int(np.sum(c_acq > _C_MAX)))
+                    if c_ok else dict(noise_ratio=None, note=(
+                        'not every record has a measured c (records written before 1.10.0, '
+                        'or the two-vs-one test off): the fit uses c = 1'))),
         model=model,
         aggregation=dict(
             rule=rule, lambda_iso_cap_rule=lambda_iso_cap_rule,
@@ -326,7 +348,9 @@ def calibrate_protocol(records, name=None, ids=None, rule='geomean',
                            toolbox_version=records[j].get('toolbox_version'),
                            lambda_aniso=float(hp[j]['lambda_aniso']), lambda_aniso_idx=int(sel_a[j]),
                            lambda_iso=float(hp[j]['lambda_iso']), lambda_iso_idx=int(sel_i[j]),
-                           lambda_iso_cap=(None if not np.isfinite(caps[j]) else float(caps[j])))
+                           lambda_iso_cap=(None if not np.isfinite(caps[j]) else float(caps[j])),
+                           two_vs_one_noise_ratio=(None if not np.isfinite(c_acq[j])
+                                                   else float(c_acq[j])))
                       for j in range(n)],
     )
 

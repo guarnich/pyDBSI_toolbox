@@ -7,9 +7,10 @@ COSA SI PROTEGGE.
      chiamato) e il gate applicato e' 0.0. Motivo: sui dati veri il gate toglieva
      la fibra al 19.5% dei voxel, che rifiutati lasciavano 1.80 sigma di residuo e
      ammessi 1.03 (notebook 07). Il gate resta disponibile su richiesta.
-  2. calibrate(). Si ferma prima del fit voxel per voxel (il kernel NON viene
-     chiamato), non modifica il modello su cui e' chiamato, e restituisce un
-     record serializzabile in JSON con le curve GCV complete e l'impronta.
+  2. calibrate(). Non fitta la maschera: il kernel gira SOLO sui voxel di
+     calibrazione, per misurare c del test 2-contro-1 (v1.10.0; fino alla 1.9.0 non
+     girava affatto). Non modifica il modello su cui e' chiamato, e restituisce un
+     record serializzabile in JSON con le curve GCV complete, c e l'impronta.
   3. Le griglie fini passano davvero ai selettori.
   4. L'impronta ignora i vettori e distingue i protocolli.
 
@@ -104,13 +105,22 @@ def test_gate_su_richiesta():
 def test_calibrate_record():
     bvals, bvecs = _protocollo(); data, mask = _dati(bvals)
     m = DBSI_Adaptive()
-    chiamati, orig = _spie(['_fit_voxels_3iso_v3', '_fit_voxels_2iso_v3'])
+    visti = set()
+    orig = {n: getattr(M, n) for n in ('_fit_voxels_3iso_v3', '_fit_voxels_2iso_v3')}
+    def spia(f):
+        def _(data_, coords, *a, **k):
+            visti.update(map(tuple, np.asarray(coords).tolist())); return f(data_, coords, *a, **k)
+        return _
+    for n, f in orig.items():
+        setattr(M, n, spia(f))
     try:
         with contextlib.redirect_stdout(io.StringIO()):
             rec = m.calibrate(data, bvals, bvecs, mask, n_calibration_voxels=40)
     finally:
         _ripristina(orig)
-    assert not chiamati, f'calibrate() ha lanciato il fit voxel per voxel: {chiamati}'
+    print(f'  kernel su {len(visti)} voxel distinti (maschera {int(mask.sum())}, campione 40)')
+    assert len(visti) <= 40, f'calibrate() ha fittato {len(visti)} voxel: piu del campione'
+    assert rec['two_vs_one']['source'] == 'measured' and rec['two_vs_one']['n_voxels'] > 0
     assert m.lambda_aniso is None and m.lambda_iso is None and m.n_iso is None, (
         'calibrate() ha modificato il modello su cui e stato chiamato')
     json.dumps(rec)                                   # deve essere serializzabile

@@ -344,6 +344,28 @@ _DEFAULT_CROSSING_DIR_REFINE = True
 _DEFAULT_TWO_VS_ONE_THRESHOLD = 12.0
 _TWO_VS_ONE_CANDIDATE_RATIO = 0.0     # any separated secondary peak is a candidate
 
+# THE THRESHOLD IN UNITS OF THE NOISE ACTUALLY IN THE DATA (v1.10.0). stat21 divides
+# by sigma_map^2, so 12 means "12 noise variances" only if the noise map is the noise
+# the DWI carries. On synthetic data it is (residual_over_sigma median 1.00); on the
+# real 1.9.0 fits it is not: median 0.75-0.95 on the five protocols and BR/BT of the
+# same subject (P3 0.770), i.e. the noise in the data is 56-90% of sigma_map^2 (an
+# upper bound: misfit only inflates the residual). There 12 acted as 13-21 true noise
+# variances -- a stricter test than the one validated, and differently strict from
+# protocol to protocol. The applied threshold is therefore
+#     T = two_vs_one_threshold * c,   c = min(1, median(residual_over_sigma)^2),
+# c measured on the calibration voxels with a short fit at the calibrated lambdas
+# (`_measure_two_vs_one_noise_ratio`). A protocol calibration fixes ONE c for the
+# protocol (median over its acquisitions), like the lambdas; a free fit measures its
+# own; a fit with lambdas given by hand and no calibration keeps c = 1. Never c from
+# the SNR: under the null stat21 does not depend on it (false crossings 2.4/1.1/1.4%
+# at SNR 15/26/40 with the same 12), and an SNR rule would make the false-crossing
+# rate differ between groups that differ in SNR. c is capped at 1: above 1 the
+# residual cannot tell misfit from noise the map misses, and the map is the declared
+# noise. Below _TWO_VS_ONE_NOISE_RATIO_WARN the run report warns: the map and the
+# data then disagree by more than interpolation explains.
+_TWO_VS_ONE_NOISE_RATIO_MAX = 1.0
+_TWO_VS_ONE_NOISE_RATIO_WARN = 0.3
+
 # Local-maxima peak-finding neighbourhood size for `select_dominant_directions`
 # (see core.solvers module notes just above that function). Re-validated
 # 2026-07-15 (post sign-bug and detection-fix, k in {4,6,8,10,12}, n_dirs=62,
@@ -2240,6 +2262,16 @@ class DBSI_Adaptive:
     target_angular_resolution_deg : float
         Desired final angular precision (degrees) of the refined
         directions. Default: 1.0.
+    two_vs_one_threshold : float or None
+        Two-vs-one population test (v1.9.0): a crossing candidate stays a
+        crossing only if it lowers the Stage D residual by at least this many
+        noise variances. Default 12; None switches the test off.
+    two_vs_one_noise_ratio : float in (0, 1] or None
+        c in the applied threshold `two_vs_one_threshold * c` (v1.10.0): the
+        noise in the data over sigma_map^2. None: measured on the calibration
+        voxels when this fit calibrates the lambdas, fixed by the protocol
+        calibration with `from_calibration`, 1.0 otherwise. See
+        _TWO_VS_ONE_NOISE_RATIO_MAX.
 
     """
 
@@ -2271,7 +2303,8 @@ class DBSI_Adaptive:
                  uncertainty=True,
                  crossing_ff_kappa=_DEFAULT_CROSSING_FF_KAPPA,
                  crossing_dir_refine=_DEFAULT_CROSSING_DIR_REFINE,
-                 two_vs_one_threshold=_DEFAULT_TWO_VS_ONE_THRESHOLD):
+                 two_vs_one_threshold=_DEFAULT_TWO_VS_ONE_THRESHOLD,
+                 two_vs_one_noise_ratio=None):
         self.n_iso = n_iso
         self.lambda_aniso = lambda_aniso
         self.lambda_iso = lambda_iso
@@ -2319,6 +2352,11 @@ class DBSI_Adaptive:
                 raise ValueError('two_vs_one_threshold needs Stage D (iso_resolve=True): '
                                  'the test is defined on the Stage D model')
         self.two_vs_one_threshold = two_vs_one_threshold
+        if two_vs_one_noise_ratio is not None and not (
+                0.0 < two_vs_one_noise_ratio <= _TWO_VS_ONE_NOISE_RATIO_MAX):
+            raise ValueError('two_vs_one_noise_ratio must be None (measured) or in (0, 1]')
+        self.two_vs_one_noise_ratio = (None if two_vs_one_noise_ratio is None
+                                       else float(two_vs_one_noise_ratio))
 
         self.model_mode_ = None
         self.b_max_ = None
@@ -2332,6 +2370,7 @@ class DBSI_Adaptive:
         self.fiber_detection_ = None
         self.two_vs_one_stat_ = None
         self.two_vs_one_ = None
+        self.two_vs_one_noise_ratio_ = None
         self.fiber_threshold_final_ = None
         self.uncertainty_ = None
         self.uncertainty_summary_ = None
@@ -2383,6 +2422,10 @@ class DBSI_Adaptive:
                        anisotropy_ratio=float(mo['anisotropy_ratio']),
                        fiber_threshold=float(mo['fiber_threshold']),
                        iso_range=tuple(float(x) for x in mo['iso_range']))
+        # v1.10.0: c of the two-vs-one threshold, one per protocol. A calibration
+        # written before 1.10.0 has none: the fit then keeps c = 1 and says so.
+        if h.get('two_vs_one_noise_ratio') is not None:
+            fissati['two_vs_one_noise_ratio'] = float(h['two_vs_one_noise_ratio'])
         conflitti = sorted(set(overrides) & set(fissati))
         if conflitti:
             raise ValueError(f'{conflitti} are fixed by the protocol calibration: '
@@ -2460,6 +2503,7 @@ class DBSI_Adaptive:
         self.fiber_detection_ = None
         self.two_vs_one_stat_ = None
         self.two_vs_one_ = None
+        self.two_vs_one_noise_ratio_ = None
         self.fiber_threshold_final_ = None
         self.uncertainty_ = None
         self.uncertainty_summary_ = None
@@ -2796,12 +2840,12 @@ class DBSI_Adaptive:
         # bvals e SNR, 'quadrature' e 'fixed' sono costanti. Se serve piu' avanti
         # (lambda, SURE) viene campionato li', con lo stesso seme.
         _seleziona_n_iso = (self.n_iso is None and n_iso_method == 'bootstrap')
-        y_cal, sigma_cal = None, None
+        y_cal, sigma_cal, _cal_coords = None, None, None
         if _seleziona_n_iso or (run_calibration and
                                 (self.lambda_aniso is None or self.lambda_iso is None)):
-            y_cal, sigma_cal = sample_calibration_voxels(
+            y_cal, sigma_cal, _cal_coords = sample_calibration_voxels(
                 data_corr, mask, bvals, n_voxels=n_calibration_voxels, seed=0,
-                noise_map=noise_map,
+                noise_map=noise_map, return_coords=True,
             )
             print(f"\n   Sampled {len(y_cal)} calibration voxels from the brain mask "
                   f"(sigma_normalised={sigma_cal:.5f})")
@@ -2961,9 +3005,9 @@ class DBSI_Adaptive:
             print(f"\n5. Calibrating (lambda_aniso, lambda_iso) — DATA-DRIVEN "
                   f"(GCV + discrepancy principle)...")
             if y_cal is None:
-                y_cal, sigma_cal = sample_calibration_voxels(
+                y_cal, sigma_cal, _cal_coords = sample_calibration_voxels(
                     data_corr, mask, bvals, n_voxels=n_calibration_voxels,
-                    seed=0, noise_map=noise_map,
+                    seed=0, noise_map=noise_map, return_coords=True,
                 )
                 print(f"   Sampled {len(y_cal)} calibration voxels from the "
                       f"brain mask (sigma_normalised={sigma_cal:.5f})")
@@ -3169,6 +3213,13 @@ class DBSI_Adaptive:
             self.min_dominant_concentration = _gate_mc
             self.concentration_gate_diag_ = _gate_diag
 
+        # ── c della soglia del test 2-contro-1 (v1.10.0) ────────────────────
+        # Misurato qui, a lambda scelti, sugli stessi voxel della calibrazione;
+        # vedi _TWO_VS_ONE_NOISE_RATIO_MAX.
+        self.two_vs_one_noise_ratio_ = self._resolve_two_vs_one_noise_ratio(
+            data, bvals, bvecs, noise_map,
+            _cal_coords if (run_calibration and self.calibration_curves_ is not None) else None)
+
         # ── Solo calibrazione: ci si ferma qui, prima del fit voxel per voxel ──
         if _calibration_only:
             return self._calibration_record(
@@ -3237,8 +3288,12 @@ class DBSI_Adaptive:
 
         _test21 = self.two_vs_one_threshold is not None
         if _test21:
+            _nr = self.two_vs_one_noise_ratio_ or {}
+            _c21 = float(_nr.get('applied', 1.0))
+            _thr21 = float(self.two_vs_one_threshold) * _c21
             print(f"   Two-vs-one population test: ENABLED (threshold "
-                  f"{float(self.two_vs_one_threshold):g} noise variances; every separated "
+                  f"{float(self.two_vs_one_threshold):g} x c {_c21:.3f} = {_thr21:.2f} map noise "
+                  f"variances, c {_nr.get('source', 'nominal')}; every separated "
                   f"secondary peak is a candidate, also fitted as a single fiber)")
         # The single-fiber alternative of every crossing candidate is written here by
         # the kernel itself, from the same Stage A (see _two_vs_one_pass). Without
@@ -3295,14 +3350,18 @@ class DBSI_Adaptive:
             _iso_d21 = np.array(_ISO_RESOLVE_D_3ISO if use_3iso else _ISO_RESOLVE_D_2ISO,
                                 dtype=np.float64)
             _two_vs_one_pass(data_corr, _cand, bvals, bvecs, b0_thr, _iso_d21, sigma_map,
-                             float(self.two_vs_one_threshold), results, _alt, _stat21)
+                             _thr21, results, _alt, _stat21)
             del _alt
             self.two_vs_one_stat_ = _stat21
             _sv21 = _stat21[np.isfinite(_stat21)]
             _q21 = (np.percentile(_sv21, [5, 50, 95]).tolist() if _sv21.size else [None] * 3)
             _kept = int(np.sum(results[_cand[:, 0], _cand[:, 1], _cand[:, 2], _C_NPOP] >= 2))
             self.two_vs_one_ = dict(
-                threshold=float(self.two_vs_one_threshold),
+                threshold=_thr21,
+                threshold_nominal=float(self.two_vs_one_threshold),
+                noise_ratio_c=_c21,
+                noise_ratio_source=str(_nr.get('source', 'nominal')),
+                residual_over_sigma_measured=_nr.get('residual_over_sigma_median'),
                 statistic='(RSS_1pop - RSS_2pop) / sigma_voxel^2, Stage D model, before the fiber threshold',
                 n_candidates=int(len(_cand)), n_tested=int(_sv21.size),
                 n_kept_crossing=_kept,
@@ -3585,6 +3644,98 @@ class DBSI_Adaptive:
               f"{n_gone:,} of {n_had:,} fiber voxels lose their fiber "
               f"({100 * (n_gone / n_had if n_had else 0):.1f}%)")
 
+    def _resolve_two_vs_one_noise_ratio(self, data, bvals, bvecs, noise_map, cal_coords):
+        """c of the two-vs-one threshold (v1.10.0), with where it comes from.
+
+        Given (protocol or user) > measured on `cal_coords` (this fit calibrated
+        the lambdas) > nominal 1. See _TWO_VS_ONE_NOISE_RATIO_MAX."""
+        if self.two_vs_one_threshold is None:
+            return dict(source='test off', applied=None)
+        if self.two_vs_one_noise_ratio is not None:
+            return dict(source='protocol' if self.protocol_calibration_ else 'user',
+                        applied=float(self.two_vs_one_noise_ratio))
+        if cal_coords is None or len(cal_coords) == 0:
+            note = ('protocol calibration written before 1.10.0 (no c)'
+                    if self.protocol_calibration_ else
+                    'lambdas not calibrated in this fit')
+            return dict(source='nominal', applied=1.0, note=note)
+        m = self._measure_two_vs_one_noise_ratio(data, bvals, bvecs, noise_map, cal_coords)
+        c = m['noise_ratio_measured']
+        applied = float(min(c, _TWO_VS_ONE_NOISE_RATIO_MAX)) if np.isfinite(c) else 1.0
+        out = dict(source='measured', applied=applied, **m)
+        print(f"   Two-vs-one noise ratio c: residual/sigma median "
+              f"{m['residual_over_sigma_median']:.3f} on {m['n_voxels']} calibration voxels "
+              f"-> c {c:.3f}, applied {applied:.3f}  ({m['seconds']:.0f}s)")
+        if applied < _TWO_VS_ONE_NOISE_RATIO_WARN:
+            out['warning'] = (f'c = {applied:.3f}: the noise in the data is far below the '
+                              f'noise map -- check that the map belongs to these data')
+            print(f"  [WARNING] {out['warning']}")
+        return out
+
+    def _measure_two_vs_one_noise_ratio(self, data, bvals, bvecs, noise_map, coords):
+        """median(residual_over_sigma)^2 of a fit on `coords` at the current lambdas.
+
+        A copy of this model, with c = 1, is fitted on the calibration voxels only
+        (the fit is voxel-wise, so the sub-mask changes nothing in those voxels);
+        residual_over_sigma is the dof-corrected residual of the reported model
+        over sigma_map / S0, the same quantity as in the run report."""
+        import copy, contextlib, io
+        m = copy.deepcopy(self)
+        m.two_vs_one_noise_ratio = 1.0
+        m.uncertainty = True
+        sub = np.zeros(data.shape[:3], dtype=bool)
+        sub[coords[:, 0], coords[:, 1], coords[:, 2]] = True
+        t0 = time.time()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            m.fit(data, bvals, bvecs, sub, run_calibration=False, noise_map=noise_map)
+        rr = np.asarray(m.uncertainty_['residual_over_sigma'])[sub]
+        rr = rr[np.isfinite(rr)]
+        med = float(np.median(rr)) if rr.size else float('nan')
+        return dict(residual_over_sigma_median=med,
+                    residual_over_sigma_p25=float(np.percentile(rr, 25)) if rr.size else None,
+                    residual_over_sigma_p75=float(np.percentile(rr, 75)) if rr.size else None,
+                    noise_ratio_measured=med ** 2, n_voxels=int(rr.size),
+                    seconds=round(time.time() - t0, 1))
+
+    @classmethod
+    def add_two_vs_one_noise_ratio(cls, record, data, bvals, bvecs, mask, noise_map,
+                                   n_calibration_voxels=1000):
+        """Complete a `calibrate()` record written before 1.10.0 with c (v1.10.0).
+
+        The lambda calibration is the expensive part of `calibrate()` and c does
+        not change it: rebuild the model at the record's lambdas, n_iso, gate and
+        dictionary options, and measure c exactly as `calibrate()` does, on a
+        seed-0 sample of the mask of the same size. The voxels may differ from
+        those of the lambda calibration (that sample is drawn after the Rician
+        correction); it is a sample of the same mask. Returns a NEW record whose
+        `two_vs_one` block says it was completed afterwards."""
+        import copy
+        from .calibration.protocol import protocol_fingerprint, fingerprint_mismatches
+        if record.get('kind') != 'pydbsi_acquisition_calibration':
+            raise ValueError('not a record from calibrate()')
+        mm = fingerprint_mismatches(record['protocol'], protocol_fingerprint(bvals))
+        if mm:
+            raise ValueError(f'these data do not have the record\'s protocol: {[m[0] for m in mm]}')
+        h, mo = record['hyperparameters'], record['model']
+        m = cls(lambda_aniso=float(h['lambda_aniso']), lambda_iso=float(h['lambda_iso']),
+                n_iso=int(h['n_iso']), min_dominant_concentration=float(h['concentration_gate']),
+                lambda_aniso_method=str(h['lambda_aniso_method']),
+                n_dirs=int(mo['n_dirs']), n_ad=int(mo['n_ad']), n_rd=int(mo['n_rd']),
+                anisotropy_ratio=float(mo['anisotropy_ratio']),
+                fiber_threshold=float(mo['fiber_threshold']),
+                iso_range=tuple(float(x) for x in mo['iso_range']))
+        _, _, coords = sample_calibration_voxels(
+            np.asarray(data, np.float64), np.asarray(mask, bool), bvals,
+            n_voxels=n_calibration_voxels, seed=0, noise_map=noise_map, return_coords=True)
+        meas = m._measure_two_vs_one_noise_ratio(data, bvals, bvecs, noise_map, coords)
+        c = meas['noise_ratio_measured']
+        rec = copy.deepcopy(record)
+        rec['two_vs_one'] = dict(
+            threshold_nominal=m.two_vs_one_threshold, source='measured',
+            applied=float(min(c, _TWO_VS_ONE_NOISE_RATIO_MAX)) if np.isfinite(c) else 1.0,
+            completed='after the fact, by add_two_vs_one_noise_ratio', **meas)
+        return rec
+
     # ------------------------------------------------------------------
     def calibrate(self, data, bvals, bvecs, mask, n_calibration_voxels=1000,
                   lambda_aniso_grid=None, lambda_iso_grid=None,
@@ -3685,6 +3836,10 @@ class DBSI_Adaptive:
             curves=dict(
                 lambda_aniso={k: v for k, v in an.items()},
                 lambda_iso=dict(lambda_grid=gi.get('lambda_'), gcv=gi.get('gcv'))),
+            # v1.10.0: c of the two-vs-one threshold, measured at this acquisition's
+            # lambdas; the protocol calibration aggregates it.
+            two_vs_one=dict(threshold_nominal=self.two_vs_one_threshold,
+                            **{k: v for k, v in (self.two_vs_one_noise_ratio_ or {}).items()}),
             model=dict(n_dirs=self.n_dirs, n_ad=self.n_ad, n_rd=self.n_rd,
                        anisotropy_ratio=self.anisotropy_ratio,
                        fiber_threshold=self.fiber_threshold,

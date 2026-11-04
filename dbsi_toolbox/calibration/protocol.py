@@ -102,7 +102,11 @@ LAMBDA_ISO_CAP_RULES = ('min', 'median', 'none')
 # lambda: devono coincidere fra le acquisizioni e vengono imposte da
 # `DBSI_Adaptive.from_calibration`.
 _MODEL_KEYS = ('n_dirs', 'n_ad', 'n_rd', 'anisotropy_ratio', 'fiber_threshold',
-               'iso_range')
+               'iso_range', 'iso_thresholds', 'iso_centroids', 'iso_centroid_nrf')
+# v1.10.0: compartment boundaries and Stage D centroids. Records written before
+# carry neither: they were calibrated with the defaults, which stand in for them.
+_MODEL_DEFAULTS = dict(iso_thresholds=[0.3e-3, 3.0e-3],
+                       iso_centroids=[0.15e-3, 1.0e-3, 3.0e-3], iso_centroid_nrf=1.5e-3)
 
 
 def _idx_on_grid(value, grid):
@@ -207,7 +211,8 @@ def calibrate_protocol(records, name=None, ids=None, rule='geomean',
         if mm:
             raise ValueError(f'acquisition {ids[i]}: protocol fingerprint differs from {ids[0]} in '
                              f'{[m[0] for m in mm]}')
-    model = {k: _same([r['model'][k] for r in records], f'model option {k}')
+    model = {k: _same([r['model'].get(k, _MODEL_DEFAULTS.get(k)) for r in records],
+                      f'model option {k}')
              for k in _MODEL_KEYS}
     hp = [r['hyperparameters'] for r in records]
     n_iso = _same([h['n_iso'] for h in hp], 'n_iso')

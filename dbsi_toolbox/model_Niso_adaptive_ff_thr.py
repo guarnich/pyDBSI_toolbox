@@ -169,8 +169,68 @@ FIBER_THRESHOLD = 0.15      # dimensionless — minimum FF for AD/RD estimation
 # un candidato fine sarebbe zero per costruzione.
 _N_ISO_REF_STEPS = 48
 
-THRESH_RES = 0.3e-3          # mm^2/s — restricted / hindered boundary
-THRESH_WAT = 3.0e-3          # mm^2/s — hindered  / free-water boundary
+THRESH_RES = 0.3e-3          # mm^2/s — restricted / hindered boundary (default)
+THRESH_WAT = 3.0e-3          # mm^2/s — hindered  / free-water boundary (default)
+# Sources of the defaults (checked against the papers, 2026-11-03): 0.3 um^2/ms as
+# the restricted / non-restricted boundary in Wang et al. 2015 (Brain 138:1223) and
+# Wang Q et al. 2019 (NeuroImage: Clinical 22:101767); the three classes RF <= 0.3,
+# HF 0.3-3, WF >= 3 in Ye et al. 2020 (Ann Clin Transl Neurol 7:695). Not a
+# consensus: tumour studies use RF <= 1.0, HF 1.0-1.5, non-restricted > 1.5
+# (Han et al. 2023, Neuro-Oncol Adv 5:vdad050; Zhu et al. 2026, JMRI).
+#
+# CONFIGURABLE (v1.10.0): `iso_thresholds` and `iso_centroids` of DBSI_Adaptive. The
+# reported RF/HF/WF are the weights of the Stage D centroids, NOT bins of a spectrum,
+# so the two are set together: thresholds alone would leave a centroid in the wrong
+# class (Han's 1.0 boundary would put the HF centroid 1.0 in RF). The thresholds
+# still bin Stage A's spectrum (the iso signal given to Stage B/C, the grid anchors);
+# the centroids are the estimator of the reported fractions. Each centroid must sit
+# in its class: c_RF <= t_RF < c_HF < t_WF <= c_WF (c_WF may sit ON t_WF, as 3.0 does).
+# Inside the numba kernels the configuration travels as one float64 array, laid out
+# by the _CFG_* indices below.
+_CFG_T_RES, _CFG_T_WAT, _CFG_C_RF, _CFG_C_HF, _CFG_C_WF, _CFG_C_NRF = range(6)
+
+
+def _resolve_iso_classes(iso_thresholds, iso_centroids, iso_centroid_nrf):
+    """Validated (thresholds, 3-ISO centroids, 2-ISO NRF centroid or None), mm^2/s.
+
+    With the default thresholds the default centroids apply. With other thresholds
+    the centroids must be given: they ARE the estimator of the reported fractions,
+    and no rule for them is neutral (see the THRESH_RES block)."""
+    def _vals(v, n, nome):
+        try:
+            v = tuple(float(x) for x in v)
+        except TypeError:
+            raise ValueError(f'{nome} must be a sequence of {n} numbers, got {v!r}')
+        if len(v) != n or not all(np.isfinite(x) and x > 0 for x in v):
+            raise ValueError(f'{nome} must be {n} positive numbers, got {v!r}')
+        if max(v) > 0.05:
+            raise ValueError(f'{nome} = {v}: these are mm^2/s (e.g. 0.3e-3); the values '
+                             f'look like um^2/ms. Divide by 1000 (the CLI takes um^2/ms).')
+        return v
+    t_res, t_wat = _vals(iso_thresholds, 2, 'iso_thresholds')
+    if not t_res < t_wat:
+        raise ValueError(f'iso_thresholds must increase (RF|HF < HF|WF), got {(t_res, t_wat)}')
+    default = np.allclose((t_res, t_wat), (THRESH_RES, THRESH_WAT), rtol=0, atol=1e-12)
+    if iso_centroids is None:
+        if not default:
+            raise ValueError(
+                f'iso_thresholds {(t_res, t_wat)} are not the defaults: give iso_centroids '
+                f'(RF, HF, WF) too. The reported fractions are the weights of these '
+                f'centroids, each inside its class: c_RF <= {t_res:g} < c_HF < {t_wat:g} '
+                f'<= c_WF.')
+        iso_centroids = _ISO_RESOLVE_D_3ISO
+    c_rf, c_hf, c_wf = _vals(iso_centroids, 3, 'iso_centroids')
+    if not (c_rf <= t_res < c_hf < t_wat <= c_wf):
+        raise ValueError(f'iso_centroids {(c_rf, c_hf, c_wf)} not each inside its class: '
+                         f'need c_RF <= {t_res:g} < c_HF < {t_wat:g} <= c_WF')
+    if iso_centroid_nrf is None and default:
+        iso_centroid_nrf = _ISO_RESOLVE_D_2ISO[1]
+    if iso_centroid_nrf is not None:
+        (c_nrf,) = _vals((iso_centroid_nrf,), 1, 'iso_centroid_nrf')
+        if not c_nrf > t_res:
+            raise ValueError(f'iso_centroid_nrf {c_nrf:g} must be above the RF threshold {t_res:g}')
+        iso_centroid_nrf = c_nrf
+    return (t_res, t_wat), (c_rf, c_hf, c_wf), iso_centroid_nrf
 
 # 3-ISO is now the DEFAULT for any multi-shell protocol (>=2 shells, b_max
 # >= 2000). Lowered from (b_max>=3000 AND >=3 shells) on the strength of the
@@ -602,8 +662,11 @@ _NOISE_MAP_HELP = (
     "'dwibiascorrect ants ... -bias bias.nii.gz', then 'mrcalc noise.nii.gz bias.nii.gz -div -finite "
     "noise.nii.gz bias.nii.gz -div 0 -if noise_N4.nii.gz'. The b=0 temporal sigma is not a substitute: "
     "it also contains physiological variability (README, 'Noise').")
-_ISO_RESOLVE_D_3ISO = (0.15e-3, 1.0e-3, 3.0e-3)   # RF, HF, WF centroids
-_ISO_RESOLVE_D_2ISO = (0.15e-3, 1.5e-3)            # RF, NRF centroids (single-shell)
+_ISO_RESOLVE_D_3ISO = (0.15e-3, 1.0e-3, 3.0e-3)   # RF, HF, WF centroids (default)
+_ISO_RESOLVE_D_2ISO = (0.15e-3, 1.5e-3)            # RF, NRF centroids (single-shell, default)
+# Not from the literature: a modelling choice. 0.15 is the middle of the default RF
+# band, 1.0 sits in HF (~ the geometric mean of 0.3 and 3.0), 3.0 is free water at
+# 37 C; 1.5 represents HF+WF together when they cannot be separated.
 
 # Monte-Carlo null calibration of the concentration gate (see
 # calibration.data_driven.calibrate_concentration_gate_mc). When calibration
@@ -773,7 +836,7 @@ def _single_fiber_2iso(arr, x, y, z, dominant_dir, sig_norm, bvals, bvecs, b0_th
                        stagec_enabled, stagec_dir_refine, enable_direction_refinement,
                        cone1_half_angle, n1_cone, cone2_half_angle, n2_cone,
                        data_raw, stagec_iso_grid, iso_forward, iso_gram,
-                       stagec_ad_grid, stagec_rd_grid, stagec_aniso_ratio):
+                       stagec_ad_grid, stagec_rd_grid, stagec_aniso_ratio, iso_cfg):
     """Single-fiber Stage B/C for one voxel, written into `arr` at (x, y, z): cone on
     the direction, then Stage C (or the closed-form Stage B without it). The body of the
     kernels' n_pop == 1 branch, COPIED here (v1.9.0) so that the two-vs-one test can fit
@@ -832,7 +895,7 @@ def _single_fiber_2iso(arr, x, y, z, dominant_dir, sig_norm, bvals, bvecs, b0_th
             for i in range(n_iso_sc):
                 wi = w_sc[1 + i]
                 adc = stagec_iso_grid[i]
-                if adc <= THRESH_RES:
+                if adc <= iso_cfg[_CFG_T_RES]:
                     res_sc += wi
                 else:
                     nonrf_sc += wi
@@ -880,7 +943,7 @@ def _single_fiber_3iso(arr, x, y, z, dominant_dir, sig_norm, bvals, bvecs, b0_th
                        stagec_enabled, stagec_dir_refine, enable_direction_refinement,
                        cone1_half_angle, n1_cone, cone2_half_angle, n2_cone,
                        data_raw, stagec_iso_grid, iso_forward, iso_gram,
-                       stagec_ad_grid, stagec_rd_grid, stagec_aniso_ratio):
+                       stagec_ad_grid, stagec_rd_grid, stagec_aniso_ratio, iso_cfg):
     """Single-fiber Stage B/C for one voxel, written into `arr` at (x, y, z): cone on
     the direction, then Stage C (or the closed-form Stage B without it). The body of the
     kernels' n_pop == 1 branch, COPIED here (v1.9.0) so that the two-vs-one test can fit
@@ -935,9 +998,9 @@ def _single_fiber_3iso(arr, x, y, z, dominant_dir, sig_norm, bvals, bvecs, b0_th
             for i in range(n_iso_sc):
                 wi = w_sc[1 + i]
                 adc = stagec_iso_grid[i]
-                if adc <= THRESH_RES:
+                if adc <= iso_cfg[_CFG_T_RES]:
                     res_sc += wi
-                elif adc <= THRESH_WAT:
+                elif adc <= iso_cfg[_CFG_T_WAT]:
                     hin_sc += wi
                 else:
                     wat_sc += wi
@@ -996,7 +1059,7 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         stagec_ad_grid, stagec_rd_grid, stagec_aniso_ratio,
                         data_raw, stagec_iso_grid, stagec_dir_refine,
                         crossing_ff_kappa, sigma_map, crossing_dir_refine,
-                        two_vs_one, alt_out):
+                        two_vs_one, alt_out, iso_cfg):
     """
     v3 parallel fitting kernel — two-compartment isotropic model (2-ISO).
 
@@ -1084,7 +1147,7 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
         for i in range(n_iso):
             adc = iso_grid[i]
             wi = w_iso[i]
-            if adc <= THRESH_RES:
+            if adc <= iso_cfg[_CFG_T_RES]:
                 f_res_raw += wi
                 sum_res_w += wi
                 sum_res_wd += wi * adc
@@ -1096,8 +1159,8 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
             sum_wd_iso += wi * adc
 
         mean_iso_adc = sum_wd_iso / sum_w_iso if sum_w_iso > 1e-10 else 0.0
-        D_res_c = sum_res_wd / sum_res_w if sum_res_w > 1e-10 else 0.15e-3
-        D_nonrf_c = sum_nonrf_wd / sum_nonrf_w if sum_nonrf_w > 1e-10 else 1.5e-3
+        D_res_c = sum_res_wd / sum_res_w if sum_res_w > 1e-10 else iso_cfg[_CFG_C_RF]
+        D_nonrf_c = sum_nonrf_wd / sum_nonrf_w if sum_nonrf_w > 1e-10 else iso_cfg[_CFG_C_NRF]
 
         ftot = f_fib_raw + f_res_raw + f_nonrf_raw
         if ftot < 1e-10:
@@ -1186,7 +1249,7 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         for i in range(n_iso_sc):
                             wi = w_sc[1 + i]
                             adc = stagec_iso_grid[i]
-                            if adc <= THRESH_RES:
+                            if adc <= iso_cfg[_CFG_T_RES]:
                                 res_sc += wi
                             else:
                                 nonrf_sc += wi
@@ -1321,7 +1384,7 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         stagec_enabled, stagec_dir_refine, enable_direction_refinement,
                         cone1_half_angle, n1_cone, cone2_half_angle, n2_cone,
                         data_raw, stagec_iso_grid, iso_forward, iso_gram,
-                        stagec_ad_grid, stagec_rd_grid, stagec_aniso_ratio)
+                        stagec_ad_grid, stagec_rd_grid, stagec_aniso_ratio, iso_cfg)
 
 
 @njit(parallel=True, cache=True, fastmath=FASTMATH)
@@ -1338,7 +1401,7 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         stagec_ad_grid, stagec_rd_grid, stagec_aniso_ratio,
                         data_raw, stagec_iso_grid, stagec_dir_refine,
                         crossing_ff_kappa, sigma_map, crossing_dir_refine,
-                        two_vs_one, alt_out):
+                        two_vs_one, alt_out, iso_cfg):
     """v3 parallel fitting kernel — three-compartment isotropic model
     (3-ISO). Same Stage A / Stage B (+ MRDS multi-fiber) structure as
     `_fit_voxels_2iso_v3`; see that kernel's docstring for the full
@@ -1413,11 +1476,11 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
         for i in range(n_iso):
             adc = iso_grid[i]
             wi = w_iso[i]
-            if adc <= THRESH_RES:
+            if adc <= iso_cfg[_CFG_T_RES]:
                 f_res_raw += wi
                 sum_res_w += wi
                 sum_res_wd += wi * adc
-            elif adc <= THRESH_WAT:
+            elif adc <= iso_cfg[_CFG_T_WAT]:
                 f_hin_raw += wi
                 sum_hin_w += wi
                 sum_hin_wd += wi * adc
@@ -1429,9 +1492,9 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
             sum_wd_iso += wi * adc
 
         mean_iso_adc = sum_wd_iso / sum_w_iso if sum_w_iso > 1e-10 else 0.0
-        D_res_c = sum_res_wd / sum_res_w if sum_res_w > 1e-10 else 0.15e-3
-        D_hin_c = sum_hin_wd / sum_hin_w if sum_hin_w > 1e-10 else 1.00e-3
-        D_wat_c = sum_wat_wd / sum_wat_w if sum_wat_w > 1e-10 else 3.00e-3
+        D_res_c = sum_res_wd / sum_res_w if sum_res_w > 1e-10 else iso_cfg[_CFG_C_RF]
+        D_hin_c = sum_hin_wd / sum_hin_w if sum_hin_w > 1e-10 else iso_cfg[_CFG_C_HF]
+        D_wat_c = sum_wat_wd / sum_wat_w if sum_wat_w > 1e-10 else iso_cfg[_CFG_C_WF]
 
         ftot = f_fib_raw + f_res_raw + f_hin_raw + f_wat_raw
         if ftot < 1e-10:
@@ -1514,9 +1577,9 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         for i in range(n_iso_sc):
                             wi = w_sc[1 + i]
                             adc = stagec_iso_grid[i]
-                            if adc <= THRESH_RES:
+                            if adc <= iso_cfg[_CFG_T_RES]:
                                 res_sc += wi
-                            elif adc <= THRESH_WAT:
+                            elif adc <= iso_cfg[_CFG_T_WAT]:
                                 hin_sc += wi
                             else:
                                 wat_sc += wi
@@ -1649,7 +1712,7 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         stagec_enabled, stagec_dir_refine, enable_direction_refinement,
                         cone1_half_angle, n1_cone, cone2_half_angle, n2_cone,
                         data_raw, stagec_iso_grid, iso_forward, iso_gram,
-                        stagec_ad_grid, stagec_rd_grid, stagec_aniso_ratio)
+                        stagec_ad_grid, stagec_rd_grid, stagec_aniso_ratio, iso_cfg)
 
 
 @njit(parallel=True, cache=True, fastmath=FASTMATH)
@@ -1748,10 +1811,11 @@ def _iso_resolve_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso, 
         wat = 0.0
         for j in range(n_iso):
             wj = w_out[n_fib + j] / tot
-            dj = iso_d[j]
-            if dj <= THRESH_RES:
+            # class by POSITION (v1.10.0): iso_d is (RF, HF, WF) or (RF, NRF), each
+            # centroid validated inside its class; NRF is accumulated in `hin`.
+            if j == 0:
                 res += wj
-            elif dj < THRESH_WAT:   # strict: the WF centroid sits AT THRESH_WAT
+            elif j == 1:
                 hin += wj
             else:
                 wat += wj
@@ -1914,11 +1978,10 @@ def _fiber_detection_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3i
             res = 0.0
             hin = 0.0
             wat = 0.0
-            for j in range(n_iso):
-                dj = iso_d[j]
-                if dj <= THRESH_RES:
+            for j in range(n_iso):        # class by position, as in _iso_resolve_pass
+                if j == 0:
                     res += w_i[j] / tot
-                elif dj < THRESH_WAT:
+                elif j == 1:
                     hin += w_i[j] / tot
                 else:
                     wat += w_i[j] / tot
@@ -2240,6 +2303,18 @@ class DBSI_Adaptive:
     target_angular_resolution_deg : float
         Desired final angular precision (degrees) of the refined
         directions. Default: 1.0.
+    iso_thresholds : (float, float)
+        Compartment boundaries RF|HF and HF|WF, mm^2/s (v1.10.0). Default
+        (0.3e-3, 3.0e-3). Tumour studies use (1.0e-3, 1.5e-3).
+    iso_centroids : (float, float, float) or None
+        Stage D centroids (RF, HF, WF), mm^2/s: the reported fractions are their
+        weights. Required when the thresholds are not the defaults; each inside
+        its class, c_RF <= t_RF < c_HF < t_WF <= c_WF. Default (0.15e-3, 1.0e-3,
+        3.0e-3).
+    iso_centroid_nrf : float or None
+        The single non-restricted centroid of the 2-ISO fallback (single-shell
+        protocols). Default 1.5e-3 with the default thresholds; required for a
+        2-ISO fit with other thresholds.
 
     """
 
@@ -2271,7 +2346,9 @@ class DBSI_Adaptive:
                  uncertainty=True,
                  crossing_ff_kappa=_DEFAULT_CROSSING_FF_KAPPA,
                  crossing_dir_refine=_DEFAULT_CROSSING_DIR_REFINE,
-                 two_vs_one_threshold=_DEFAULT_TWO_VS_ONE_THRESHOLD):
+                 two_vs_one_threshold=_DEFAULT_TWO_VS_ONE_THRESHOLD,
+                 iso_thresholds=(THRESH_RES, THRESH_WAT), iso_centroids=None,
+                 iso_centroid_nrf=None):
         self.n_iso = n_iso
         self.lambda_aniso = lambda_aniso
         self.lambda_iso = lambda_iso
@@ -2319,6 +2396,9 @@ class DBSI_Adaptive:
                 raise ValueError('two_vs_one_threshold needs Stage D (iso_resolve=True): '
                                  'the test is defined on the Stage D model')
         self.two_vs_one_threshold = two_vs_one_threshold
+        (self.iso_thresholds, self.iso_centroids,
+         self.iso_centroid_nrf) = _resolve_iso_classes(iso_thresholds, iso_centroids,
+                                                       iso_centroid_nrf)
 
         self.model_mode_ = None
         self.b_max_ = None
@@ -2382,7 +2462,12 @@ class DBSI_Adaptive:
                        n_dirs=int(mo['n_dirs']), n_ad=int(mo['n_ad']), n_rd=int(mo['n_rd']),
                        anisotropy_ratio=float(mo['anisotropy_ratio']),
                        fiber_threshold=float(mo['fiber_threshold']),
-                       iso_range=tuple(float(x) for x in mo['iso_range']))
+                       iso_range=tuple(float(x) for x in mo['iso_range']),
+                       # v1.10.0; a calibration written before has the defaults
+                       iso_thresholds=tuple(mo.get('iso_thresholds') or (THRESH_RES, THRESH_WAT)),
+                       iso_centroids=tuple(mo.get('iso_centroids') or _ISO_RESOLVE_D_3ISO),
+                       iso_centroid_nrf=(mo['iso_centroid_nrf'] if 'iso_centroid_nrf' in mo
+                                         else _ISO_RESOLVE_D_2ISO[1]))
         conflitti = sorted(set(overrides) & set(fissati))
         if conflitti:
             raise ValueError(f'{conflitti} are fixed by the protocol calibration: '
@@ -2572,6 +2657,10 @@ class DBSI_Adaptive:
 
         model_mode = 3 if use_3iso else 2
         self.model_mode_ = model_mode
+        if not use_3iso and self.iso_centroid_nrf is None:
+            raise ValueError('this acquisition is fitted 2-ISO (RF + NRF) and the thresholds '
+                             'are not the defaults: give iso_centroid_nrf, the non-restricted '
+                             f'centroid (above {self.iso_thresholds[0]:g} mm^2/s)')
 
         print(f"\n  Isotropic model selection: {reason}")
         print(f"\n  Active model: {model_mode}-ISO "
@@ -2834,7 +2923,7 @@ class DBSI_Adaptive:
                 _ref_grid_pre = generate_anchored_isotropic_grid(
                     d_min=max(self.iso_range[0], 0.1e-3), d_max=iso_d_max,
                     n_steps=_N_ISO_REF_STEPS,
-                    thresh_res=THRESH_RES, thresh_wat=THRESH_WAT,
+                    thresh_res=self.iso_thresholds[0], thresh_wat=self.iso_thresholds[1],
                 )
                 print(f"   Subtracting the fibre component first "
                       f"({len(_ref_grid_pre)}-column reference iso grid) — the "
@@ -2940,7 +3029,8 @@ class DBSI_Adaptive:
         # free water.
         iso_grid = generate_anchored_isotropic_grid(
             d_min=max(self.iso_range[0], 0.1e-3), d_max=iso_d_max,
-            n_steps=self.n_iso, thresh_res=THRESH_RES, thresh_wat=THRESH_WAT,
+            n_steps=self.n_iso, thresh_res=self.iso_thresholds[0],
+            thresh_wat=self.iso_thresholds[1],
         )
         # `n_iso` IS NOT THE NUMBER OF ISOTROPIC COMPONENTS. The anchored
         # constructor returns MORE points than n_steps (it pins a column on each
@@ -2952,8 +3042,8 @@ class DBSI_Adaptive:
         # components; it is eleven. Store the realised length so the report can
         # state the model order that was actually used.
         self.n_iso_columns_ = int(len(iso_grid))
-        self.n_iso_columns_res_ = int(np.sum(iso_grid <= THRESH_RES))
-        self.n_iso_columns_wat_ = int(np.sum(iso_grid > THRESH_WAT))
+        self.n_iso_columns_res_ = int(np.sum(iso_grid <= self.iso_thresholds[0]))
+        self.n_iso_columns_wat_ = int(np.sum(iso_grid > self.iso_thresholds[1]))
 
         # ── Calibration of (lambda_aniso, lambda_iso) ───────────────────────
         if run_calibration and (self.lambda_aniso is None or self.lambda_iso is None):
@@ -3044,12 +3134,12 @@ class DBSI_Adaptive:
               f"(on Stage A's FF for candidates, on the final FF for the reported tensor)")
         print(f"   Stage A min_weight_fraction: {self.min_weight_fraction:.2f}")
         _thresh_str = (
-            f"RF (ADC <= {THRESH_RES*1e3:.1f}x10^-3 mm^2/s) | "
-            f"HF ({THRESH_RES*1e3:.1f}-{THRESH_WAT*1e3:.0f}x10^-3 mm^2/s) | "
-            f"WF (ADC > {THRESH_WAT*1e3:.0f}x10^-3 mm^2/s)"
+            f"RF (ADC <= {self.iso_thresholds[0]*1e3:g}x10^-3 mm^2/s) | "
+            f"HF ({self.iso_thresholds[0]*1e3:g}-{self.iso_thresholds[1]*1e3:g}x10^-3 mm^2/s) | "
+            f"WF (ADC > {self.iso_thresholds[1]*1e3:g}x10^-3 mm^2/s)"
             if use_3iso else
-            f"RF (ADC <= {THRESH_RES*1e3:.1f}x10^-3 mm^2/s) | "
-            f"NRF (ADC > {THRESH_RES*1e3:.1f}x10^-3 mm^2/s)"
+            f"RF (ADC <= {self.iso_thresholds[0]*1e3:g}x10^-3 mm^2/s) | "
+            f"NRF (ADC > {self.iso_thresholds[0]*1e3:g}x10^-3 mm^2/s)"
         )
         print(f"   Compartments: {_thresh_str}")
         print(f"   NOTE: reported fractions are Stage D's (every voxel); fiber tensors "
@@ -3119,7 +3209,7 @@ class DBSI_Adaptive:
             n_iso=int(self.n_iso), lambda_aniso=float(self.lambda_aniso),
             lambda_iso=float(self.lambda_iso),
             condition_number_regularized=float(cond),
-            thresh_res=float(THRESH_RES), thresh_wat=float(THRESH_WAT),
+            thresh_res=float(self.iso_thresholds[0]), thresh_wat=float(self.iso_thresholds[1]),
         )
 
         # The MC-null calibration below (concentration gate) simulates
@@ -3252,6 +3342,11 @@ class DBSI_Adaptive:
         else:
             _alt = np.zeros((1, 1, 1, results.shape[3]), dtype=results.dtype)
 
+        _iso_cfg = np.array([self.iso_thresholds[0], self.iso_thresholds[1],
+                             self.iso_centroids[0], self.iso_centroids[1], self.iso_centroids[2],
+                             (self.iso_centroid_nrf if self.iso_centroid_nrf is not None
+                              else self.iso_centroids[1])], dtype=np.float64)
+
         def _run_kernel(run_coords, out_arr, peak_ratio, desc):
             with tqdm(total=len(run_coords), desc=desc, unit="vox") as pbar:
                 for i in range(int(np.ceil(len(run_coords) / batch_sz))):
@@ -3273,7 +3368,7 @@ class DBSI_Adaptive:
                         stagec_ad_grid, stagec_rd_grid, float(_STAGEC_ANISO_RATIO),
                         data, stagec_iso_grid, bool(self.stagec_dir_refine),
                         float(_kappa), sigma_map, bool(self.crossing_dir_refine),
-                        _test21, _alt
+                        _test21, _alt, _iso_cfg
                     )
                     pbar.update(end - start)
 
@@ -3292,7 +3387,7 @@ class DBSI_Adaptive:
             _cand = coords[results[coords[:, 0], coords[:, 1], coords[:, 2], _C_NPOP] >= 2]
             _t21 = time.time()
             _stat21 = np.full(results.shape[:3], np.nan, dtype=np.float32)
-            _iso_d21 = np.array(_ISO_RESOLVE_D_3ISO if use_3iso else _ISO_RESOLVE_D_2ISO,
+            _iso_d21 = np.array(self._stage_d_centroids(use_3iso),
                                 dtype=np.float64)
             _two_vs_one_pass(data_corr, _cand, bvals, bvecs, b0_thr, _iso_d21, sigma_map,
                              float(self.two_vs_one_threshold), results, _alt, _stat21)
@@ -3329,7 +3424,7 @@ class DBSI_Adaptive:
 
         # ── Stage D: final constrained fraction re-solve (fixed iso, corrected) ──
         if self.iso_resolve:
-            _iso_d = np.array(_ISO_RESOLVE_D_3ISO if use_3iso else _ISO_RESOLVE_D_2ISO,
+            _iso_d = np.array(self._stage_d_centroids(use_3iso),
                               dtype=np.float64)
             print(f"\n   Stage D (constrained fraction re-solve on CORRECTED signal): "
                   f"ENABLED  [fixed iso centroids {np.round(_iso_d*1e3, 2).tolist()} e-3, "
@@ -3415,7 +3510,7 @@ class DBSI_Adaptive:
         # compared across runs without checking that field.
         # Centroidi della ricostruzione = quelli con cui sono state stimate le
         # frazioni riportate: Stage D se attivo, altrimenti lo spettro di Stage A.
-        _fq_centroids = 'stage_d' if self.iso_resolve else 'recovered'
+        _fq_centroids = self._stage_d_centroids(use_3iso) if self.iso_resolve else 'recovered'
         results[..., _C_R2], results[..., _C_RMSE] = compute_fit_quality(
             data, bvals, bvecs, mask, results, model_mode,
             fiber_threshold=self.fiber_threshold, verbose=True,
@@ -3556,6 +3651,8 @@ class DBSI_Adaptive:
                          uncertainty=bool(self.uncertainty),
                          crossing_ff_kappa=float(_kappa),
                          crossing_dir_refine=bool(self.crossing_dir_refine),
+                         iso_thresholds=[float(x) for x in self.iso_thresholds],
+                         iso_centroids_stage_d=[float(x) for x in self._stage_d_centroids(use_3iso)],
                          two_vs_one_threshold=(None if self.two_vs_one_threshold is None
                                                else float(self.two_vs_one_threshold))),
             populations=_population_census(results, mask),
@@ -3569,6 +3666,12 @@ class DBSI_Adaptive:
         print(f"\n{'='*70}\n")
 
         return np.ascontiguousarray(results[..., :_N_CHANNELS]), model_mode
+
+    def _stage_d_centroids(self, use_3iso):
+        """The Stage D centroids of this model: (RF, HF, WF) or (RF, NRF)."""
+        if use_3iso:
+            return tuple(self.iso_centroids)
+        return (self.iso_centroids[0], self.iso_centroid_nrf)
 
     def _record_final_threshold(self, npop_pre, results, mask):
         """Count the fibers removed by fiber_threshold on the final FF (v1.8.0)."""
@@ -3688,7 +3791,10 @@ class DBSI_Adaptive:
             model=dict(n_dirs=self.n_dirs, n_ad=self.n_ad, n_rd=self.n_rd,
                        anisotropy_ratio=self.anisotropy_ratio,
                        fiber_threshold=self.fiber_threshold,
-                       iso_range=list(self.iso_range), iso_grid=iso_grid),
+                       iso_range=list(self.iso_range), iso_grid=iso_grid,
+                       iso_thresholds=list(self.iso_thresholds),
+                       iso_centroids=list(self.iso_centroids),
+                       iso_centroid_nrf=self.iso_centroid_nrf),
         ))
 
     # ------------------------------------------------------------------

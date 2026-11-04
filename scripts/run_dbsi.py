@@ -57,6 +57,9 @@ from dbsi_toolbox import save_output_maps
 # None are simply not passed.
 _D = {k: v.default for k, v in inspect.signature(DBSI_Adaptive.__init__).parameters.items()}
 _DICTIONARY_OPTS = ('n_ad', 'n_rd', 'anisotropy_ratio')
+# v1.10.0: compartment classes, given in um^2/ms on the command line (the unit of the
+# literature) and passed to the model in mm^2/s. Fixed by a protocol calibration.
+_ISO_CLASS_OPTS = ('iso_thresholds', 'iso_centroids', 'iso_centroid_nrf')
 
 
 def build_parser():
@@ -97,6 +100,21 @@ def build_parser():
                         help=f"Minimum AD/RD ratio for admissible Stage A pairs. Default: {_D['anisotropy_ratio']} "
                              "(raised from 1.15: drops the near-isotropic ratio-1.83 grid column "
                              "that leaks isotropic signal into fiber_fraction; safe band [2.0, 2.16]).")
+    _um = lambda v: ' '.join(f'{x * 1e3:g}' for x in v)
+    parser.add_argument("--iso-thresholds", type=float, nargs=2, metavar=("RF_HF", "HF_WF"),
+                        dest="iso_thresholds", default=None,
+                        help=f"Compartment boundaries in um^2/ms (= 1e-3 mm^2/s). Default: "
+                             f"{_um(_D['iso_thresholds'])} (Wang et al. 2015; Ye et al. 2020). "
+                             "Tumour studies use 1.0 1.5 (Han et al. 2023). Other values need "
+                             "--iso-centroids.")
+    parser.add_argument("--iso-centroids", type=float, nargs=3, metavar=("RF", "HF", "WF"),
+                        dest="iso_centroids", default=None,
+                        help="Stage D centroids in um^2/ms: the reported RF/HF/WF are their "
+                             "weights. Default: 0.15 1.0 3.0; each must lie in its class "
+                             "(RF <= RF_HF < HF < HF_WF <= WF).")
+    parser.add_argument("--iso-centroid-nrf", type=float, dest="iso_centroid_nrf", default=None,
+                        help="Non-restricted centroid of the 2-ISO fallback (single-shell "
+                             "protocols), um^2/ms. Default 1.5 with the default thresholds.")
     parser.add_argument("--min-weight-fraction", type=float, dest="min_weight_fraction", default=None,
                         help=f"Stage A direction-selection threshold. Default: {_D['min_weight_fraction']}.")
     parser.add_argument("--fiber-detection-threshold", type=float,
@@ -188,7 +206,7 @@ def main():
     args = parser.parse_args()
     if args.protocol_calibration:
         _fissati = [k for k in ('n_iso', 'lambda_aniso', 'lambda_iso', 'n_dirs') + _DICTIONARY_OPTS
-                    if getattr(args, k) is not None]
+                    + _ISO_CLASS_OPTS if getattr(args, k) is not None]
         if _fissati:
             parser.error(f"--protocol-calibration already fixes {_fissati}: do not pass them")
     elif args.skip_calibration and (args.lambda_aniso is None or args.lambda_iso is None):
@@ -274,6 +292,11 @@ def model_kwargs(args):
     for k in opt:
         if getattr(args, k) is not None:
             kw[k] = getattr(args, k)
+    if not args.protocol_calibration:
+        for k in _ISO_CLASS_OPTS:
+            v = getattr(args, k, None)
+            if v is not None:                       # um^2/ms -> mm^2/s
+                kw[k] = (v * 1e-3 if k == 'iso_centroid_nrf' else tuple(x * 1e-3 for x in v))
     return kw
 
 

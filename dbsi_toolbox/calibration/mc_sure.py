@@ -317,6 +317,7 @@ def crosscheck_lambda_iso_sure(bvals, iso_grid, y_voxels, sigma, lambda_candidat
 
 def crosscheck_n_iso_sure(bvals, y_voxels, sigma, n_iso_candidate,
                           d_min=0.1e-3, d_max=5.0e-3,
+                          thresh_res=0.3e-3, thresh_wat=3.0e-3,
                           n_neighbors=2, n_probes=15,
                           flat_tolerance=0.15, verbose=True):
     """
@@ -344,6 +345,10 @@ def crosscheck_n_iso_sure(bvals, y_voxels, sigma, n_iso_candidate,
     d_min, d_max : float
         ADC range for the candidate grids (must match what will
         actually be used for fitting).
+    thresh_res, thresh_wat : float
+        Compartment thresholds the candidate grids are anchored to (the
+        model's iso_thresholds). Until 1.10.0 they were not passed, so the
+        check always used 0.3e-3 / 3.0e-3 whatever classes the fit used.
     n_neighbors : int
         Number of integer neighbours evaluated on each side of the
         candidate (default 2, i.e. n_iso_candidate +/- 1, +/- 2).
@@ -379,7 +384,9 @@ def crosscheck_n_iso_sure(bvals, y_voxels, sigma, n_iso_candidate,
 
     risks = []
     for n_cand in n_iso_values:
-        iso_grid = generate_anchored_isotropic_grid(d_min=d_min, d_max=d_max, n_steps=n_cand)
+        iso_grid = generate_anchored_isotropic_grid(
+            d_min=d_min, d_max=d_max, n_steps=n_cand,
+            thresh_res=thresh_res, thresh_wat=thresh_wat)
         lam_gcv, _ = select_lambda_iso_gcv(bvals, iso_grid, y_voxels)
         A = build_isotropic_dictionary(bvals, iso_grid)
         risk = _mc_sure_risk(A, y_voxels, lam_gcv, sigma, n_probes=n_probes, seed=42)

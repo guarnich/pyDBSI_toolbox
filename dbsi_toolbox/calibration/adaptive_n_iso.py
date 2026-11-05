@@ -199,7 +199,8 @@ def select_n_iso_bootstrap(bvals, y_voxels, snr, sigma_normalised,
                            n_iso_candidates=None,
                            d_min=_DEFAULT_D_MIN, d_max=_DEFAULT_D_MAX,
                            n_bootstrap=50, lambda_iso=None,
-                           thresh_res=0.3e-3, cv_threshold=None,
+                           thresh_res=0.3e-3, thresh_wat=3.0e-3,
+                           cv_threshold=None,
                            n_ref_steps=48, verbose=True):
     """
     Select n_iso by minimising the composite bias² + variance of the
@@ -320,8 +321,14 @@ def select_n_iso_bootstrap(bvals, y_voxels, snr, sigma_normalised,
         n_iso. Passing a fixed value skips GCV and uses that lambda for
         all candidates — faster but potentially mismatched.
     thresh_res : float
-        RF threshold (default 0.3e-3 mm²/s), must match the fitting
-        code's THRESH_RES.
+        RF threshold (default 0.3e-3 mm²/s): the RF that is scored is the
+        weight at ADC <= thresh_res. Must be the model's iso_thresholds[0].
+    thresh_wat : float
+        HF|WF threshold (default 3.0e-3 mm²/s), used only to anchor the
+        candidate and reference grids. Must be the model's
+        iso_thresholds[1]: until 1.10.0 it was hard-coded to 3.0e-3, so with
+        non-default classes the bootstrap scored grids anchored at a boundary
+        the fit does not use.
     cv_threshold : float or None
         If not None, also report the smallest n_iso where mean CV(RF)
         drops below this threshold (as a secondary diagnostic, see
@@ -395,7 +402,7 @@ def select_n_iso_bootstrap(bvals, y_voxels, snr, sigma_normalised,
     # bias sarebbe zero per costruzione (vedi difetto 2 nel docstring).
     ref_grid = generate_anchored_isotropic_grid(
         d_min=d_min, d_max=d_max, n_steps=n_ref_steps,
-        thresh_res=thresh_res, thresh_wat=3.0e-3,
+        thresh_res=thresh_res, thresh_wat=thresh_wat,
     )
     A_ref = build_isotropic_dictionary(bvals, ref_grid)
     lam_ref = (lambda_iso if lambda_iso is not None
@@ -463,7 +470,7 @@ def select_n_iso_bootstrap(bvals, y_voxels, snr, sigma_normalised,
     for n_iso in n_iso_candidates:
         iso_grid = generate_anchored_isotropic_grid(
             d_min=d_min, d_max=d_max, n_steps=n_iso,
-            thresh_res=thresh_res, thresh_wat=3.0e-3
+            thresh_res=thresh_res, thresh_wat=thresh_wat
         )
         n_cols = len(iso_grid)
 

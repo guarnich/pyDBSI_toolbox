@@ -115,6 +115,41 @@ def test_classi_di_han():
     assert abs(rf0 - vero[0]) > 0.1
 
 
+def test_percorsi_facoltativi():
+    # Il bootstrap di n_iso e il controllo SURE su n_iso costruiscono griglie proprie.
+    # Fino alla 1.10.0 non ricevevano le classi: ancoravano sempre a 0.3/3.0 (la soglia
+    # dell'acqua era scritta a mano nel bootstrap). Ogni griglia del fit deve ancorarsi
+    # alle soglie del modello.
+    import dbsi_toolbox.calibration.adaptive_n_iso as AN
+    import dbsi_toolbox.calibration.mc_sure as MS
+    viste = []
+    originali = {mod: mod.generate_anchored_isotropic_grid for mod in (AN, MS, M)}
+
+    def spia(orig, nome):
+        def g(*a, **kw):
+            viste.append((nome, kw.get('thresh_res', 0.3e-3), kw.get('thresh_wat', 3.0e-3)))
+            return orig(*a, **kw)
+        return g
+    img, mask, nm = _volume((0.4, 0.35, 0.25), (0.5e-3, 1.25e-3, 3.0e-3), snr=50, n=4)
+    lam = {k: v for k, v in LAM.items() if k != 'n_iso'}
+    try:
+        for mod, orig in originali.items():
+            mod.generate_anchored_isotropic_grid = spia(orig, mod.__name__.split('.')[-1])
+        m = DBSI_Adaptive(**HAN, **lam)
+        with contextlib.redirect_stdout(io.StringIO()):
+            m.fit(img, BV, BC, mask, run_calibration=False, noise_map=nm,
+                  n_iso_method='bootstrap', n_bootstrap=3, run_sure_crosscheck=True,
+                  sure_crosscheck_n_probes=2)
+    finally:
+        for mod, orig in originali.items():
+            mod.generate_anchored_isotropic_grid = orig
+    moduli = {v[0] for v in viste}
+    assert {'adaptive_n_iso', 'mc_sure', 'model_Niso_adaptive_ff_thr'} <= moduli, moduli
+    sbagliate = [v for v in viste if (v[1], v[2]) != (1.0e-3, 1.5e-3)]
+    assert not sbagliate, sbagliate
+    print(f'  {len(viste)} griglie (bootstrap, SURE, fit) tutte ancorate a 1.0/1.5')
+
+
 def _record(**model):
     from dbsi_toolbox import protocol_fingerprint
     GA, GI = np.logspace(-4, 4, 40), np.logspace(-5, 1, 40); k = np.arange(40)

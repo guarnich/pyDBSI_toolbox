@@ -2937,6 +2937,7 @@ class DBSI_Adaptive:
                     bvals, y_cal_iso, snr, sigma_cal,
                     d_min=max(self.iso_range[0], 0.1e-3), d_max=iso_d_max,
                     n_bootstrap=n_bootstrap, n_ref_steps=_N_ISO_REF_STEPS,
+                    thresh_res=self.iso_thresholds[0], thresh_wat=self.iso_thresholds[1],
                 )
                 _n_iso_diag['fiber_subtraction'] = _resid_diag
                 # Rifiuto esplicito: meglio il ripiego SVD che un n_iso scelto
@@ -3172,6 +3173,7 @@ class DBSI_Adaptive:
                 bvals, y_sure, sigma_cal, self.n_iso,
                 d_min=max(self.iso_range[0], 0.1e-3),
                 d_max=max(self.iso_range[1], _ISO_GRID_D_MAX_EXTENDED),
+                thresh_res=self.iso_thresholds[0], thresh_wat=self.iso_thresholds[1],
                 n_probes=sure_crosscheck_n_probes, verbose=True,
             )
             self.sure_crosscheck_report_ = dict(

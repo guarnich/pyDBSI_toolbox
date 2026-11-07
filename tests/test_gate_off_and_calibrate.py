@@ -10,7 +10,9 @@ COSA SI PROTEGGE.
   2. calibrate(). Si ferma prima del fit voxel per voxel (il kernel NON viene
      chiamato), non modifica il modello su cui e' chiamato, e restituisce un
      record serializzabile in JSON con le curve GCV complete e l'impronta.
-  3. Le griglie fini passano davvero ai selettori.
+  3. Le griglie passate a mano arrivano davvero ai selettori; senza griglie la
+     calibrazione cerca su 118 punti (default dalla 1.11.0, prima 40), che
+     contengono tutti i 40 punti di prima.
   4. L'impronta ignora i vettori e distingue i protocolli.
 
     python tests/test_gate_off_and_calibrate.py
@@ -120,8 +122,9 @@ def test_calibrate_record():
           f'lambda_iso {h["lambda_iso"]:.4g} (curva {len(gi)} punti)  n_iso {h["n_iso"]} '
           f'({h["n_iso_source"]})  impronta {rec["protocol"]["shells"]}')
     assert h['n_iso'] == 6 and h['n_iso_source'] == 'quadrature'
-    assert len(ga) == len(c['lambda_aniso']['gcv']) == 40
-    assert len(gi) == len(c['lambda_iso']['gcv']) == 40
+    # griglie fini di default dalla 1.11.0 (118 punti, contengono i 40 di prima)
+    assert len(ga) == len(c['lambda_aniso']['gcv']) == 118
+    assert len(gi) == len(c['lambda_iso']['gcv']) == 118
     assert h['lambda_aniso'] in ga, 'il lambda_aniso scelto non sta sulla sua curva'
     assert h['lambda_iso'] <= rec['selection']['lambda_iso_gcv'] + 1e-15
     assert rec['protocol']['n_volumes'] == len(bvals)
@@ -153,6 +156,25 @@ def test_griglie_fini():
     assert (na, ni) == (121, 97), 'le griglie fini non sono arrivate ai selettori'
 
 
+def test_griglie_di_default():
+    # 1.11.0: la calibrazione e' fine di default, in fit() come in calibrate().
+    from dbsi_toolbox.calibration import data_driven as DD
+    vecchia_a, vecchia_i = np.logspace(-4, 4, 40), np.logspace(-5, 1, 40)
+    assert np.array_equal(DD.DEFAULT_LAMBDA_ANISO_GRID, np.logspace(-4, 4, 118))
+    assert np.array_equal(DD.DEFAULT_LAMBDA_ISO_GRID, np.logspace(-5, 1, 118))
+    # ogni punto della griglia di prima e' un nodo della nuova (indice k -> 3k)
+    assert np.allclose(DD.DEFAULT_LAMBDA_ANISO_GRID[::3], vecchia_a, rtol=1e-12)
+    assert np.allclose(DD.DEFAULT_LAMBDA_ISO_GRID[::3], vecchia_i, rtol=1e-12)
+    bvals, bvecs = _protocollo(); data, mask = _dati(bvals)
+    with contextlib.redirect_stdout(io.StringIO()):
+        rec = DBSI_Adaptive().calibrate(data, bvals, bvecs, mask, n_calibration_voxels=40,
+                                        lambda_aniso_grid=vecchia_a, lambda_iso_grid=vecchia_i)
+    c = rec['curves']
+    assert len(c['lambda_aniso']['lambda_grid']) == len(c['lambda_iso']['lambda_grid']) == 40, (
+        'la griglia da 40 passata a mano non e piu usata')
+    print('  default 118 punti (contengono i 40 di prima); 40 a mano ancora rispettati')
+
+
 def test_impronta():
     from dbsi_toolbox import protocol_fingerprint, fingerprint_mismatches
     bvals, bvecs = _protocollo()
@@ -182,7 +204,7 @@ if __name__ == '__main__':
     falliti = 0
     for fn in (test_versione, test_gate_spento_di_default, test_gate_su_richiesta,
                test_calibrate_record, test_calibrate_rifiuta_lambda_imposti,
-               test_griglie_fini, test_impronta):
+               test_griglie_fini, test_griglie_di_default, test_impronta):
         print(f'\n=== {fn.__name__} ===')
         try:
             fn(); print('  [ok]')

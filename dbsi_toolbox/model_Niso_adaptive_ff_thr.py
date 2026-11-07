@@ -3711,9 +3711,11 @@ class DBSI_Adaptive:
         Parameters
         ----------
         lambda_aniso_grid, lambda_iso_grid : array or None
-            Griglie di ricerca. Default: quelle di `fit()` (logspace(-4, 4, 40)
-            e logspace(-5, 1, 40)). Una griglia piu' fine ha senso qui, perche'
-            la calibrazione di protocollo si paga una volta sola.
+            Griglie di ricerca. Default: quelle di `fit()`, cioe'
+            `DEFAULT_LAMBDA_ANISO_GRID` = logspace(-4, 4, 118) e
+            `DEFAULT_LAMBDA_ISO_GRID` = logspace(-5, 1, 118) in
+            `calibration.data_driven` (fini dalla 1.11.0; fino alla 1.10.0 erano
+            di 40 punti e la griglia fine andava passata a mano).
         n_iso_method, calibrate_concentration_gate, noise_map
             Come in `fit()`. Il gate e' spento di default dalla 1.4.0.
 

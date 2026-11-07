@@ -50,6 +50,24 @@ from ..utils.tools import _chi_median_factor, B0_THRESHOLD
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Default lambda search grids (fine since 1.11.0)
+# ─────────────────────────────────────────────────────────────────────────────
+# 118 log-spaced points over the same ranges as before. Until 1.10.0 the default
+# was 40 points (one step = x1.60 for lambda_aniso, x1.43 for lambda_iso): a
+# calibration could only land on those coarse steps, so one grid step was enough
+# to move the FF median between two sessions (BR/BT), and the protocol rule
+# 'median_index' tied (20-19 on 40). scripts/calibration.ipynb already searched
+# on 118 points; now every calibration does, the per-acquisition one inside
+# fit() included. 118 = 3*39 + 1, so the fine grid contains every point of the
+# old one (old index k = new index 3k): a lambda chosen before is still a grid
+# node. The endpoints, and hence the lambda_iso discrepancy ceiling, are
+# unchanged. Cost: the GCV evaluations are closed-form or vectorised, so the
+# calibration is about 10-15% slower and the voxel fit not at all.
+DEFAULT_LAMBDA_ANISO_GRID = np.logspace(-4, 4, 118)
+DEFAULT_LAMBDA_ISO_GRID = np.logspace(-5, 1, 118)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # GCV — lambda_iso
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -76,8 +94,9 @@ def select_lambda_iso_gcv(bvals, iso_grid, y_voxels, lambda_grid=None):
         protocol-level lambda_iso than a single voxel; passing one voxel
         is also valid (degenerates to per-voxel selection).
     lambda_grid : array or None
-        Candidate lambda values to evaluate. Defaults to a log-spaced
-        grid from 1e-5 to 10 (40 points), which comfortably spans the
+        Candidate lambda values to evaluate. Defaults to
+        DEFAULT_LAMBDA_ISO_GRID, log-spaced from 1e-5 to 10 (118 points; 40
+        until 1.10.0), which comfortably spans the
         range used elsewhere in this toolbox's manual/MC-calibrated
         lambda_iso values (typically 1e-3 to 1).
 
@@ -104,7 +123,7 @@ def select_lambda_iso_gcv(bvals, iso_grid, y_voxels, lambda_grid=None):
     s2 = s ** 2
 
     if lambda_grid is None:
-        lambda_grid = np.logspace(-5, 1, 40)
+        lambda_grid = DEFAULT_LAMBDA_ISO_GRID
     lambda_grid = np.asarray(lambda_grid, dtype=np.float64)
 
     # Project every voxel's signal onto the left singular vectors once.
@@ -760,7 +779,7 @@ def select_lambda_aniso_gcv_lcurve(AtA, At, y_voxels, n_aniso_cols,
     n_total_cols = AtA.shape[0]
 
     if lambda_grid is None:
-        lambda_grid = np.logspace(-4, 4, 40)
+        lambda_grid = DEFAULT_LAMBDA_ANISO_GRID
     lambda_grid = np.sort(np.asarray(lambda_grid, dtype=np.float64))
 
     # ── Vectorised LINEAR-RIDGE evaluation over the lambda grid ─────────────
@@ -1090,9 +1109,9 @@ def select_lambdas_data_driven(bvals, bvecs, fiber_dirs, diff_pairs, iso_grid,
         `select_lambda_aniso_discrepancy`).
     lambda_aniso_grid : array or None
         Candidate grid for the 'gcv'/'lcurve' search (see
-        `select_lambda_aniso_gcv_lcurve`; default logspace(-4, 4, 40)). A
-        finer grid is useful for protocol-level calibration, whose cost is
-        paid once. Ignored by 'discrepancy'.
+        `select_lambda_aniso_gcv_lcurve`; default DEFAULT_LAMBDA_ANISO_GRID,
+        logspace(-4, 4, 118) since 1.11.0, 40 points before). Ignored by
+        'discrepancy'.
 
     Returns
     -------

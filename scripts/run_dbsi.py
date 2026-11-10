@@ -244,6 +244,7 @@ def main():
     skipped = [n for n in names if n not in saved]
     print(f"  {len(saved)} channel maps -> {args.out}/NN_<channel>.nii.gz")
     print(f"  fiber-tensor validity mask -> {args.out}/fiber_valid.nii.gz")
+    print(f"  fiber directions, V1-style (X,Y,Z,3) -> {args.out}/dir1.nii.gz, dir2.nii.gz")
     print(f"  toolbox report (run report + dictionary) -> {args.out}/toolbox_report/")
     if getattr(model, 'uncertainty_', None) is not None:
         print(f"  uncertainty maps (standard errors) -> {args.out}/toolbox_report/uncertainty_maps/")

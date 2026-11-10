@@ -1,4 +1,4 @@
-# pyDBSI Toolbox — v1.11.0
+# pyDBSI Toolbox — v1.11.1
 
 **Diffusion Basis Spectrum Imaging (DBSI): adaptive implementation with Numba acceleration**
 
@@ -174,7 +174,21 @@ dictionary, uncertainty maps).
 Fractions use 0 for "compartment absent"; the per-population block and the weighted tensor use
 NaN. `save_output_maps` writes `NN_<channel>.nii.gz`, the validity masks `fiber_valid.nii.gz` /
 `fiber_valid_pop2.nii.gz` (resample `value × valid` and `valid` together and divide, or
-interpolation turns NaN into 0), `fiber_detection_stat.nii.gz`, and `toolbox_report/`:
+interpolation turns NaN into 0), `fiber_detection_stat.nii.gz`, the fiber directions as
+`dir1.nii.gz` / `dir2.nii.gz`, and `toolbox_report/`.
+
+**Directions.** `dirK_x/y/z` are the three components of a unit vector along population K's
+axis: each is the cosine of the angle with that image axis, hence in [-1, 1]. The sign is
+arbitrary (v and −v are the same fiber). The vector is in the frame of the bvecs passed to the
+fit, with no rotation: with FSL-convention bvecs (dcm2niix) it is the frame of `dtifit`'s V1.
+`dir1.nii.gz` / `dir2.nii.gz` stack the three channels into one (X, Y, Z, 3) image, the layout
+of V1, so FSLeyes shows them as RGB or line vectors (modulate by `fiber_fraction_pop1/2`); same
+values as the channels, 0 instead of NaN where the population is absent (`save_output_maps(...,
+vectors=False)` to skip them). On a synthetic phantom with 96 directions, `dir1.nii.gz` and
+`dtifit`'s V1 agree to 1–2° in every voxel. Do not resample them like the scalar maps: the
+vectors must be rotated with the transform, and linear interpolation averages v with −v.
+
+`toolbox_report/`:
 
 | file | content |
 |---|---|
@@ -286,6 +300,7 @@ the fit section by section, from the toolbox's own recorded inputs and calibrati
 
 | version | |
 |---|---|
+| 1.11.1 | `save_output_maps` also writes `dir1.nii.gz` / `dir2.nii.gz`: each population's direction as one (X, Y, Z, 3) image like `dtifit`'s V1 (same values as `dirK_x/y/z`, 0 where absent; `vectors=False` to skip). README: what the direction components mean and in which frame. Maps identical |
 | **1.11.0** | **fine λ grids by default**: every calibration (the per-acquisition one in `fit()`, `calibrate()`, the CLI) searches λ_aniso on `logspace(-4, 4, 118)` and λ_iso on `logspace(-5, 1, 118)` instead of 40 points (`DEFAULT_LAMBDA_ANISO_GRID`, `DEFAULT_LAMBDA_ISO_GRID` in `calibration.data_driven`). The fine grids contain the old points, so a free fit's λ either stays the same or moves to a point between two old ones; maps of free fits can therefore differ from 1.10.0, fits with fixed λ or a protocol calibration do not. Records calibrated on 40 points cannot be aggregated with new ones (grids differ): recalibrate them. The n_iso bootstrap and the SURE check now anchor their grids to the model's compartment classes |
 | **1.10.0** | **compartment classes configurable**: `iso_thresholds`, `iso_centroids`, `iso_centroid_nrf` (CLI `--iso-thresholds`, `--iso-centroids`, `--iso-centroid-nrf`, in μm²/ms), validated so that every Stage D centroid lies in its class; recorded in the run report and in calibration records, imposed by a protocol calibration (records written before count as the defaults). Stage D and the detection test assign the centroids to RF/HF/WF by position, no longer by comparison with the thresholds. With the defaults the maps are identical bit for bit. *Tried and not adopted:* a two-vs-one threshold in true noise variances (12 × c, c = min(1, median residual/σ²)); on seven real 1.9.0 sessions c = 0.56–0.89, but the crossings it added fell for 48–59% in GM and 15–18% in WM, failing the criterion declared before the check. The code and the verification notebook are on branch `test21-rumore-vero`; residual/σ stays in the uncertainty maps as the diagnostic |
 | **1.9.0** | **crossings, two defaults changed**: the cone search on each crossing population's direction (`crossing_dir_refine=True`) and the two-vs-one population test (`two_vs_one_threshold=12`) replace grid-node directions and the `min_peak_ratio` cut; the single-fiber alternative is fitted inside the kernel from the same Stage A (fit ×1.3–1.8); `two_vs_one_stat.nii.gz` and a run-report block; CLI `--no-two-vs-one`, `--[no-]crossing-dir-refine`; with both off the fit is 1.8.1's up to 1 float32 ulp in ~1% of crossing voxels. Protocol calibrations made with 1.8 stay valid (the λ do not depend on these options). `scripts/calibration.ipynb`: from the study folders to the fixed-λ command. `notebooks/`: a third simulation arm and two sections (cone, two-vs-one test) in the mathematics |

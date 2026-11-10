@@ -666,7 +666,8 @@ def format_run_report(report, saved_channels=None):
 
 
 def save_output_maps(results, channel_names, affine, output_dir,
-                     skip_redundant=True, validity=True, model=None):
+                     skip_redundant=True, validity=True, model=None,
+                     vectors=True):
     """
     Save the DBSI output set for one dataset as compressed NIfTI: the channel
     maps plus the fiber-validity indicator. This is the single saving entry
@@ -686,6 +687,9 @@ def save_output_maps(results, channel_names, affine, output_dir,
         two_vs_one_stat.nii.gz  (when the two-vs-one test is on, v1.9.0+) the
                                 crossing-vs-single-fiber statistic, NaN where no
                                 crossing candidate was tested
+        dir1.nii.gz, dir2.nii.gz  (with `vectors`) the fiber direction of
+                                each population as ONE 4D file (X, Y, Z, 3),
+                                like FSL dtifit's V1: see below
         toolbox_report/        what produced these maps (when `model` is given):
             run_report.txt           see below
             design_matrix.png        image of the dictionary A = [A_aniso | A_iso]
@@ -729,6 +733,20 @@ def save_output_maps(results, channel_names, affine, output_dir,
     load-bearing for `compute_fit_quality`, and the saved `.npz` should keep
     every channel. Only the written files are trimmed.
 
+    DIRECTION VECTORS (`vectors=True`). dir1.nii.gz / dir2.nii.gz stack the
+    channels dirK_x, dirK_y, dirK_z into one (X, Y, Z, 3) image, the layout of
+    dtifit's V1, so FSLeyes opens them as RGB or line vector images directly.
+    The values are the SAME as the three channel files (which are still
+    written): a unit vector in the frame of the bvecs given to the fit, with
+    no rotation. With FSL-convention bvecs (dcm2niix) that is V1's frame, so
+    the two can be compared voxel by voxel. The sign is arbitrary (v and -v
+    are the same fiber), as in V1. Where the population is absent the vector
+    is 0, not NaN as in the channels: a vector viewer has no use for NaN, and
+    0 shows as "no direction". Use fiber_valid / fiber_valid_pop2 (or
+    n_fiber_populations) to tell "absent" apart. Do NOT resample these like the
+    scalar maps: the vectors must be rotated with the transform, and linear
+    interpolation averages v with -v towards zero.
+
     Returns the list of channel names actually written.
     """
     import nibabel as nib
@@ -745,6 +763,16 @@ def save_output_maps(results, channel_names, affine, output_dir,
         nib.save(nib.Nifti1Image(results[..., i].astype(np.float32), affine),
                  os.path.join(output_dir, f'{i:02d}_{nm}.nii.gz'))
         saved.append(nm)
+    if vectors:
+        for k in (1, 2):
+            comps = [f'dir{k}_{c}' for c in 'xyz']
+            if not all(c in names for c in comps):
+                continue
+            vec = np.stack([results[..., names.index(c)] for c in comps],
+                           axis=-1).astype(np.float32)
+            vec[~np.isfinite(vec).all(axis=-1)] = 0.0
+            nib.save(nib.Nifti1Image(vec, affine),
+                     os.path.join(output_dir, f'dir{k}.nii.gz'))
     if validity:
         # DUE maschere, non una: i blocchi pop1 e pop2 hanno domini di validita'
         # diversi (pop2 e' NaN dove n_pop < 2, cioe' su ~48% dei voxel di fibra).

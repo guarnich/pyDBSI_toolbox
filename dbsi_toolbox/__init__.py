@@ -59,7 +59,9 @@ are the single source of truth -- read channels by name, via
 
 Fractions (0-4) use 0 for "absent"; the fiber block (6-22) uses NaN.
 `save_output_maps` writes `fiber_valid.nii.gz` / `fiber_valid_pop2.nii.gz`,
-needed before resampling any NaN-convention map.
+needed before resampling any NaN-convention map, and (v1.11.1) the fiber
+directions as `dir1.nii.gz` / `dir2.nii.gz`, one (X, Y, Z, 3) image per
+population like dtifit's V1.
 
 References
 ----------
@@ -73,7 +75,7 @@ Vavasour IM, et al. (2022). Characterisation of multiple sclerosis
     basis spectrum imaging. Multiple Sclerosis Journal, 28(3), 418-428.
 """
 
-__version__ = "1.11.0"
+__version__ = "1.11.1"
 __author__ = "DBSI Toolbox Contributors"
 
 

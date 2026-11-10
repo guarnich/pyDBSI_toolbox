@@ -139,10 +139,52 @@ def test_stage_d_fissa_i_centroidi():
     print("  [ok]")
 
 
+
+def test_direzioni_4d_come_v1():
+    """dir1/dir2.nii.gz (v1.11.1): (X, Y, Z, 3) come la V1 di dtifit, stessi
+    valori dei tre canali dirK_x/y/z, 0 (non NaN) dove la popolazione manca."""
+    print("\n=== test_direzioni_4d_come_v1 ===")
+    import os, tempfile
+    import nibabel as nib
+    from dbsi_toolbox import save_output_maps
+    nm = DBSI_Adaptive.output_map_names(3)
+    r = np.full((3, 2, 1, len(nm)), np.nan, dtype=np.float32)
+    rng = np.random.default_rng(0)
+    for k in (1, 2):
+        v = rng.normal(size=(3, 2, 1, 3))
+        v /= np.linalg.norm(v, axis=-1, keepdims=True)
+        for j, c in enumerate('xyz'):
+            r[..., nm.index(f'dir{k}_{c}')] = v[..., j]
+    r[0, 0, 0, [nm.index(f'dir1_{c}') for c in 'xyz']] = np.nan   # nessuna fibra
+    r[1, :, 0][:, [nm.index(f'dir2_{c}') for c in 'xyz']] = np.nan  # niente pop2
+    aff = np.diag([2.0, 2.0, 2.0, 1.0])
+    with tempfile.TemporaryDirectory() as out:
+        save_output_maps(r, nm, aff, out, validity=False)
+        for k in (1, 2):
+            img = nib.load(os.path.join(out, f'dir{k}.nii.gz'))
+            d = np.asarray(img.dataobj)
+            print(f"  dir{k}.nii.gz shape {d.shape}")
+            assert d.shape == (3, 2, 1, 3), 'non e\' un volume a 3 componenti'
+            assert np.allclose(img.affine, aff), 'affine diversa dalle mappe'
+            assert np.isfinite(d).all(), 'NaN nel file vettoriale'
+            for j, c in enumerate('xyz'):
+                ch = np.asarray(nib.load(os.path.join(
+                    out, f'{nm.index(f"dir{k}_{c}"):02d}_dir{k}_{c}.nii.gz')).dataobj)
+                ok = np.isfinite(ch)
+                assert np.array_equal(d[..., j][ok], ch[ok]), (
+                    f'dir{k} componente {c} diversa dal canale')
+                assert (d[..., j][~ok] == 0).all(), 'assente non scritto come 0'
+        assert (np.asarray(nib.load(os.path.join(out, 'dir1.nii.gz')).dataobj)[0, 0, 0] == 0).all()
+        save_output_maps(r, nm, aff, os.path.join(out, 'no'), validity=False,
+                         vectors=False)
+        assert not os.path.exists(os.path.join(out, 'no', 'dir1.nii.gz'))
+    print("  [ok]")
+
+
 if __name__ == '__main__':
     for f in (test_due_domini_di_validita, test_validita_rifiuta_argomento_ignoto,
               test_transition_confidence_resta_rimosso,
-              test_stage_d_fissa_i_centroidi):
+              test_stage_d_fissa_i_centroidi, test_direzioni_4d_come_v1):
         try:
             f()
         except AssertionError as e:

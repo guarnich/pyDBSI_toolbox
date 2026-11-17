@@ -177,15 +177,6 @@ fingerprint (`strict=True`) and refuses overrides of calibrated parameters; the 
 of the log GCV curves (scale-invariant, so a noisier acquisition does not outvote a cleaner one).
 
 
-## Notebooks
-
-`notebooks/` holds two self-contained notebooks, each run once to produce all its figures (see
-`notebooks/README.md`): `simulazioni_pyDBSI.ipynb` measures accuracy against ground truth on synthetic
-phantoms through the production chain (images true / estimated / error, error per tissue scenario and SNR,
-estimate versus truth, coverage of the uncertainty maps); `matematica_pyDBSI.ipynb` draws the mathematics of
-the fit section by section, from the toolbox's own recorded inputs and calibration steps.
-
-
 ## References
 
 1. Wang Y, et al. (2011). Quantification of increased cellularity during inflammatory

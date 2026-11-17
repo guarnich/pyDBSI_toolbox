@@ -2,8 +2,7 @@
 """
 DBSI Adaptive CLI — the production fit of one session, from the shell.
 
-Same fit as the notebooks, bit for bit (tests/test_cli_matches_production.py):
-every default is read from DBSI_Adaptive's constructor, never restated here.
+Same fit as the notebooks.
 Inputs are the fixed starting point of the toolbox: preprocessed DWI (topup,
 eddy, N4), bval/bvec, brain mask and the thermal noise map (--noise).
 Outputs adapt to the acquisition scheme (2-ISO or 3-ISO).
@@ -19,7 +18,7 @@ Outputs adapt to the acquisition scheme (2-ISO or 3-ISO).
   quadrature (6). `--protocol-calibration` imposes a protocol calibration
   instead. See the dbsi_toolbox.calibration module docstring.
 
-OUTPUT LAYOUT (changed)
+OUTPUT LAYOUT 
 -----------------------
 Saving now goes through `dbsi_toolbox.save_output_maps`, the single
 saving entry point shared with the analysis notebooks, instead of an
@@ -36,10 +35,9 @@ inline loop private to this script. Consequences:
 - the R2 / RMSE fit-quality maps are ordinary output channels now, always
   computed by the fit, so `--compute-r2` is gone.
 
-The output layout itself changed too: at most TWO fiber populations, each
+The output layout: at most TWO fiber populations, each
 with its own fraction/AD/RD/FA/direction, plus the FF-weighted tensor —
-plus the R2/RMSE fit-quality maps — 27 channels, no pop3, no
-ad_linear/rd_linear. See `DBSI_Adaptive.output_map_names`.
+plus the R2/RMSE fit-quality maps — 27 channels. See `DBSI_Adaptive.output_map_names`.
 """
 
 import argparse
@@ -50,11 +48,7 @@ from dbsi_toolbox import DBSI_Adaptive
 from dbsi_toolbox import load_data
 from dbsi_toolbox import save_output_maps
 
-# Defaults are READ from the constructor, never restated here. Until v1.6.1 this
-# script passed its own copies (n_ad=3, n_rd=3, ratio 2.0, 0.05, 1.0): equal to
-# the constructor's today, but a second source of truth that would have kept the
-# CLI on the old values, silently, the day a default changed. Options left at
-# None are simply not passed.
+
 _D = {k: v.default for k, v in inspect.signature(DBSI_Adaptive.__init__).parameters.items()}
 _DICTIONARY_OPTS = ('n_ad', 'n_rd', 'anisotropy_ratio')
 # v1.10.0: compartment classes, given in um^2/ms on the command line (the unit of the

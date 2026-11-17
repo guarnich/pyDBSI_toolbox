@@ -1,21 +1,6 @@
 """
-DBSI Autoconfiguration — Protocol-Driven Stage A Sizing (v3)
+DBSI Autoconfiguration — Protocol-Driven Stage A Sizing
 =================================================================
-
-v3 NOTE
----------
-In the v3 hybrid two-stage architecture, this module's output is used
-more narrowly than in v2: `DBSI_Adaptive` only takes `M_optimal` (the
-hemisphere direction count) from `autoconfigure_dictionary` for Stage
-A's detection dictionary. `n_ad`, `n_rd`, and `anisotropy_ratio` are
-still computed and returned (useful as protocol diagnostics, and for
-any external code doing its own Stage A configuration), but
-`DBSI_Adaptive` does NOT use this function's n_ad/n_rd suggestions by
-default — Stage A intentionally uses a small, fixed-by-default (AD,RD)
-grid (3x3) regardless of protocol richness, because Stage A's job
-(direction detection) does not benefit from finer diffusivity
-resolution; see `model_Niso_adaptive_ff_thr.py` module docstring for the
-full rationale and the synthetic validation that motivated this design.
 
 Angular calibration
 --------------------
@@ -30,16 +15,6 @@ shell, the dictionary is angularly over-complete relative to the data
 and the solver cannot distinguish between dictionary directions that are
 closer together than the actual angular sampling resolution — this
 produces angular leakage (spurious crossing-fiber artifacts).
-
-Spectral (AD/RD) calibration — diagnostic only in v3, not applied by
-DBSI_Adaptive's Stage A by default (see note above)
------------------------------------------------------------------------
-Retained from v2 for diagnostic purposes / external use:
-
-    - Single shell or b_max < 1500 s/mm^2: sparse grid (4x4) appropriate.
-    - b_max >= 2500 s/mm^2, multi-shell: denser grids supportable (up to
-      8x8 or 10x10) IF doing single-stage (AD,RD) recovery — which v3
-      does not do in Stage A (see note above).
 
 References
 ----------

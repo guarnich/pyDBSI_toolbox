@@ -1,52 +1,21 @@
 """
-DBSI Basis Functions — v3: Stage A Detection Dictionary + Stage B Inputs
+DBSI Basis Functions: Stage A Detection Dictionary + Stage B Inputs
 ===========================================================================
 
-v3 ARCHITECTURE NOTE
-----------------------
+
 The exhaustive (direction x AD/RD-pair) dictionary built here
 (`build_design_matrix_exhaustive`, `generate_exhaustive_diffusivity_pairs`)
 now serves ONLY as Stage A's detection dictionary: identifying which
 hemisphere directions carry fiber signal (see
-`core.solvers.select_dominant_directions`). It is NOT used to extract
-final AD/RD values directly — synthetic recovery validation showed that
-approach (the v2 architecture) is not numerically identifiable. AD/RD
+`core.solvers.select_dominant_directions`). AD/RD
 are now estimated by Stage B (`core.solvers.estimate_AD_RD_conditioned`),
 a small closed-form regression conditioned on Stage A's selected
 direction(s).
 
 Because Stage A's only job is angular detection, NOT diffusivity
-recovery, its (AD, RD) grid can — and for performance reasons should —
-be much coarser than the v2 architecture required (e.g. 3x3 pairs
-rather than 6x6 or 8x8): a coarse grid still reliably anchors which
-direction(s) are active (synthetic testing showed direction cosine
-similarity ~1.0 essentially independent of pair-grid density), while
-keeping the NNLS solve fast (solver cost scales worse than linearly
-with total column count under coordinate descent).
-
-The rest of this module (hemisphere generation, isotropic grid/
-dictionary) is otherwise unchanged from v2; see individual function
-docstrings below.
-
-Why isotropic tensors (AD=RD) cannot share the orientation loop with the
-anisotropic ones
------------------------------------------------------------------------------
-For a cylindrically symmetric tensor, D_app(g) = RD + (AD-RD)*cos^2(theta).
-If AD = RD, the orientation-dependent term vanishes identically and D_app
-collapses to a constant D_iso regardless of direction. Looping such a pair
-over M hemisphere directions would produce M numerically IDENTICAL columns —
-exact rank deficiency, not just high collinearity. The NNLS solver has no
-way to choose among them and either spreads the weight arbitrarily or
-becomes numerically unstable. This is why the dictionary is built as two
-structurally distinct blocks:
-
-    A = [ A_aniso (rotated cylinders, AD > RD by construction)
-        | A_iso   (unrotated spheres, AD = RD, one column per radius) ]
-
-Anisotropy is enforced at construction time via `anisotropy_ratio`
-(AD >= RD * ratio, ratio typically 1.1-1.2), which both prevents near-rank-
-deficient near-isotropic cylinders from entering the anisotropic block and
-keeps the two blocks physically and mathematically disjoint.
+recovery, its (AD, RD) grid can 
+be much coarse: a coarse grid still reliably anchors which
+direction(s) are active while keeping the NNLS solve fast.
 
 References
 ----------
@@ -64,7 +33,7 @@ from .._numba_flags import FASTMATH
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# HEMISPHERE DIRECTIONS (unchanged from v1 — orientation sampling only)
+# HEMISPHERE DIRECTIONS (orientation sampling only)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def generate_fibonacci_sphere_hemisphere(n_points):
@@ -72,11 +41,6 @@ def generate_fibonacci_sphere_hemisphere(n_points):
     Generate n_points uniformly distributed unit vectors on the upper
     hemisphere (z >= 0) using the direct Fibonacci spiral method.
 
-    Unchanged from v1. See module history for full derivation; retained
-    here verbatim because the construction (uniform-in-z, golden-ratio
-    azimuth, no post-hoc filtering) is independent of the v2 parametric
-    dictionary change — only the diffusivities rotated over these
-    directions change in v2, not the directions themselves.
 
     Parameters
     ----------
@@ -108,21 +72,16 @@ def generate_fibonacci_sphere_hemisphere(n_points):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# v2 — EXHAUSTIVE ANISOTROPIC PARAMETER GRID  (AD, RD) PAIRS
+# EXHAUSTIVE ANISOTROPIC PARAMETER GRID: (AD, RD) PAIRS
 # ─────────────────────────────────────────────────────────────────────────────
 
 def generate_exhaustive_diffusivity_pairs(ad_min=0.5e-3, ad_max=2.2e-3, n_ad=3,
                                           rd_min=0.05e-3, rd_max=1.2e-3, n_rd=3,
                                           anisotropy_ratio=2.0):
     """
-    DEFAULTS ALIGNED TO THE MODEL (2026-09-22). They used to be n_ad=8,
-    n_rd=8, anisotropy_ratio=1.1 -- i.e. the 52-pair grid with the
-    near-isotropic ratio-1.83 column that `anisotropy_ratio=2.0` was
+    DEFAULTS ALIGNED TO THE MODEL: `anisotropy_ratio=2.0` was
     introduced to remove, because it leaks isotropic signal into
-    fiber_fraction. `DBSI_Adaptive` has always passed its own values, so
-    the model was never affected; but anything calling this function bare
-    silently got the superseded, leaky configuration. Now a bare call
-    reproduces the model: 3x3, ratio 2.0, 5 admissible pairs.
+    fiber_fraction. Now a bare call reproduces the model: 3x3, ratio 2.0, 5 admissible pairs.
 
     Generate the parametric (AD, RD) grid for the exhaustive anisotropic
     dictionary.
@@ -133,8 +92,7 @@ def generate_exhaustive_diffusivity_pairs(ad_min=0.5e-3, ad_max=2.2e-3, n_ad=3,
         AD >= RD * anisotropy_ratio
 
     are retained. This constraint is the sole safeguard against near-
-    isotropic cylinders entering the anisotropic block (see module
-    docstring for why AD ~ RD pairs are mathematically pathological here).
+    isotropic cylinders entering the anisotropic block.
 
     Parameters
     ----------
@@ -180,18 +138,11 @@ def generate_exhaustive_diffusivity_pairs(ad_min=0.5e-3, ad_max=2.2e-3, n_ad=3,
 @njit(cache=True, fastmath=FASTMATH)
 def build_design_matrix_exhaustive(bvals, bvecs, fiber_dirs, diff_pairs, iso_grid):
     """
-    Build the full v2 DBSI design matrix A = [A_aniso | A_iso].
+    Build the full DBSI design matrix A = [A_aniso | A_iso].
 
     A_aniso has one column per (direction, AD/RD-pair) combination:
     n_aniso_cols = len(fiber_dirs) * len(diff_pairs).
-    A_iso has one column per isotropic ADC value (no orientation loop,
-    see module docstring): n_iso_cols = len(iso_grid).
-
-    Column ordering in A_aniso is pair-major, direction-minor:
-    for p in pairs: for d in fiber_dirs: column.
-    This ordering must be matched exactly by any code that re-derives
-    (ad, rd) from a flat column index — `core.solvers.select_dominant_directions`
-    and the calibration modules all depend on it.
+    A_iso has one column per isotropic ADC value: n_iso_cols = len(iso_grid).
 
     Parameters
     ----------
@@ -234,7 +185,7 @@ def build_design_matrix_exhaustive(bvals, bvecs, fiber_dirs, diff_pairs, iso_gri
                 A[i, col_idx] = np.exp(-b * D_app)
             col_idx += 1
 
-    # Isotropic block: no orientation loop (spheres have no orientation).
+    # Isotropic block.
     for j in range(n_iso):
         D_iso = iso_grid[j]
         for i in range(n_meas):
@@ -244,29 +195,16 @@ def build_design_matrix_exhaustive(bvals, bvecs, fiber_dirs, diff_pairs, iso_gri
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ISOTROPIC GRIDS (the anchored one, further down, is the production grid)
+# ISOTROPIC GRIDS
 # ─────────────────────────────────────────────────────────────────────────────
 
 def generate_log_uniform_isotropic_grid(d_min=0.1e-3, d_max=3.0e-3, n_steps=12):
     """
     Generate the isotropic ADC spectrum on a LOG-UNIFORM (geometric) grid.
 
-    For Laplace-inversion-type problems (fitting a sum of decaying
-    exponentials exp(-b*D) — exactly the isotropic DBSI block), a linear
-    ADC grid over-samples the high-ADC region (where the signal decays
-    fast and is noise-dominated) and under-samples the low-ADC region
-    (where decay is slow and biologically critical for quantifying
-    cellularity/restriction). A log-uniform grid matches the
-    sensitivity profile of the exponential kernel far more evenly across
+    A log-uniform grid matches the sensitivity profile of the exponential kernel far more evenly across
     the range (Borgia et al. 1998; Whittall & MacKay's 25-points-per-
     decade convention for multi-exponential T2/diffusion spectra).
-
-    d_min is deliberately NOT 0.0: a log-uniform grid cannot include 0
-    (undefined), and including an ADC=0 column would in any case create
-    a constant column in the design matrix (exp(0)=1 for every
-    measurement), which is degenerate for any non-negative least
-    squares fit — see project validation notes on why the grid must not
-    start at ADC=0.
 
     Parameters
     ----------
@@ -291,33 +229,13 @@ def generate_anchored_isotropic_grid(d_min=0.1e-3, d_max=3.0e-3, n_steps=12,
                                      thresh_res=0.3e-3, thresh_wat=3.0e-3,
                                      epsilon=1e-6, max_ratio=2.0):
     """
-    Generate the log-uniform isotropic ADC grid (see
-    `generate_log_uniform_isotropic_grid`), but additionally force the
+    Generate the log-uniform isotropic ADC grid, but additionally force the
     grid point closest to each compartment threshold to sit EXACTLY at
     that threshold, offset by a small epsilon to the side that the
-    production compartment-classification rule (adc <= threshold, see
-    `model_Niso_adaptive_ff_thr.py`) assigns to the INTENDED compartment.
-
-    WHY THIS ANCHORING MATTERS (discovered during transition-zone
-    validation, see project methodological supplement
-    "isotropic_compartment_supplement.docx")
-    -----------------------------------------------------------------------
-    Without anchoring, a plain log-uniform grid can place its nearest
-    point slightly on the WRONG side of a threshold purely by geometric
-    coincidence of where geomspace() happens to land — e.g. a point at
-    3.0000001e-3 when the true free-water signal should be assigned to
-    the >3.0e-3 (WAT) bin, but the column itself, if generated to land
-    at exactly 3.0e-3 or fractionally below, would be silently
-    misclassified as HIN by the `adc <= THRESH_WAT` rule. This was
-    caught as an artifact in early testing where it produced an
-    apparent "complete free-water detection failure" that was purely a
-    boundary-classification bug, not a genuine model limitation.
-
+    production compartment-classification rule assigns to the INTENDED compartment.
+  
     Anchoring does NOT remove the separate, genuine transition-zone
-    bias documented in the methodological supplement (Section 4): a
-    true diffusivity near a threshold remains intrinsically hard to
-    assign correctly regardless of grid anchoring, because the SIGNAL
-    ITSELF is ambiguous there, not just the column's nominal position.
+    bias documented in the methodological supplement.
     Anchoring only ensures the grid's own bookkeeping does not ADD a
     spurious, avoidable misclassification on top of that genuine
     physical ambiguity.
@@ -356,40 +274,15 @@ def generate_anchored_isotropic_grid(d_min=0.1e-3, d_max=3.0e-3, n_steps=12,
     grid = list(generate_log_uniform_isotropic_grid(
         d_min=d_min, d_max=d_max, n_steps=n_steps))
 
-    # ── ANCHORING (AUGMENT, not relocate) ──────────────────────────────────
-    # Historical bug: the previous implementation RELOCATED the grid point
-    # closest to each threshold onto that threshold. At small n_steps over a
-    # wide (extended) range, both interior log-uniform points get consumed by
-    # the two anchors, leaving a coverage HOLE across the whole 0.3-3.0e-3
-    # (hindered) band. An isotropic signal there (e.g. D~0.8e-3) then has NO
-    # nearby atom and the NNLS dumps it onto the fiber columns -> the fiber
-    # fraction leaks to ~1.0 with near-zero isotropic fractions. (Reproduced
-    # on the synthetic crossing-fiber scenario; this is the "isotropic-grid
-    # coverage gap" flagged in select_lambda_aniso_discrepancy's docstring.)
-    #
-    # Fix: ADD the threshold anchors as extra columns without displacing the
-    # interior log-uniform points, so classification still gets an exact-
-    # boundary column while band coverage is preserved.
+
     for thresh, off in ((thresh_res, -epsilon), (thresh_wat, +epsilon)):
-        # Use <= / >= (not strict <) so a threshold coinciding with the
-        # grid's own d_min/d_max boundary is still anchored — the anchor
-        # offset (not distance from the edge) sets the compartment.
+        
         if d_min <= thresh <= d_max:
-            anc = thresh + off  # RES anchor sits just below thresh_res
-                                # (adc<=thresh_res -> RES); WAT anchor just
-                                # above thresh_wat (adc>thresh_wat -> WAT).
+            anc = thresh + off 
             if not any(abs(g - anc) < epsilon for g in grid):
                 grid.append(anc)
 
-    # ── COVERAGE FLOOR (resolution guarantee) ──────────────────────────────
-    # Guarantee enough resolution that any physiological isotropic D has a
-    # nearby atom: no geometric gap may exceed `max_ratio`. Because exp(-b*D)
-    # is nonlinear in D, two atoms merely *bracketing* a true D is not enough
-    # (a convex mix of exp(-b*D1), exp(-b*D2) fits worse than the fiber block,
-    # so the signal still leaks); the neighbouring atom must be geometrically
-    # CLOSE. Fill oversized gaps with geometric-midpoint atoms until every
-    # adjacent ratio is <= max_ratio. (max_ratio=2.0 ~ 3 pts/octave: enough to
-    # localize the iso peak without over-parameterizing.)
+
     while True:
         g = np.sort(np.array(grid, dtype=np.float64))
         ratios = g[1:] / g[:-1]

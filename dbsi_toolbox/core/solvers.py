@@ -1,68 +1,24 @@
 """
-DBSI Core Solvers — v3: Hybrid Two-Stage Architecture
+DBSI Core Solvers
 ========================================================
 
-WHY v2's SINGLE-STAGE EXHAUSTIVE APPROACH WAS REPLACED
-----------------------------------------------------------
-v2 attempted to fold orientation AND (AD, RD) estimation into a single
-linear NNLS solve over an exhaustive (direction x AD/RD-pair) dictionary,
-extracting AD_final/RD_final as weighted centroids over the activated
-anisotropic columns. A systematic synthetic recovery validation
-(`recovery_validation.py`, 55 swept configurations) showed this is NOT
-numerically identifiable: median AD/RD relative errors ranged from ~20%
-to >150% across every grid density tested (3x3 through 8x8 AD/RD pairs),
-with WORSE recovery at finer grids, because the number of simultaneously
-activated anisotropic columns grows roughly in proportion to dictionary
-size — the centroid increasingly averages over an uninformative span of
-the grid rather than concentrating on the true value. This is a genuine
-structural collinearity problem, not a regularization-tuning problem: no
-lambda_aniso/lambda_iso combination in the swept range fixed it.
-
-v3 ARCHITECTURE: TWO STAGES, DIFFERENT PURPOSES
+ARCHITECTURE: TWO STAGES, DIFFERENT PURPOSES
 ---------------------------------------------------
-The insight preserved from the v2 design discussion (credited to Alonso
-Ramirez-Manzanares) is correct and worth keeping: the dictionary DOES
-need to "know" that pathology changes AD/RD, not just orientation.
-What v2 got wrong was solving for orientation AND diffusivity
-SIMULTANEOUSLY in one ill-conditioned linear system. v3 separates the
-two questions, because they have different statistical character:
 
-  STAGE A — "How many fiber populations, and in which directions?"
-    This is fundamentally a SPARSE detection problem: a voxel contains a
-    handful of distinct fiber populations at most. The exhaustive
-    (direction x AD/RD-pair) dictionary is well suited to this question
-    BECAUSE its richness is being used for what richness is good at —
-    letting the data choose freely among many candidate explanations —
-    while heavy regularization (lambda_aniso, sparsity-inducing) forces
-    the solution toward a small number of active columns. We do not trust
-    the centroid (AD, RD) value coming out of Stage A; we only trust
-    WHICH DIRECTIONS were selected (see `select_dominant_directions`).
+STAGE A — "How many fiber populations, and in which directions?"
+This is fundamentally a SPARSE detection problem: a voxel contains a
+handful of distinct fiber populations at most. The exhaustive
+(direction x AD/RD-pair) dictionary is well suited to this question
+BECAUSE its richness is being used for what richness is good at.
 
-  STAGE B — "Given these directions, what are AD and RD?"
-    Once the directions are fixed (typically 1, occasionally 2 for
-    crossing fibers), this becomes a small, well-conditioned regression:
-    at most a handful of orientation unknowns are now constants, and we
-    are fitting 2 diffusivities (or 2 per population) against the full
-    set of b-values/directions in the protocol — the same closed-form
-    weighted-least-squares construction already validated in v1/v2 for
-    the LINEAR initialisation step (`_estimate_AD_RD_2iso/3iso` in
-    `model_Niso_adaptive_ff_thr.py`), just no longer treated as merely an
-    "initial guess" to be refined by a non-linear grid search, since
-    there is no longer a non-linear stage to refine it: Stage B's
-    closed-form estimate IS the final AD/RD.
+STAGE B — "Given these directions, what are AD and RD?"
+Once the directions are fixed, this becomes a small, well-conditioned regression:
+at most a handful of orientation unknowns are now constants, and we
+are fitting 2 diffusivities (or 2 per population) against the full
+set of b-values/directions in the protocol. Since
+there is no longer a non-linear stage to refine it: Stage B's
+closed-form estimate IS the final AD/RD.
 
-This resolves the v2 identifiability failure because Stage B's effective
-number of free parameters (2 per active direction, typically 2-4 total)
-is decoupled from the size of Stage A's dictionary — refining Stage A's
-angular or (AD,RD) grid density no longer degrades Stage B's
-conditioning.
-
-Decoupled regularization (lambda_aniso vs lambda_iso) — Stage A only
-------------------------------------------------------------------------
-Unchanged rationale from v2 (see below), but now serves a narrower,
-better-matched purpose: enforcing sparsity in Stage A's direction
-selection, not also being asked to recover unbiased diffusivities (which
-v2 incorrectly demanded of the same penalty).
 """
 
 import numpy as np
@@ -70,70 +26,20 @@ from numba import njit, prange
 from .._numba_flags import FASTMATH
 
 
-# ─── Bounds on the fiber tensor, single source of truth ──────────────────────
-# These were scattered as literals across five sites, and had drifted apart: the
-# AD floor read 0.05e-3 at two sites and 0.20e-3 at a third. 0.05e-3 was not a
-# considered AD floor — it is the PRE-"Leva 1" shared floor, equal to
-# _STAGE_A_RD_MIN, left behind when the RD floor alone was raised from 0.05e-3 to
-# 0.15e-3 (the adjacent comments still read "was 0.05e-3"). It also sat a factor
-# of ten below the Stage A dictionary's own AD range, which starts at 0.5e-3.
-# Reconciled to the explicit physiological value already in use in the local
-# refinement.
-#
-# These are BOUNDS, not measurements. A voxel sitting exactly on one of them is
-# a voxel whose tensor the data could not determine, and on real data that is
-# not rare: ~31% of fiber-valid voxels sit exactly on _TENSOR_RD_FLOOR (49% of
-# crossings), and ~4% of second populations sit exactly on _TENSOR_AD_CEIL.
-# Downstream code should compare against these constants and report the
-# bound-active fraction rather than averaging over it; the run report now does.
+# ─── Bounds on the fiber tensorh ──────────────────────
+
 _TENSOR_AD_FLOOR = 0.20e-3
 _TENSOR_AD_CEIL = 3.50e-3
-_TENSOR_RD_FLOOR = 0.15e-3   # "Leva 1": below ~0.1e-3 noise drives RD->0, FA->1
+_TENSOR_RD_FLOOR = 0.15e-3  
 _TENSOR_RD_CEIL = 3.00e-3
-
-# Iteration cap for the NNLS coordinate descent. Raised from 2000 in v1.3.3.
-#
-# The solver RETURNS its iteration count; until v1.3.2 all twelve call sites
-# discarded it with `w, _ =`, so hitting the cap was undetectable. The Stage A
-# dictionary is ~146 columns with a condition number around 3e5, and at the
-# lambda values this toolbox selects the old cap was reached by ~15% of solves.
-# Iteration counts are NOT monotone in lambda: they peak at intermediate values,
-# which is exactly the regime in use.
-#
-# The cap was chosen by measurement on the real captured dictionary, not by
-# guesswork. The solver is SLOW on a tail, not stalling — raising the cap does
-# reach convergence — and the curve has a clean knee:
-#
-#     cap      not converged      cost vs 2000
-#     2000        14.8%              1.00x
-#     5000         7.5%              1.43x
-#    10000         4.0%              2.06x
-#    20000         0.0%              2.30x
-#    50000         0.0%              2.31x
-#
-# 20000 is the first cap at which nothing fails to converge, and going beyond it
-# buys nothing and costs nothing: the median solve still takes ~186 iterations,
-# so only the tail pays. On ~190k voxels the Stage A stage costs ~5.5 min more.
-# Non-convergence is NOT cosmetic: between the old cap and convergence the
-# weight vector moves by up to ~30% relative. The derived total fiber fraction
-# barely moves (<0.5pp), but w is what carries the DIRECTIONAL information, so
-# which basin holds the mass — and hence n_pop — can flip.
-#
-# The kernels write the per-voxel count to the `nnls_iterations` output channel
-# and the run report summarises it, so the real rate on real data is now
-# observable instead of assumed.
 _NNLS_MAX_ITER = 20000
-
-# Number of successive bisections in Stage C's local (AD, RD) refinement.
-# 1 reproduces the pre-v1.3.4 behaviour exactly (see the refinement block for why
-# that was not enough). 3 brings the resolution to 1/8 of the coarse grid step.
 _STAGEC_N_REFINE = 3
 
 
 @njit(cache=True, fastmath=FASTMATH, nogil=True)
 def nnls_coordinate_descent(AtA, Aty, reg_lambda, tol=1e-7,
                             max_iter=_NNLS_MAX_ITER):
-    """NNLS via Coordinate Descent with Active Set. Unchanged from v1/v2."""
+    """NNLS via Coordinate Descent with Active Set."""
     n = AtA.shape[0]
     x = np.zeros(n, dtype=np.float64)
     grad = -Aty.astype(np.float64)
@@ -172,12 +78,6 @@ def nnls_batch(AtA, Aty_rows, reg_lambda):
     """`nnls_coordinate_descent` on every row of Aty_rows (n, cols) with the SAME
     matrix, voxels in parallel. Returns (W (n, cols), iterations (n,)).
 
-    The calibration (until 2026-10-12) spent ~90% of its time in a Python loop calling the
-    solver once per voxel: ~20 min for 1000 voxels, mostly the voxels that hit
-    the iteration cap at lambda_aniso ~ 0. Each voxel's problem is independent,
-    so it runs on all cores; the solver, its inputs and the per-voxel arithmetic
-    are unchanged (tests/test_calibration_fast.py checks the solutions bit for
-    bit against the serial loop).
     """
     n = Aty_rows.shape[0]
     W = np.empty((n, AtA.shape[0]), dtype=np.float64)
@@ -193,10 +93,7 @@ def compute_regularization_matrix(AtA, n_aniso_cols, lambda_aniso, lambda_iso):
     """
     Build the decoupled regularization matrix for Stage A's design matrix.
 
-    Gamma = diag(lambda_aniso * I_aniso, lambda_iso * I_iso). See module
-    docstring: in v3 lambda_aniso only needs to enforce DIRECTIONAL
-    sparsity (how many fiber populations), not also produce an unbiased
-    (AD, RD) centroid — that job moved to Stage B.
+    Gamma = diag(lambda_aniso * I_aniso, lambda_iso * I_iso). 
 
     Parameters
     ----------
@@ -225,24 +122,9 @@ def compute_regularization_matrix(AtA, n_aniso_cols, lambda_aniso, lambda_iso):
 # STAGE A — Direction selection from the exhaustive dictionary
 # ─────────────────────────────────────────────────────────────────────────────
 #
-# WHY LOCAL-MAXIMA PEAK-FINDING, NOT GLOBAL TOP-K BY WEIGHT
-# -----------------------------------------------------------------------
-# The original selection rule (ranking all n_dirs candidates globally by
-# aggregated weight and keeping the top `max_directions`) has a
-# structural false-positive failure mode, confirmed by project synthetic
-# testing: for a TRUE single fiber, the NNLS solution's weight on the
-# fixed Fibonacci grid routinely SMEARS across the true direction's
-# immediate geometric neighbours (the true orientation almost never
-# falls exactly on a grid node). The mean angular separation between the
-# two highest-weight columns in single-fiber trials (~26 deg, measured)
-# coincides almost exactly with the dictionary's own mean nearest-
-# neighbour spacing (~25 deg) -- i.e. the "second population" the old
-# rule reported was not a second fiber, it was the true fiber's own
-# quantisation shadow on an adjacent grid node. Because global top-K only
-# asks "is this among the 2 heaviest columns overall", it cannot tell
-# that smearing apart from a genuine second peak.
-#
-# The fix: a candidate direction is only counted as a detected population
+# WHY LOCAL-MAXIMA PEAK-FINDING, 
+# 
+# A candidate direction is only counted as a detected population
 # if its aggregated weight exceeds the weight of EVERY one of its k
 # nearest geometric neighbours in the SAME dictionary (a local maximum on
 # the weight-over-sphere function), not merely high in the global
@@ -252,53 +134,22 @@ def compute_regularization_matrix(AtA, n_aniso_cols, lambda_aniso, lambda_iso):
 # well-separated fiber population has its own local neighbourhood and
 # remains a local maximum independently.
 #
-# RE-VALIDATED 2026-07-15 (this implementation, synthetic 3-shell
-# Verona-like protocol, n_dirs=62, SNR=30, 30 seeds/condition; see
-# project re-validation sweep for the script): single-fiber correct
-# N_POP=1 rate rose from 0.0% (global top-K, confirmed on this same
-# synthetic setup) to 73.3% at k=6 (the shipped default -- see
-# `_DEFAULT_DIRECTION_PEAK_K` in model_Niso_adaptive_ff_thr.py for the
-# k-sweep that selected 6 over the originally proposed 8). True-crossing
-# sensitivity is angle-dependent, NOT uniformly 95-100% as an earlier,
-# smaller-scale check suggested: 46.7% at 30 deg, 93.3% at 60 deg, 96.7%
-# at 90 deg (k=6). The 30-degree regime is intrinsically hard at this
-# dictionary density (mean node spacing ~25 deg -- a 30-degree crossing
-# separates the two true peaks by barely more than one grid spacing, so
-# their k-nearest-neighbourhoods overlap almost by construction) and is
-# NOT much improved by retuning k alone (45-65% across k=4..12 tested);
-# closing that gap requires a denser Stage A dictionary (larger n_dirs)
-# for protocols where sub-45-degree crossings are expected to matter.
-# Numbers above are specific to this synthetic setup (fraction splits,
-# SNR, regularisation) and should be re-checked against your own
-# protocol/tissue assumptions before relying on them clinically.
-#
-# NOTE ON REMAINING LIMITATION: local-maxima peak-finding fixes DETECTION
-# (how many populations, which grid nodes) but not localisation -- the
-# reported direction(s) are still raw grid nodes, accurate only to the
-# dictionary's own angular resolution. For n_pop==1 this is separately
-# addressed by the MRDS-lite cone refinement (`refine_fiber_direction_cone`).
-# For n_pop>=2, per-population cone refinement is not implemented in this
-# release (see MRDS multi-fiber module docstring further below).
+
 
 def build_direction_neighbor_graph(fiber_dirs, k=6):
     """
-    Precompute, once per protocol (NOT per voxel), the indices of each
+    Precompute, once per protocol, the indices of each
     Stage A hemisphere direction's k angularly-nearest neighbours within
     the SAME dictionary. Feeds `select_dominant_directions`'s
     local-maxima peak-finding criterion.
 
-    Plain NumPy (not Numba) -- called a handful of times per `fit()`
-    call, exactly like `measure_hemisphere_spacing`, not per voxel.
 
     Parameters
     ----------
     fiber_dirs : ndarray (n_dirs, 3)
         Stage A's hemisphere direction dictionary.
     k : int
-        Number of nearest neighbours per direction. Default 6 -- see the
-        k-sweep in module notes above `select_dominant_directions` (k=6
-        matched or beat k in {4,8,10,12} on both single-fiber correctness
-        and crossing sensitivity in re-validation).
+        Number of nearest neighbours per direction. Default 6.
 
     Returns
     -------
@@ -306,26 +157,6 @@ def build_direction_neighbor_graph(fiber_dirs, k=6):
         Row d holds the indices of direction d's k_eff nearest
         neighbours by AXIAL distance (|dot|). k_eff = min(k, n_dirs - 1) to
         stay well-defined for very small dictionaries.
-
-    AXIAL, NOT RAW DOT (fixed in v1.5.1). This used to rank neighbours by the
-    raw dot product, on the claim that "the hemisphere generator already
-    resolves the +/- direction sign ambiguity". It does not, near the equator:
-    two nodes at z~0 with azimuths theta and theta+180 deg are the SAME axis
-    (v ~ -w), yet their raw dot is ~ -1, so each was invisible to the other.
-    The rest of the selection was already axial (basin assignment and NMS use
-    |dot|), so a fiber lying near the equatorial plane had its weight split
-    across the boundary into a second local maximum. Measured with the real
-    Stage A (P3-like protocol, frozen lambdas, SNR 26, single fiber):
-
-        elevation from equator     0      10      20     (deg)
-        dominant basin, raw dot    0.55   0.61    0.70   (axial: 0.97-1.00)
-        false crossings, n_dirs 62 0.00   0.01    0.07   (axial: 0.00)
-        false crossings, n_dirs 39 0.00   0.09    0.28   (axial: 0.00)
-
-    and in 90-degree crossings with one fiber near the equator the FF split
-    between the two populations moved from 0.53 to 0.61. In an axial
-    acquisition the equator is the axial plane: left-right and
-    anterior-posterior fibers (corpus callosum, cingulum, ...) live there.
     """
     n = len(fiber_dirs)
     k_eff = max(1, min(k, n - 1))

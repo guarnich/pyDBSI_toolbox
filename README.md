@@ -30,7 +30,7 @@ with known ground truth and checked on real acquisitions.
 isotropic block is split into RF / HF / WF (3-ISO); otherwise HF and WF are merged into a single
 non-restricted fraction NRF (2-ISO).
 
-**Compartment classes (v1.10.0).** Default boundaries RF ≤ 0.3 < HF ≤ 3.0 < WF μm²/ms (Wang et al.
+**Compartment classes.** Default boundaries RF ≤ 0.3 < HF ≤ 3.0 < WF μm²/ms (Wang et al.
 2015, *Brain* 138:1223; Ye et al. 2020, *Ann Clin Transl Neurol* 7:695). They are not a consensus:
 tumour studies use RF ≤ 1.0, HF 1.0–1.5, non-restricted > 1.5 (Han et al. 2023, *Neuro-Oncol Adv*
 5:vdad050). The reported fractions are the weights of the Stage D centroids (default 0.15 / 1.0 /

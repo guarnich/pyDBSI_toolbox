@@ -14,12 +14,8 @@ with known ground truth and checked on real acquisitions.
 
 - [Inputs](#inputs) — including the **required thermal noise map**
 - [Quick start](#quick-start)
-- [How a voxel is fitted](#how-a-voxel-is-fitted)
 - [Outputs](#outputs)
 - [Protocol calibration for a cohort](#protocol-calibration-for-a-cohort)
-- [Key parameters](#key-parameters)
-- [What the numbers mean — known limits](#what-the-numbers-mean--known-limits)
-- [Version history](#version-history)
 
 ## Inputs
 

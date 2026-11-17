@@ -28,7 +28,7 @@ with known ground truth and checked on real acquisitions.
 | preprocessed DWI (4D NIfTI) | preprocessed through topup, eddy and N4 bias correction (recipe below) |
 | b-values, b-vectors (FSL format) | the gradient table matching the preprocessed volumes; at least one b=0 (b < 100), used for S0 only |
 | brain mask | defines the fitted voxels **and** the calibration sample |
-| **thermal noise map** (3D NIfTI) | **output** of MP-PCA denoising algorithm |
+| **thermal noise map** (3D NIfTI) | **required:** output of MP-PCA denoising algorithm |
 
 **3-ISO vs 2-ISO.** With `b_max >= 2000` s/mm² and at least two distinct non-zero shells the
 isotropic block is split into RF / HF / WF (3-ISO); otherwise HF and WF are merged into a single

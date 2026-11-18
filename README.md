@@ -125,27 +125,10 @@ interpolation turns NaN into 0), `fiber_detection_stat.nii.gz`, the fiber direct
 `dir1.nii.gz` / `dir2.nii.gz`, and `toolbox_report/`.
 
 **Directions.** `dirK_x/y/z` are the three components of a unit vector along population K's
-axis: each is the cosine of the angle with that image axis, hence in [-1, 1]. The sign is
-arbitrary (v and −v are the same fiber). The vector is in the frame of the bvecs passed to the
-fit, with no rotation: with FSL-convention bvecs (dcm2niix) it is the frame of `dtifit`'s V1.
+axis: each is the cosine of the angle with that image axis, hence in [-1, 1].
 `dir1.nii.gz` / `dir2.nii.gz` stack the three channels into one (X, Y, Z, 3) image, the layout
-of V1, so FSLeyes shows them as RGB or line vectors (modulate by `fiber_fraction_pop1/2`).
+of `dtifit`'s V1, so FSLeyes shows them as RGB or line vectors (modulate by `fiber_fraction_pop1/2`).
 Do not resample them like the scalar maps: the vectors must be rotated with the transform, and linear interpolation averages v with −v.
-
-`toolbox_report/`:
-
-| file | content |
-|---|---|
-| `run_report.txt` | version, git commit, noise (thermal SNR, σ source), Rician truncation, fibers removed by the final threshold, calibration and its source, options, population census, solver diagnostics, detection statistic, uncertainty summary |
-| `design_matrix.png/.npz`, `dictionary_columns.csv` | the Stage A dictionary actually used |
-| `protocol_calibration.json` | copy of the protocol calibration, when used |
-| `uncertainty_maps/` | `NN_<channel>_se.nii.gz` for every continuous channel, `dir1/2_angle_se_deg`, `fisher_log10_condition`, `residual_over_sigma`, `uncertainty_flags`, `README.txt` |
-
-**Uncertainty maps.** The standard error of each continuous map is the Cramér–Rao bound
-at the estimate: Fisher information of the reported model (fibers with weight, AD, RD and
-direction free; fixed isotropic centroids), delta method for normalised fractions, FA and the
-weighted tensor. It is the precision the data and protocol allow, **not the bias**. 
-Flags: 1 RD on a bound, 2 AD on a bound, 4 ill-conditioned Fisher matrix, 16 residual larger than the noise explains. For a region of N voxels the error of the mean shrinks by up to √N.
 
 ## Protocol calibration for a cohort
 
@@ -182,4 +165,5 @@ model = DBSI_Adaptive.from_calibration('P3_calibration.json')      # every acqui
    in Medicine*, 34(6), 910–914.
 7. Koay CG, Özarslan E, Basser PJ (2009). A signal transformational framework for breaking the
    noise floor and its applications in MRI. *Journal of Magnetic Resonance*, 197(2), 108–119.
+8. Cordero-Grande L, Christiaens D, Hutter J, Price AN, Hajnal JV. Complex diffusion-weighted image estimation via       matrix recovery under general noise models. *NeuroImage* 2019;200:391–404   
 

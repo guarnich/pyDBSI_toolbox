@@ -48,23 +48,15 @@ check new classes on simulations of the tissue of interest before using them.
 
 ### The thermal noise map (required)
 
-The input DWI is denoised, so each value approximates the **mean** of the Rice distribution,
-E[M] = σ√(π/2)·L₁/₂(−A²/2σ²), where A is the noise-free signal (Gudbjartsson & Patz 1995). The
-toolbox removes the Rician bias by inverting this relation exactly, voxel by voxel with the σ of
-the noise map: Â solves E[M](Â) = S, through a precomputed table, and is set to 0 where S is at
-or below the noise floor σ√(π/2) (Koay, Özarslan & Basser 2009). Until v1.11.1 the toolbox used
-√max(S² − 2σ², 0), the second-moment correction: right for raw single measurements, but on
-denoised data it over-subtracts (−37 % at A = σ, −11 % at 2σ, −5 % at 3σ). Every stage of the fit,
-including the single-fiber tensor (Stage C, on the raw input until v1.11.1), works on the corrected
-signal: on the phantom this lowered the single-fiber AD error by 20–35 % and removed most of the
-AD inflation in water-rich voxels (edema, +0.28 → +0.05 μm²/ms at SNR 26).
+The input DWI is **denoised**, so each value approximates the **mean** of the Rice distribution
+rather than a single noisy measurement. The toolbox removes the Rician bias by numerically
+inverting this relation (Koay, Özarslan & Basser 2009), measurement by measurement with the σ of
+the noise map; where the signal is at or below the noise floor, the corrected value is set to 0.
 
-σ must therefore be the **thermal** noise of the magnitude images, and the toolbox requires the
-noise map of the same MP-PCA denoising (Veraart et al. 2016), brought into the intensity scale of
-the DWI. The run report states the correction used and how many measurements it set to zero.
-
-The run report gives the **thermal SNR** (median of S0 / σ over the mask) and how many mask voxels
-had no valid value in the map.
+σ must therefore be the **thermal** noise level (the σ of the Rice distribution), and the toolbox
+requires the noise map of the same MP-PCA denoising (Veraart et al. 2016; Cordero-Grande et al.
+2019), with any intensity scaling applied to the DWI after denoising (e.g. N4 bias correction)
+applied to the noise map as well.
 
 ## Quick start
 
@@ -74,7 +66,6 @@ had no valid value in the map.
 git clone https://github.com/guarnich/pyDBSI_toolbox
 cd pyDBSI_toolbox
 pip install -e .
-python tests/test_noise_map.py        # every tests/test_*.py runs as a plain script
 ```
 
 Requirements: Python ≥ 3.8, NumPy ≥ 1.20, Numba ≥ 0.55, NiBabel ≥ 3.2, SciPy ≥ 1.7, tqdm ≥ 4.60.
@@ -172,22 +163,6 @@ save_protocol_calibration(cal, 'P3_calibration.json')              # returns the
 
 model = DBSI_Adaptive.from_calibration('P3_calibration.json')      # every acquisition
 ```
-
-**Step by step: `scripts/calibration.ipynb`.** Point it at the acquisitions (a glob or a list of
-directories) and at the file names *as your study names them* (one glob pattern per input,
-relative to each acquisition directory); it checks every input without fitting (grids,
-orientation of mask and noise map, one protocol fingerprint for the whole sample), calibrates each
-acquisition on the toolbox's λ grids (118 log-spaced points), writes `<protocol>_calibration.json` and plots the GCV curves behind the choice.
-
-`calibrate_protocol` refuses records calibrated without a noise map. `from_calibration` imposes
-the λ, `n_iso`, the gate and the dictionary options, refuses data with a different protocol
-fingerprint (`strict=True`) and refuses overrides of calibrated parameters; the run report states
-`calibration_source: protocol` with the file's sha256. Aggregation: `'geomean'` minimises the mean
-of the log GCV curves (scale-invariant, so a noisier acquisition does not outvote a cleaner one).
-The calibration records the Rician correction it was computed with. Calibrations written before
-v1.12.0 used the second-moment correction: they still load, and the run report and a warning say
-so; recalibrate the protocol to remove the (small) mismatch.
-
 
 ## References
 

@@ -2528,7 +2528,7 @@ class DBSI_Adaptive:
            calibrate_concentration_gate=False,
            concentration_gate_percentile=_CONCENTRATION_GATE_PERCENTILE,
            _calibration_only=False, _lambda_aniso_grid=None, _lambda_iso_grid=None,
-           _rician_correction='first_moment', noise_map=None):
+           _rician_correction='first_moment', _stagec_signal='raw', noise_map=None):
         """
         Fit the v3 hybrid two-stage adaptive DBSI model (+ MRDS
         multi-fiber extension) to 4D diffusion MRI data.
@@ -2912,6 +2912,15 @@ class DBSI_Adaptive:
         )
         self.rician_clamp_['correction'] = _rician_correction
         self.rician_correction_ = _rician_correction
+        # EXPERIMENTAL (2026-11-18): which signal Stage C (mono-fiber VARPRO) sees.
+        # 'raw' = the input as given (default since the July validation, made with
+        # the 'clamp' correction); 'corrected' = data_corr, to re-test now that
+        # the correction no longer over-subtracts. Declared in the run report
+        # only when it is not the default.
+        if _stagec_signal not in ('raw', 'corrected'):
+            raise ValueError(f"_stagec_signal: 'raw' or 'corrected', not {_stagec_signal!r}")
+        if _stagec_signal != 'raw':
+            self.rician_clamp_['stagec_signal'] = _stagec_signal
         _pc_corr = (None if self.protocol_calibration_ is None
                     else self.protocol_calibration_.get('rician_correction', 'clamp'))
         if _pc_corr is not None and _pc_corr != _rician_correction:
@@ -3441,7 +3450,8 @@ class DBSI_Adaptive:
                         float(self.conc_mod_gain),
                         bool(self.stagec_refine), iso_forward, iso_gram,
                         stagec_ad_grid, stagec_rd_grid, float(_STAGEC_ANISO_RATIO),
-                        data, stagec_iso_grid, bool(self.stagec_dir_refine),
+                        data_corr if _stagec_signal == 'corrected' else data,
+                        stagec_iso_grid, bool(self.stagec_dir_refine),
                         float(_kappa), sigma_map, bool(self.crossing_dir_refine),
                         _test21, _alt, _iso_cfg
                     )

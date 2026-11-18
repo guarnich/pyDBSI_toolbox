@@ -6,70 +6,10 @@ from scipy.stats import chi2
 # ─────────────────────────────────────────────────────────────────────────────
 # NOISE ESTIMATION 
 # ─────────────────────────────────────────────────────────────────────────────
-# `estimate_snr_robust` returned an SNR biased HIGH by x1.82 and a sigma biased
-# LOW by x0.55 on a 2-b0 acquisition (the minimum this toolbox accepts, and what
-# the Verona P3 protocol provides). Two independent defects, each measured by
-# Monte Carlo against a known sigma (tests/test_snr_sigma_bias.py):
-#
-#  (1) MEDIAN OF A RATIO. The old code took the median over voxels of the
-#      per-voxel ratio mean/std. With nb0 samples the per-voxel std is
-#      sigma*sqrt(chi2_k / k), k = nb0-1, so the median of the RATIO is not the
-#      ratio of the medians. At nb0=2, std = sigma*|z| and median(1/|z|) =
-#      1/0.6745, so SNR came out x1.483 too high. The bias shrinks with nb0
-#      (x1.051 at 8, x1.012 at 32) but never vanishes at nb0=2.
-#
-#  (2) THE "ITERATIVE RICIAN CORRECTION" WAS A CONSTANT. The loop
-#          snr <- m / sqrt(s^2 - m^2/(2 snr^2))
-#      has a closed-form fixed point: u = m^2/(s^2 - m^2/(2u)) gives
-#      u = (3/2) m^2/s^2, i.e. snr = sqrt(3/2) * (m/s) = 1.2247 * (m/s).
-#      So the 20 iterations only ever multiplied the estimate by 1.2247 — at
-#      EVERY SNR and EVERY nb0. It is not a Rician correction, and the comment
-#      about "how many iterations to converge" described convergence to that
-#      constant. Measured: x1.2247 at nb0 = 2, 4, 8 and 32 alike.
-#
-#      Combined at nb0=2: SNR x1.817, sigma x0.554.
-#
-#  HOW BIG THE BIAS IS DEPENDS ON nb0, AND 2 IS THE FLOOR, NOT THE TYPICAL CASE.
-#  Do not quote x1.82 as "the" bias: the Verona P3 cohort acquires NINE b=0
-#  volumes (measured, n_b0=9 on all 178 subjects), where defect (1) has almost
-#  vanished and essentially only the sqrt(3/2) remains:
-#
-#      nb0     chi factor    sigma x
-#        2       0.6745       1.816    <- the toolbox MINIMUM
-#        4       0.8881       1.379
-#        9       0.9581       1.278    <- the real acquisition
-#       16       0.9777       1.253
-#
-#  Also worth knowing when correcting numbers already produced: sigma can be
-#  corrected EXACTLY from an old report, because the legacy fixed point makes
-#  m_v/snr_v = s_v/sqrt(1.5) identically, so sigma_legacy = median(s_v)/sqrt(1.5)
-#  and sigma_true = sigma_legacy * sqrt(1.5)/c(nb0) -- verified to 5 decimals and
-#  independent of how heterogeneous the signal is across the mask. The SNR cannot:
-#  it is a median of a RATIO, which does not decompose, and the measured factor at
-#  nb0=9 moves between 1.268 and 1.295 with tissue heterogeneity. An old SNR must
-#  be RECOMPUTED, not rescaled.
-#
-# WHY IT MATTERS BEYOND THE REPORTED NUMBER. sigma is not cosmetic:
-#   - the Rician correction subtracts a noise floor 2*sigma^2, so at x0.554 it
-#     removed only ~31% of the floor it should have;
-#   - `lambda_iso_discrepancy_cap` and the pass-1 lambda_aniso target N*sigma^2;
-#   - `select_n_iso_svd` thresholds the singular values at 1/snr;
-#   - `select_n_iso_bootstrap` injects noise at sigma.
-#
-# THE REPLACEMENT is robust AND unbiased: take the MEDIAN of the per-voxel
-# standard deviations (robust to motion/outlier voxels, unlike pooling the
-# variances) and divide by the known median of the chi distribution with
-# k = nb0-1 degrees of freedom, sqrt(median(chi2_k)/k) — 0.6745 at nb0=2. SNR is
-# then the ratio of two medians, not the median of a ratio. Verified x1.001
-# against a known sigma at nb0 = 2, 4, 8 and 32.
-#
-# `_SNR_LEGACY_BIASED = True` restores the old estimator bit for bit, so a
-# regression can be bisected against <= v1.3.4 by flipping one constant. It is
-# NOT a supported configuration: it is provably biased.
+
+
 _SNR_LEGACY_BIASED = False
 
-# Un volume e' b=0 se b < B0_THRESHOLD (s/mm^2). UNICA definizione nel pacchetto:
-# S0, kernel, calibrazione, impronta del protocollo e run report la leggono da qui.
 B0_THRESHOLD = 100.0
 
 

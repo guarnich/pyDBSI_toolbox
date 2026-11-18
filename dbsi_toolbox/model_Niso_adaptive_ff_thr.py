@@ -4,12 +4,13 @@ DBSI Adaptive Model — Stage A detection, Stage B/C tensors, Stage D fractions
 
 INPUT (fixed)
 -------------
-A preprocessed DWI (topup, eddy, N4 bias correction), its bvals/bvecs, a brain
-mask, and the thermal noise map of dwidenoise divided by the N4 bias field
-(`noise_map`, required). The noise map is sigma for every step: the Rician
-correction (S^2 - 2 sigma^2, per voxel), the calibration of the lambdas, the
-crossing ridge, the detection statistic and the uncertainty maps. The b=0
-volumes give S0 only (at least one is needed).
+A DWI denoised with MP-PCA (dwidenoise) and then preprocessed (topup, eddy, N4
+bias correction), its bvals/bvecs, a brain mask, and the thermal noise map of
+dwidenoise divided by the N4 bias field (`noise_map`, required). The noise map
+is sigma for every step: the Rician correction (exact inversion of the Rician
+mean, per voxel, v1.12.0), the calibration of the lambdas, the crossing ridge,
+the detection statistic and the uncertainty maps. The b=0 volumes give S0 only
+(at least one is needed).
 
 PIPELINE
 --------
@@ -23,7 +24,7 @@ are trusted from Stage A, not its (AD, RD).
 STAGE B/C — tensors.
   - n_pop == 1: direction refined by a two-level cone search, then Stage C
     (`stagec_varpro_single_fiber`) re-solves tensor and fractions jointly on the
-    raw signal.
+    Rician-corrected signal (v1.12.0; on the raw input until v1.11.1).
   - n_pop == 2: the crossing FF is re-solved on the detected support with a
     light ridge kappa * (sigma/S0)^2 (`crossing_ff_resolve`), then a bounded
     joint Levenberg-Marquardt fits both tensors (`estimate_AD_RD_mrds`). The
@@ -188,6 +189,31 @@ THRESH_WAT = 3.0e-3          # mm^2/s — hindered  / free-water boundary (defau
 # Inside the numba kernels the configuration travels as one float64 array, laid out
 # by the _CFG_* indices below.
 _CFG_T_RES, _CFG_T_WAT, _CFG_C_RF, _CFG_C_HF, _CFG_C_WF, _CFG_C_NRF = range(6)
+
+
+def _rician_mean(a):
+    """E[M]/sigma of a Rician magnitude with noise-free amplitude a = A/sigma."""
+    from scipy.special import i0e, i1e
+    x = a * a / 4.0
+    return np.sqrt(np.pi / 2) * ((1 + 2 * x) * i0e(x) + 2 * x * i1e(x))
+
+
+_RICIAN_A_GRID = np.linspace(0.0, 60.0, 120001)
+_RICIAN_M_GRID = None
+
+
+def _rician_mean_inverse(r):
+    """A/sigma from the Rician mean r = E[M]/sigma (monotone, r >= sqrt(pi/2)).
+    Table up to A = 60 sigma; above it E[M]^2 = A^2 + sigma^2 to < 1e-5 relative."""
+    global _RICIAN_M_GRID
+    if _RICIAN_M_GRID is None:
+        _RICIAN_M_GRID = _rician_mean(_RICIAN_A_GRID)
+    r = np.asarray(r, dtype=np.float64)
+    a = np.interp(r, _RICIAN_M_GRID, _RICIAN_A_GRID)
+    hi = r > _RICIAN_M_GRID[-1]
+    if np.any(hi):
+        a = np.where(hi, np.sqrt(np.maximum(r * r - 1.0, 0.0)), a)
+    return a
 
 
 def _resolve_iso_classes(iso_thresholds, iso_centroids, iso_centroid_nrf):
@@ -618,12 +644,20 @@ _STAGEC_ANISO_RATIO = 1.1
 # 0.831 on the validation brain). The residual low-FA AD under-estimation is a
 # fundamental identifiability limit (a low-FA fiber is nearly isotropic, so
 # (AD,RD) are weakly constrained), not an iso-grid coverage issue.
-# Stage C fits the RAW normalised signal, NOT the Rician-corrected data_corr:
-# the pipeline's noise-floor subtraction sqrt(max(S^2 - 2 sigma^2, 0)) distorts
-# the high-b decay (over-subtraction + the >=0 clamp) and biases the fiber
-# tensor low (validated: raw -> AD 1.72/FF 0.56/RF 0.09 vs corrected ->
-# AD 1.32/FF 0.73 on a GT-1.70 fiber; both NNLS solvers agree, so it is the
-# input signal, not the solver). Stage A detection still uses data_corr.
+# Stage C SIGNAL (v1.12.0): the Rician-CORRECTED data_corr, like every other
+# stage. History: from July to v1.11.1 Stage C fitted the RAW input, because
+# the correction of the time, sqrt(max(S^2 - 2 sigma^2, 0)), over-subtracts on
+# denoised data and biased the tensor low (then: raw -> AD 1.72 vs corrected
+# -> AD 1.32 on a GT-1.70 fiber). With the exact first-moment inversion that
+# reason is gone, and the raw signal keeps the Rician floor inside the fit,
+# which INFLATES the AD where the high-b signal is low. Phantom, 13 scenarios,
+# real dwidenoise, single-fiber ADw MAE raw -> corrected: 0.219 -> 0.138
+# (SNR 15), 0.120 -> 0.094 (26), 0.057 -> 0.044 (40) e-3 mm^2/s; edema ADw
+# bias +0.280 -> +0.048 at SNR 26; on exact E[M] input the corrected fit is
+# near exact (MAE 0.004 vs 0.059). RD slightly better; FA, fractions and the
+# population census unchanged. The clamp + corrected combination still shows
+# the July bias (WM AD -0.02/-0.05). The kernel argument keeps its old name
+# `data_raw`: it is "the signal Stage C sees" (`fit(_stagec_signal=...)`).
 
 # Stage D — final constrained compartment-fraction re-solve (ON by default;
 # disable via iso_resolve=False). For EVERY fitted voxel, the reported
@@ -864,8 +898,8 @@ def _single_fiber_2iso(arr, x, y, z, dominant_dir, sig_norm, bvals, bvecs, b0_th
         # fit on [fiber_col(AD,RD,dir) | iso_grid]. Fixes the
         # fiber_fraction inflation + restricted collapse + AD
         # under-estimation (see stagec_varpro_single_fiber).
-        # Uses the RAW normalised signal (data_raw), not data_corr:
-        # the Rician noise-floor subtraction biases the tensor low.
+        # `data_raw` is the Stage C signal: data_corr by default since
+        # v1.12.0 (see the note above _DEFAULT_ISO_RESOLVE).
         sig_raw = data_raw[x, y, z]
         s0_raw = 0.0
         cnt_raw = 0
@@ -966,8 +1000,8 @@ def _single_fiber_3iso(arr, x, y, z, dominant_dir, sig_norm, bvals, bvecs, b0_th
                 cone1_half_angle, n1_cone, cone2_half_angle, n2_cone
             )
         # ── STAGE C: joint (VARPRO) tensor+fraction re-solve (3-ISO
-        # binning RES/HIN/WAT). Uses the RAW normalised signal
-        # (data_raw), not data_corr. See stagec_varpro_single_fiber. ──
+        # binning RES/HIN/WAT). `data_raw` is the Stage C signal:
+        # data_corr by default since v1.12.0. ──
         sig_raw = data_raw[x, y, z]
         s0_raw = 0.0
         cnt_raw = 0
@@ -1218,8 +1252,8 @@ def _fit_voxels_2iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                     # fit on [fiber_col(AD,RD,dir) | iso_grid]. Fixes the
                     # fiber_fraction inflation + restricted collapse + AD
                     # under-estimation (see stagec_varpro_single_fiber).
-                    # Uses the RAW normalised signal (data_raw), not data_corr:
-                    # the Rician noise-floor subtraction biases the tensor low.
+                    # `data_raw` is the Stage C signal: data_corr by default
+                    # since v1.12.0 (see the note above _DEFAULT_ISO_RESOLVE).
                     sig_raw = data_raw[x, y, z]
                     s0_raw = 0.0
                     cnt_raw = 0
@@ -1545,8 +1579,8 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                             cone1_half_angle, n1_cone, cone2_half_angle, n2_cone
                         )
                     # ── STAGE C: joint (VARPRO) tensor+fraction re-solve (3-ISO
-                    # binning RES/HIN/WAT). Uses the RAW normalised signal
-                    # (data_raw), not data_corr. See stagec_varpro_single_fiber. ──
+                    # binning RES/HIN/WAT). `data_raw` is the Stage C signal:
+                    # data_corr by default since v1.12.0. ──
                     sig_raw = data_raw[x, y, z]
                     s0_raw = 0.0
                     cnt_raw = 0
@@ -1724,7 +1758,7 @@ def _iso_resolve_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso, 
     (n_pop + per-population directions/tensors) back from the output array,
     re-solves [fibers | fixed iso centroids] via `iso_fraction_resolve`, and
     OVERWRITES the fraction channels (0,1,2,3,4 and the pop-2 fraction 15).
-    The fiber TENSORS/directions are kept as estimated (Stage C on raw / MRDS);
+    The fiber TENSORS/directions are kept as estimated (Stage C / MRDS);
     only the fractions are re-estimated here (on corrected). See
     `core.solvers.iso_fraction_resolve` for the why (raw-tensor / corrected-
     fraction split, fixed-3 vs the over-complete spectrum).
@@ -2408,6 +2442,7 @@ class DBSI_Adaptive:
         self.sure_crosscheck_report_ = None
         self.n_iso_source_ = None
         self.rician_clamp_ = None
+        self.rician_correction_ = None
         self.fiber_detection_stat_ = None
         self.fiber_detection_ = None
         self.two_vs_one_stat_ = None
@@ -2483,6 +2518,9 @@ class DBSI_Adaptive:
             rule=cal.get('aggregation', {}).get('rule'),
             lambda_iso_cap_rule=cal.get('aggregation', {}).get('lambda_iso_cap_rule'),
             protocol=cal['protocol'], strict=bool(strict),
+            # v1.12.0: the correction the lambdas were calibrated under; a
+            # calibration written before carries none and used the second moment
+            rician_correction=mo.get('rician_correction', 'clamp'),
             content={k: v for k, v in cal.items() if k != '_source'})
         return m
 
@@ -2494,7 +2532,7 @@ class DBSI_Adaptive:
            calibrate_concentration_gate=False,
            concentration_gate_percentile=_CONCENTRATION_GATE_PERCENTILE,
            _calibration_only=False, _lambda_aniso_grid=None, _lambda_iso_grid=None,
-           _rician_correction='clamp', noise_map=None):
+           _rician_correction='first_moment', _stagec_signal='corrected', noise_map=None):
         """
         Fit the v3 hybrid two-stage adaptive DBSI model (+ MRDS
         multi-fiber extension) to 4D diffusion MRI data.
@@ -2541,6 +2579,7 @@ class DBSI_Adaptive:
         self.n_iso_columns_res_ = None
         self.n_iso_columns_wat_ = None
         self.rician_clamp_ = None
+        self.rician_correction_ = None
         self.fiber_detection_stat_ = None
         self.fiber_detection_ = None
         self.two_vs_one_stat_ = None
@@ -2800,24 +2839,50 @@ class DBSI_Adaptive:
         # ── Rician bias correction, voxel by voxel with sigma_map ──────────
         print("\n3. Applying Rician Bias Correction...")
         data_corr = np.zeros_like(data, dtype=np.float32)
-        # per voxel (v1.7.1): 2 sigma^2 col sigma del voxel; costante senza mappa
-        noise_floor = (2.0 * sigma_map[xs, ys, zs] ** 2)[:, None]
+        # DEFAULT 'first_moment' (v1.12.0). The input is MP-PCA denoised by
+        # contract, so each value is ~ E[M], the FIRST moment of the Rice
+        # distribution, not a single noisy draw. The exact inversion solves
+        # E[M](A)/sigma = S/sigma for A (Koay, Ozarslan & Basser 2009; table +
+        # np.interp, `_rician_mean_inverse`), 0 at or below the floor
+        # sigma*sqrt(pi/2). Per voxel with the sigma of the noise map (v1.7.1).
+        # Until v1.11.1 the default was 'clamp' = sqrt(max(S^2 - 2 sigma^2, 0)),
+        # the SECOND moment: right for raw single measurements, but on denoised
+        # data it over-subtracts (-37% at A = sigma, -11% at 2 sigma, -5% at
+        # 3 sigma). Measured on the 13-scenario phantom with real dwidenoise at
+        # SNR 26: RF bias in WM -0.006/-0.008 -> ~0, tensor unchanged.
+        # Kept for comparison only: 'clamp', 'signed' (clamp without the
+        # truncation), 'sigma2' = sqrt(S^2 - sigma^2) (high-SNR first moment,
+        # DESIGNER), 'pi2' = sqrt(S^2 - pi/2 sigma^2) (exact only at A = 0).
+        _sub = {'clamp': 2.0, 'signed': 2.0, 'sigma2': 1.0, 'pi2': np.pi / 2,
+                'first_moment': np.pi / 2}.get(_rician_correction)
+        if _sub is None:
+            raise ValueError("_rician_correction: 'clamp', 'signed', 'sigma2', 'pi2' or "
+                             f"'first_moment', not {_rician_correction!r}")
+        # same expression as up to v1.11.1, so 'clamp' reproduces those fits bit for bit
+        noise_floor = (_sub * sigma_map[xs, ys, zs] ** 2)[:, None]
         masked_sq = data[xs, ys, zs].astype(np.float64)**2
         valid_mask = masked_sq > noise_floor
         corrected = np.where(valid_mask,
                              np.sqrt(np.maximum(masked_sq - noise_floor, 0.0)),
                              0.0).astype(np.float32)
+        if _rician_correction == 'first_moment':
+            _sig_v = sigma_map[xs, ys, zs].astype(np.float64)[:, None]
+            _r = np.sqrt(masked_sq) / _sig_v
+            corrected = np.where(valid_mask, _rician_mean_inverse(_r) * _sig_v,
+                                 0.0).astype(np.float32)
+            del _r, _sig_v
         if _rician_correction == 'signed':
             # EXPERIMENTAL (inspection 2026-09-30): keep the sign instead of
             # truncating at zero, so the noise stays symmetric around low values
             # and the NNLS sees no pile-up at exactly 0.
             _d = masked_sq - noise_floor
             corrected = (np.sign(_d) * np.sqrt(np.abs(_d))).astype(np.float32)
-        elif _rician_correction != 'clamp':
-            raise ValueError(f"_rician_correction: 'clamp' or 'signed', not {_rician_correction!r}")
         data_corr[xs, ys, zs] = corrected
 
         # ── Quante misure la correzione AZZERA, e in quanti voxel ───────────
+        # (Scritto per la 'clamp'; con 'first_moment' si azzera solo sotto il
+        # pavimento vero sigma*sqrt(pi/2), quindi molto meno: 1.26% -> 0.39%
+        # delle misure sul fantoccio a SNR 26.)
         # `S^2 - 2 sigma^2` e' non distorto per A^2 ma puo' essere NEGATIVO, e qui
         # viene troncato a ESATTAMENTE 0. Non e' cosmetico: Stage D legge la
         # frazione restricted dal plateau ad alto b, e i valori troncati sono
@@ -2849,7 +2914,25 @@ class DBSI_Adaptive:
             max_clamped_in_one_voxel=int(_per_vox.max()) if _per_vox.size else 0,
             n_volumes=int(masked_sq.shape[1]),
         )
-        print(f"   Rician clamp: {100*self.rician_clamp_['fraction_of_measurements']:.2f}% "
+        self.rician_clamp_['correction'] = _rician_correction
+        self.rician_correction_ = _rician_correction
+        # Which signal Stage C (mono-fiber VARPRO) sees: 'corrected' = data_corr
+        # (default since v1.12.0), 'raw' = the input as given (v1.11.1 and before,
+        # kept for comparison). See the note above _DEFAULT_ISO_RESOLVE.
+        if _stagec_signal not in ('raw', 'corrected'):
+            raise ValueError(f"_stagec_signal: 'raw' or 'corrected', not {_stagec_signal!r}")
+        self.rician_clamp_['stagec_signal'] = _stagec_signal
+        _pc_corr = (None if self.protocol_calibration_ is None
+                    else self.protocol_calibration_.get('rician_correction', 'clamp'))
+        if _pc_corr is not None and _pc_corr != _rician_correction:
+            # the lambdas were chosen on a signal corrected differently: a small
+            # mismatch, declared rather than refused (recalibrate to remove it)
+            self.rician_clamp_['calibration_correction'] = _pc_corr
+            print(f"   [WARNING] the protocol calibration was computed with the "
+                  f"'{_pc_corr}' Rician correction, this fit uses '{_rician_correction}'. "
+                  f"Recalibrate the protocol for full consistency.")
+        print(f"   Rician correction '{_rician_correction}': "
+              f"{100*self.rician_clamp_['fraction_of_measurements']:.2f}% "
               f"of measurements truncated to exactly 0 "
               f"({100*self.rician_clamp_['fraction_of_voxels_any']:.1f}% of voxels "
               f"affected, {100*self.rician_clamp_['fraction_of_voxels_over_10pct']:.1f}% "
@@ -3314,7 +3397,7 @@ class DBSI_Adaptive:
         if self.stagec_refine:
             print(f"   Stage C (joint mono-fiber tensor+fraction re-solve): ENABLED "
                   f"(VARPRO over AD[{_STAGEC_N_AD}]xRD[{_STAGEC_N_RD}] grid + local "
-                  f"refine; raw signal; n_pop==1 voxels)")
+                  f"refine; {_stagec_signal} signal; n_pop==1 voxels)")
 
         _min_separation_cos = float(np.cos(np.radians(self.min_separation_deg)))
         _kernel = _fit_voxels_3iso_v3 if use_3iso else _fit_voxels_2iso_v3
@@ -3368,7 +3451,8 @@ class DBSI_Adaptive:
                         float(self.conc_mod_gain),
                         bool(self.stagec_refine), iso_forward, iso_gram,
                         stagec_ad_grid, stagec_rd_grid, float(_STAGEC_ANISO_RATIO),
-                        data, stagec_iso_grid, bool(self.stagec_dir_refine),
+                        data_corr if _stagec_signal == 'corrected' else data,
+                        stagec_iso_grid, bool(self.stagec_dir_refine),
                         float(_kappa), sigma_map, bool(self.crossing_dir_refine),
                         _test21, _alt, _iso_cfg
                     )
@@ -3501,7 +3585,8 @@ class DBSI_Adaptive:
         # NOTE ON WHAT R2 IS MEASURED AGAINST, because it is not obvious and was
         # not declared until v1.3.6: `data` here is the RAW signal, while the
         # compartment fractions come from Stage D fitted on the RICIAN-CORRECTED
-        # signal and the mono-fibre tensor from Stage C fitted on the raw one. So
+        # signal and the mono-fibre tensor from Stage C (on the corrected one too
+        # since v1.12.0; on the raw one until v1.11.1). So
         # R2 is neither a pure fit residual nor a pure prediction error: it
         # answers "how well does the final model explain what was measured",
         # which is the question a reader actually wants, but it carries a
@@ -3798,7 +3883,8 @@ class DBSI_Adaptive:
                        iso_range=list(self.iso_range), iso_grid=iso_grid,
                        iso_thresholds=list(self.iso_thresholds),
                        iso_centroids=list(self.iso_centroids),
-                       iso_centroid_nrf=self.iso_centroid_nrf),
+                       iso_centroid_nrf=self.iso_centroid_nrf,
+                       rician_correction=self.rician_correction_),
         ))
 
     # ------------------------------------------------------------------

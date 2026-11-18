@@ -2,8 +2,11 @@
 DBSI Toolbox - Diffusion Basis Spectrum Imaging (pyDBSI)
 =========================================================
 
-Input (fixed): a preprocessed DWI (topup, eddy, N4), bvals/bvecs, a brain mask
-and the thermal noise map of dwidenoise divided by the N4 bias field. Output:
+Input (fixed): a DWI denoised with MP-PCA (dwidenoise) and then preprocessed
+(topup, eddy, N4), bvals/bvecs, a brain mask and the thermal noise map of
+dwidenoise divided by the N4 bias field. The Rician bias is removed by the exact
+inversion of the Rician mean (v1.12.0), the right correction for denoised data.
+Output:
 27 channels per voxel (compartment fractions, up to two fiber populations with
 tensor and direction, FF-weighted tensor, diagnostics), per-voxel standard
 errors and a run report.
@@ -14,7 +17,8 @@ Pipeline (see `model_Niso_adaptive_ff_thr` module docstring and the
   Stage A   regularised NNLS over [direction x (AD, RD) dictionary |
             anchored isotropic grid]: detects up to two fiber directions;
   Stage B/C single fiber: cone refinement of the direction, then a joint
-            VARPRO re-solve of tensor and fractions on the raw signal;
+            VARPRO re-solve of tensor and fractions on the corrected
+            signal (v1.12.0; raw until v1.11.1);
             crossing: FF re-solved on the detected support, then a joint
             Levenberg-Marquardt fit of both tensors (MRDS);
   Stage D   final fractions by NNLS on [fitted fibers | three fixed
@@ -75,7 +79,7 @@ Vavasour IM, et al. (2022). Characterisation of multiple sclerosis
     basis spectrum imaging. Multiple Sclerosis Journal, 28(3), 418-428.
 """
 
-__version__ = "1.11.1"
+__version__ = "1.12.0"
 __author__ = "DBSI Toolbox Contributors"
 
 

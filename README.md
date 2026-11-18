@@ -1,4 +1,4 @@
-# pyDBSI Toolbox — v1.11.1
+# pyDBSI Toolbox — v1.12.0
 
 **Diffusion Basis Spectrum Imaging (DBSI): adaptive implementation with Numba acceleration**
 
@@ -21,7 +21,7 @@ with known ground truth and checked on real acquisitions.
 
 | input | notes |
 |---|---|
-| preprocessed DWI (4D NIfTI) | preprocessed through topup, eddy and N4 bias correction (recipe below) |
+| **denoised** DWI (4D NIfTI) | denoised with MP-PCA (`dwidenoise`) **first**, then preprocessed through topup, eddy and N4 bias correction (recipe below) |
 | b-values, b-vectors (FSL format) | the gradient table matching the preprocessed volumes; at least one b=0 (b < 100), used for S0 only |
 | brain mask | defines the fitted voxels **and** the calibration sample |
 | **thermal noise map** (3D NIfTI) | **required:** output of MP-PCA denoising algorithm |
@@ -48,11 +48,20 @@ check new classes on simulations of the tissue of interest before using them.
 
 ### The thermal noise map (required)
 
-The Rician correction uses the second moment of the Rice distribution, E[S²] = A² + 2σ², where A is
-the noise-free signal: each measurement is replaced by √max(S² − 2σ², 0), which is unbiased for
-A² and clamps to zero where the signal sits at the noise floor (Gudbjartsson & Patz 1995;
-Koay & Basser 2006). So σ must be the **thermal** noise of the magnitude images and he toolbox therefore requires the
-noise map of MP-PCA denoising (Veraart et al. 2016), brought into the intensity scale of the DWI.
+The input DWI is denoised, so each value approximates the **mean** of the Rice distribution,
+E[M] = σ√(π/2)·L₁/₂(−A²/2σ²), where A is the noise-free signal (Gudbjartsson & Patz 1995). The
+toolbox removes the Rician bias by inverting this relation exactly, voxel by voxel with the σ of
+the noise map: Â solves E[M](Â) = S, through a precomputed table, and is set to 0 where S is at
+or below the noise floor σ√(π/2) (Koay, Özarslan & Basser 2009). Until v1.11.1 the toolbox used
+√max(S² − 2σ², 0), the second-moment correction: right for raw single measurements, but on
+denoised data it over-subtracts (−37 % at A = σ, −11 % at 2σ, −5 % at 3σ). Every stage of the fit,
+including the single-fiber tensor (Stage C, on the raw input until v1.11.1), works on the corrected
+signal: on the phantom this lowered the single-fiber AD error by 20–35 % and removed most of the
+AD inflation in water-rich voxels (edema, +0.28 → +0.05 μm²/ms at SNR 26).
+
+σ must therefore be the **thermal** noise of the magnitude images, and the toolbox requires the
+noise map of the same MP-PCA denoising (Veraart et al. 2016), brought into the intensity scale of
+the DWI. The run report states the correction used and how many measurements it set to zero.
 
 The run report gives the **thermal SNR** (median of S0 / σ over the mask) and how many mask voxels
 had no valid value in the map.
@@ -64,7 +73,7 @@ had no valid value in the map.
 ```bash
 git clone https://github.com/guarnich/pyDBSI_toolbox
 cd pyDBSI_toolbox
-pip install -e
+pip install -e .
 python tests/test_noise_map.py        # every tests/test_*.py runs as a plain script
 ```
 
@@ -175,6 +184,9 @@ the λ, `n_iso`, the gate and the dictionary options, refuses data with a differ
 fingerprint (`strict=True`) and refuses overrides of calibrated parameters; the run report states
 `calibration_source: protocol` with the file's sha256. Aggregation: `'geomean'` minimises the mean
 of the log GCV curves (scale-invariant, so a noisier acquisition does not outvote a cleaner one).
+The calibration records the Rician correction it was computed with. Calibrations written before
+v1.12.0 used the second-moment correction: they still load, and the run report and a warning say
+so; recalibrate the protocol to remove the (small) mismatch.
 
 
 ## References
@@ -191,4 +203,8 @@ of the log GCV curves (scale-invariant, so a noisier acquisition does not outvot
 5. Coronado-Leija R, Ramirez-Manzanares A, Marroquin JL (2017). Estimation of individual axon
    bundle properties by a Multi-Resolution Discrete-Search method. *Medical Image Analysis*, 42,
    26–43.
+6. Gudbjartsson H, Patz S (1995). The Rician distribution of noisy MRI data. *Magnetic Resonance
+   in Medicine*, 34(6), 910–914.
+7. Koay CG, Özarslan E, Basser PJ (2009). A signal transformational framework for breaking the
+   noise floor and its applications in MRI. *Journal of Magnetic Resonance*, 197(2), 108–119.
 

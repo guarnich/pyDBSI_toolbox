@@ -102,11 +102,16 @@ LAMBDA_ISO_CAP_RULES = ('min', 'median', 'none')
 # lambda: devono coincidere fra le acquisizioni e vengono imposte da
 # `DBSI_Adaptive.from_calibration`.
 _MODEL_KEYS = ('n_dirs', 'n_ad', 'n_rd', 'anisotropy_ratio', 'fiber_threshold',
-               'iso_range', 'iso_thresholds', 'iso_centroids', 'iso_centroid_nrf')
+               'iso_range', 'iso_thresholds', 'iso_centroids', 'iso_centroid_nrf',
+               'rician_correction')
 # v1.10.0: compartment boundaries and Stage D centroids. Records written before
 # carry neither: they were calibrated with the defaults, which stand in for them.
+# v1.12.0: the Rician correction the record was calibrated under; records written
+# before used the second moment ('clamp'). Mixing corrections in one protocol
+# calibration is refused like any other model option.
 _MODEL_DEFAULTS = dict(iso_thresholds=[0.3e-3, 3.0e-3],
-                       iso_centroids=[0.15e-3, 1.0e-3, 3.0e-3], iso_centroid_nrf=1.5e-3)
+                       iso_centroids=[0.15e-3, 1.0e-3, 3.0e-3], iso_centroid_nrf=1.5e-3,
+                       rician_correction='clamp')
 
 
 def _idx_on_grid(value, grid):

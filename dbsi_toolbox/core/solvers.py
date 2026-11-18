@@ -869,11 +869,11 @@ def iso_fraction_resolve(sig_norm, bvals, bvecs, fdirs, fad, frd, n_fib,
     (data_corr), NOT the raw magnitude: the restricted fraction is read from the
     high-b plateau, and the raw Rician noise floor E[|noise|]->sigma*sqrt(pi/2)
     is ALSO a high-b plateau -> on raw it is mistaken for restricted (false RF in
-    CSF/water). The correction subtracts 2*sigma^2 and de-confounds them. (This
-    is the OPPOSITE of the fiber TENSOR estimate `stagec_varpro_single_fiber`,
-    which needs the RAW signal because the correction's clamp destroys the
-    high-b decay SHAPE. Different estimands, different bias -> different optimal
-    preprocessing; see design note on the block-wise Rician-MLE approximation.)
+    CSF/water). The correction (exact first-moment inversion since v1.12.0)
+    de-confounds them. (Until v1.11.1 the fiber TENSOR estimate
+    `stagec_varpro_single_fiber` used the RAW signal instead, because the
+    second-moment correction of the time distorted the high-b decay shape;
+    since v1.12.0 it uses the corrected signal too.)
 
     Parameters
     ----------

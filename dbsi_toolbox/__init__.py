@@ -17,7 +17,8 @@ Pipeline (see `model_Niso_adaptive_ff_thr` module docstring and the
   Stage A   regularised NNLS over [direction x (AD, RD) dictionary |
             anchored isotropic grid]: detects up to two fiber directions;
   Stage B/C single fiber: cone refinement of the direction, then a joint
-            VARPRO re-solve of tensor and fractions on the raw signal;
+            VARPRO re-solve of tensor and fractions on the corrected
+            signal (v1.12.0; raw until v1.11.1);
             crossing: FF re-solved on the detected support, then a joint
             Levenberg-Marquardt fit of both tensors (MRDS);
   Stage D   final fractions by NNLS on [fitted fibers | three fixed

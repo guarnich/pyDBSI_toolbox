@@ -54,7 +54,10 @@ toolbox removes the Rician bias by inverting this relation exactly, voxel by vox
 the noise map: Â solves E[M](Â) = S, through a precomputed table, and is set to 0 where S is at
 or below the noise floor σ√(π/2) (Koay, Özarslan & Basser 2009). Until v1.11.1 the toolbox used
 √max(S² − 2σ², 0), the second-moment correction: right for raw single measurements, but on
-denoised data it over-subtracts (−37 % at A = σ, −11 % at 2σ, −5 % at 3σ).
+denoised data it over-subtracts (−37 % at A = σ, −11 % at 2σ, −5 % at 3σ). Every stage of the fit,
+including the single-fiber tensor (Stage C, on the raw input until v1.11.1), works on the corrected
+signal: on the phantom this lowered the single-fiber AD error by 20–35 % and removed most of the
+AD inflation in water-rich voxels (edema, +0.28 → +0.05 μm²/ms at SNR 26).
 
 σ must therefore be the **thermal** noise of the magnitude images, and the toolbox requires the
 noise map of the same MP-PCA denoising (Veraart et al. 2016), brought into the intensity scale of

@@ -16,6 +16,10 @@ COSA SI PROTEGGE.
      frazioni vere con 'first_moment'; la 'clamp' abbassa la RF (a SNR 10, 0.30 -> ~0.27).
   4. La calibrazione registra la correzione; un protocollo non mescola correzioni; una
      calibrazione scritta prima della 1.12.0 vale come 'clamp' e il fit lo dichiara.
+  5. Lo Stage C (tensore mono-fibra) lavora sul segnale CORRETTO (default dalla 1.12.0):
+     una fibra con S = E[M] esatto torna con la AD vera (1.7 +- 0.05); sul segnale grezzo
+     il pavimento di Rice la gonfia, molto di piu' in un voxel ricco d'acqua (tipo edema).
+     Sul fantoccio a 13 scenari: MAE della ADw 0.120 -> 0.094 a SNR 26, edema +0.28 -> +0.05.
 
     python tests/test_rician_first_moment.py
 """
@@ -133,6 +137,35 @@ def test_calibrazione_registra_la_correzione():
     assert "computed with the 'clamp' Rician correction" in buf.getvalue()
 
 
+def test_stagec_sul_segnale_corretto():
+    bv, bc = _protocollo()
+    d0 = np.array([1.0, 0.0, 0.0])
+    casi = (('WM', 0.6, (0.1, 0.2, 0.1), 0.30e-3), ('edema', 0.3, (0.0, 0.15, 0.55), 0.35e-3))
+    for snr in (15, 26):
+        sig = 1000.0 / snr
+        for nome, ff, (rf, hf, wf), rd in casi:
+            A = 1000 * (ff * np.exp(-bv * (rd + (1.7e-3 - rd) * (bc @ d0) ** 2))
+                        + rf * np.exp(-bv * 0.15e-3) + hf * np.exp(-bv * 1.0e-3) + wf * np.exp(-bv * 3.0e-3))
+            S = sig * M._rician_mean(A / sig)
+            d = np.broadcast_to(S, (3, 3, 2, len(bv))).astype(np.float32).copy()
+            mk, noise = np.ones((3, 3, 2), bool), np.full((3, 3, 2), sig)
+            ad = {}
+            for sc in ('corrected', 'raw'):
+                m = DBSI_Adaptive(lambda_aniso=1.0, lambda_iso=0.01, n_iso=6)
+                kw = {} if sc == 'corrected' else dict(_stagec_signal='raw')     # default = corrected
+                with contextlib.redirect_stdout(io.StringIO()):
+                    res, mode = m.fit(d, bv, bc, mk, noise_map=noise, **kw)
+                n = DBSI_Adaptive.output_map_names(mode)
+                ad[sc] = float(np.nanmedian(res[..., n.index('axial_diffusivity_pop1')]))
+                assert m.run_report_['rician_clamp']['stagec_signal'] == sc
+            print(f'  SNR {snr:2d} {nome:5s}: AD vera 1.700, Stage C corretto {1e3 * ad["corrected"]:.3f}, '
+                  f'grezzo {1e3 * ad["raw"]:.3f} (e-3 mm^2/s)')
+            assert abs(ad['corrected'] - 1.7e-3) < 0.05e-3, 'Stage C sul segnale corretto: AD non recuperata'
+            assert ad['raw'] > ad['corrected'] + 0.03e-3, 'il grezzo dovrebbe gonfiare la AD (pavimento)'
+            if nome == 'edema':
+                assert ad['raw'] - 1.7e-3 > 0.2e-3, "nel voxel d'acqua il pavimento dovrebbe pesare molto"
+
+
 def test_versione():
     v = tuple(int(x) for x in dbsi_toolbox.__version__.split('.')[:3])
     print(f'  dbsi_toolbox {dbsi_toolbox.__version__}')
@@ -142,7 +175,8 @@ def test_versione():
 if __name__ == '__main__':
     falliti = 0
     for fn in (test_versione, test_inversione_esatta, test_default_e_dichiarato,
-               test_frazioni_esatte_su_segnale_denoisato, test_calibrazione_registra_la_correzione):
+               test_frazioni_esatte_su_segnale_denoisato, test_calibrazione_registra_la_correzione,
+               test_stagec_sul_segnale_corretto):
         print(f'\n=== {fn.__name__} ===')
         try:
             fn(); print('  [ok]')

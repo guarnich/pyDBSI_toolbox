@@ -190,6 +190,31 @@ THRESH_WAT = 3.0e-3          # mm^2/s — hindered  / free-water boundary (defau
 _CFG_T_RES, _CFG_T_WAT, _CFG_C_RF, _CFG_C_HF, _CFG_C_WF, _CFG_C_NRF = range(6)
 
 
+def _rician_mean(a):
+    """E[M]/sigma of a Rician magnitude with noise-free amplitude a = A/sigma."""
+    from scipy.special import i0e, i1e
+    x = a * a / 4.0
+    return np.sqrt(np.pi / 2) * ((1 + 2 * x) * i0e(x) + 2 * x * i1e(x))
+
+
+_RICIAN_A_GRID = np.linspace(0.0, 60.0, 120001)
+_RICIAN_M_GRID = None
+
+
+def _rician_mean_inverse(r):
+    """A/sigma from the Rician mean r = E[M]/sigma (monotone, r >= sqrt(pi/2)).
+    Table up to A = 60 sigma; above it E[M]^2 = A^2 + sigma^2 to < 1e-5 relative."""
+    global _RICIAN_M_GRID
+    if _RICIAN_M_GRID is None:
+        _RICIAN_M_GRID = _rician_mean(_RICIAN_A_GRID)
+    r = np.asarray(r, dtype=np.float64)
+    a = np.interp(r, _RICIAN_M_GRID, _RICIAN_A_GRID)
+    hi = r > _RICIAN_M_GRID[-1]
+    if np.any(hi):
+        a = np.where(hi, np.sqrt(np.maximum(r * r - 1.0, 0.0)), a)
+    return a
+
+
 def _resolve_iso_classes(iso_thresholds, iso_centroids, iso_centroid_nrf):
     """Validated (thresholds, 3-ISO centroids, 2-ISO NRF centroid or None), mm^2/s.
 
@@ -2801,20 +2826,36 @@ class DBSI_Adaptive:
         print("\n3. Applying Rician Bias Correction...")
         data_corr = np.zeros_like(data, dtype=np.float32)
         # per voxel (v1.7.1): 2 sigma^2 col sigma del voxel; costante senza mappa
-        noise_floor = (2.0 * sigma_map[xs, ys, zs] ** 2)[:, None]
+        # EXPERIMENTAL modes (branch rician-primo-momento, 2026-11-18): the input
+        # of the production pipeline is MP-PCA denoised, so S ~ E[M] (first
+        # moment) and 2 sigma^2 over-subtracts. 'sigma2' = sqrt(S^2 - sigma^2)
+        # (high-SNR first moment, DESIGNER), 'pi2' = sqrt(S^2 - pi/2 sigma^2)
+        # (exact only at A=0), 'first_moment' = exact inversion of the Rician
+        # mean (Koay, Ozarslan & Basser 2009), 0 below the floor sigma*sqrt(pi/2).
+        _sub = {'clamp': 2.0, 'signed': 2.0, 'sigma2': 1.0, 'pi2': np.pi / 2,
+                'first_moment': np.pi / 2}.get(_rician_correction)
+        if _sub is None:
+            raise ValueError("_rician_correction: 'clamp', 'signed', 'sigma2', 'pi2' or "
+                             f"'first_moment', not {_rician_correction!r}")
+        # same expression as before for the default, so 'clamp' stays bit-identical
+        noise_floor = (_sub * sigma_map[xs, ys, zs] ** 2)[:, None]
         masked_sq = data[xs, ys, zs].astype(np.float64)**2
         valid_mask = masked_sq > noise_floor
         corrected = np.where(valid_mask,
                              np.sqrt(np.maximum(masked_sq - noise_floor, 0.0)),
                              0.0).astype(np.float32)
+        if _rician_correction == 'first_moment':
+            _sig_v = sigma_map[xs, ys, zs].astype(np.float64)[:, None]
+            _r = np.sqrt(masked_sq) / _sig_v
+            corrected = np.where(valid_mask, _rician_mean_inverse(_r) * _sig_v,
+                                 0.0).astype(np.float32)
+            del _r, _sig_v
         if _rician_correction == 'signed':
             # EXPERIMENTAL (inspection 2026-09-30): keep the sign instead of
             # truncating at zero, so the noise stays symmetric around low values
             # and the NNLS sees no pile-up at exactly 0.
             _d = masked_sq - noise_floor
             corrected = (np.sign(_d) * np.sqrt(np.abs(_d))).astype(np.float32)
-        elif _rician_correction != 'clamp':
-            raise ValueError(f"_rician_correction: 'clamp' or 'signed', not {_rician_correction!r}")
         data_corr[xs, ys, zs] = corrected
 
         # ── Quante misure la correzione AZZERA, e in quanti voxel ───────────
@@ -2849,6 +2890,8 @@ class DBSI_Adaptive:
             max_clamped_in_one_voxel=int(_per_vox.max()) if _per_vox.size else 0,
             n_volumes=int(masked_sq.shape[1]),
         )
+        if _rician_correction != 'clamp':
+            self.rician_clamp_['correction'] = _rician_correction
         print(f"   Rician clamp: {100*self.rician_clamp_['fraction_of_measurements']:.2f}% "
               f"of measurements truncated to exactly 0 "
               f"({100*self.rician_clamp_['fraction_of_voxels_any']:.1f}% of voxels "

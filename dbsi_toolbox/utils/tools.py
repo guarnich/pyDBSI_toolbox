@@ -8,8 +8,6 @@ from scipy.stats import chi2
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-_SNR_LEGACY_BIASED = False
-
 B0_THRESHOLD = 100.0
 
 
@@ -55,15 +53,11 @@ def load_data(dwi_path, bval_path, bvec_path, mask_path=None, verbose=True):
     norms = np.linalg.norm(bvecs, axis=1, keepdims=True)
     norms[norms == 0] = 1.0
     bvecs = bvecs / norms
-    # La maschera e' OBBLIGATORIA. Fino alla v1.2.0, se mancava, se ne generava
-    # una per soglia sul volume medio: ma la maschera non decide solo quali voxel
-    # fittare, decide anche da dove si campionano i voxel di calibrazione, quindi
-    # una maschera improvvisata cambia lambda, n_iso e il gate. Meglio fermarsi.
+    
     if not mask_path:
         raise ValueError(
             "Brain mask is required but was not provided (mask_path=None). "
-            "The mask defines both the fitted voxels and the calibration sample, "
-            "so a fallback mask would silently change the calibrated hyperparameters."
+            "The mask defines both the fitted voxels and the calibration sample."
         )
     if not os.path.exists(mask_path):
         raise FileNotFoundError(f"Brain mask not found: {mask_path}")
@@ -88,11 +82,6 @@ def estimate_snr_robust(data, bvals, mask, verbose=True):
     n_b0 = len(b0_idx)
     if verbose:
         print(f"  Number of b0 volumes found: {n_b0}")
-    # Con un solo b=0 restava la stima SPAZIALE (segnale vs aria di fondo,
-    # sigma = bg/1.253). E' poco affidabile — dipende da come il costruttore
-    # ha filtrato lo sfondo — e sigma alimenta la calibrazione del gate e la
-    # correzione Rician: un sigma sbagliato destabilizza tutto il resto.
-    # Meglio fermarsi che produrre mappe che sembrano buone.
     if n_b0 < 2:
         raise ValueError(
             f"At least 2 b=0 volumes are required to estimate the noise level "
@@ -106,44 +95,12 @@ def estimate_snr_robust(data, bvals, mask, verbose=True):
     std_b0 = np.std(b0_data, axis=-1, ddof=1)
     valid_mask = mask
     if np.sum(valid_mask) == 0:
-        # Fino alla v1.2.0 qui si ritornava (SNR=20, sigma=1) inventati.
         raise ValueError(
             "Cannot estimate SNR: the brain mask contains no voxels. "
-            "Returning a default SNR would silently mis-calibrate the fit."
         )
     mean_masked = mean_b0[valid_mask]
     std_masked = std_b0[valid_mask]
 
-    # ── Legacy (biased) path, kept only to bisect against <= v1.3.4 ─────────
-    def _legacy():
-        s = std_masked.copy()
-        s[s == 0] = 1e-10
-        snr_c = (mean_masked / s).copy()
-        for _ in range(20):
-            snr_old = snr_c.copy()
-            bias_term = mean_masked**2 / (2 * snr_c**2 + 1e-10)
-            var_corrected = s**2 - bias_term
-            var_corrected[var_corrected < 0] = 1e-10
-            snr_c = mean_masked / np.sqrt(var_corrected)
-            if np.mean(np.abs(snr_c - snr_old)) < 0.01:
-                break
-        return (float(np.nanmedian(snr_c)),
-                float(np.nanmedian(mean_masked / snr_c)))
-
-    if _SNR_LEGACY_BIASED:
-        if verbose:
-            print("  Method: TEMPORAL (LEGACY, BIASED -- bisection only)")
-        final_snr, final_sigma = _legacy()
-        if verbose:
-            print(f"  Estimated SNR: {final_snr:.2f}")
-            print(f"  Estimated Noise Sigma: {final_sigma:.4f}")
-        return float(final_snr), float(final_sigma)
-
-    # ── Unbiased path (default from v1.3.5) ────────────────────────────────
-    # sigma from the MEDIAN of the per-voxel standard deviations, de-biased by
-    # the known chi median factor for k = n_b0 - 1 degrees of freedom; SNR as a
-    # ratio of two medians. See the module header for the two defects this
-    # replaces and the Monte Carlo that measured them.
     if verbose:
         print(f"  Method: TEMPORAL (median per-voxel sigma, chi-debiased, "
               f"k={n_b0 - 1})")
@@ -165,9 +122,5 @@ def estimate_snr_robust(data, bvals, mask, verbose=True):
               f"(raw median sigma {sigma_biased:.4f})")
         print(f"  Estimated SNR: {final_snr:.2f}")
         print(f"  Estimated Noise Sigma: {final_sigma:.4f}")
-        _lsnr, _lsig = _legacy()
-        print(f"  [<=v1.3.4 would have reported SNR {_lsnr:.2f} "
-              f"(x{_lsnr / final_snr:.3f}) and sigma {_lsig:.4f} "
-              f"(x{_lsig / final_sigma:.3f}) -- biased, see tools.py header]")
 
     return float(final_snr), float(final_sigma)

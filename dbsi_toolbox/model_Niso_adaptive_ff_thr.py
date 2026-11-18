@@ -150,11 +150,6 @@ from .calibration.adaptive_n_iso import select_n_iso_svd, select_n_iso_bootstrap
 from .calibration.mc_sure import crosscheck_lambda_iso_sure, crosscheck_n_iso_sure
 
 from .utils.tools import estimate_snr_robust, B0_THRESHOLD
-from .utils import tools as _tools   # letto a RUNTIME, non per valore:
-#   `_SNR_LEGACY_BIASED` e' un interruttore che il chiamante puo' commutare
-#   (la batteria sintetica lo fa). Importarlo per valore lo congelerebbe
-#   all'import e il run report dichiarerebbe lo stimatore SBAGLIATO mentre
-#   gira l'altro -- la stessa classe di bug del ramo della griglia.
 from .utils.autoconfig import autoconfigure_dictionary
 
 
@@ -3688,8 +3683,7 @@ class DBSI_Adaptive:
                        n_b0=int(np.sum(np.asarray(bvals) < B0_THRESHOLD)),
                        # solo nel percorso sintetico senza mappa (_ALLOW_B0_SIGMA)
                        **({} if (self.noise_ or {}).get('sigma_source') == 'noise_map' else
-                          dict(sigma_estimator=('legacy_biased' if _tools._SNR_LEGACY_BIASED
-                                                else 'chi_debiased_median')))),
+                          dict(sigma_estimator='chi_debiased_median'))),
             calibrated=dict(n_iso=int(self.n_iso),
                             # La dimensione VERA del blocco isotropo. n_iso e'
                             # il parametro chiesto, non l'ordine del modello:

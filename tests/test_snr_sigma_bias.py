@@ -25,15 +25,14 @@ scende a **x1.28**. I test girano a 2, 4 e 8 volumi proprio per questo.
      snr = sqrt(3/2)*(m/s) = 1.2247*(m/s), quindi le 20 iterazioni
      moltiplicavano per una costante a QUALUNQUE SNR e QUALUNQUE nb0.
 
-Questi test FALLISCONO sulla 1.3.4 (verificato mettendo
-`_SNR_LEGACY_BIASED = True`, che riproduce il vecchio percorso bit per bit).
+Questi test FALLIVANO sulla 1.3.4 (verificato finche' il vecchio percorso e' rimasto nel
+codice dietro un interruttore; tolto nella 1.12.0).
 
     python tests/test_snr_sigma_bias.py
 """
 import sys
 import numpy as np
 
-from dbsi_toolbox.utils import tools
 from dbsi_toolbox.utils.tools import estimate_snr_robust, _chi_median_factor
 from dbsi_toolbox.calibration.data_driven import sample_calibration_voxels
 
@@ -90,51 +89,6 @@ def test_sigma_non_distorto():
     print("  [ok]")
 
 
-def test_legacy_era_distorto():
-    """Il percorso legacy DEVE ancora sbagliare di x1.8 / x0.55.
-
-    Se questo test passa e gli altri due no, il default e' tornato indietro.
-    """
-    print("\n=== test_legacy_era_distorto ===")
-    A, sigma, snr_vero = 1000.0, 1000.0 / 30.0, 30.0
-    data, bvals, mask = _volume_finto(A, sigma, 2, seed=7)
-    tools._SNR_LEGACY_BIASED = True
-    try:
-        snr_l, sig_l = estimate_snr_robust(data, bvals, mask, verbose=False)
-    finally:
-        tools._SNR_LEGACY_BIASED = False
-    snr_n, sig_n = estimate_snr_robust(data, bvals, mask, verbose=False)
-    print(f"  legacy  SNR {snr_l:6.2f} (x{snr_l/snr_vero:.3f})   "
-          f"sigma {sig_l:7.3f} (x{sig_l/sigma:.3f})")
-    print(f"  attuale SNR {snr_n:6.2f} (x{snr_n/snr_vero:.3f})   "
-          f"sigma {sig_n:7.3f} (x{sig_n/sigma:.3f})")
-    assert snr_l / snr_vero > 1.6, "il percorso legacy non riproduce il bias noto"
-    assert sig_l / sigma < 0.7, "il percorso legacy non riproduce il bias noto"
-    assert abs(snr_l / snr_n - 1.82) < 0.15, (
-        f"il rapporto legacy/attuale e' {snr_l/snr_n:.3f}, atteso ~1.82")
-    print("  [ok]")
-
-
-def test_punto_fisso_sqrt_1p5():
-    """La 'correzione iterativa' del legacy e' esattamente sqrt(3/2)."""
-    print("\n=== test_punto_fisso_sqrt_1p5 ===")
-    rng = np.random.default_rng(5)
-    m = rng.uniform(500, 1500, 50_000)
-    s = rng.uniform(10, 60, 50_000)
-    snr = (m / s).copy()
-    for _ in range(200):
-        var = s ** 2 - m ** 2 / (2 * snr ** 2 + 1e-10)
-        var[var < 0] = 1e-10
-        snr = m / np.sqrt(var)
-    rapporto = float(np.median(snr / (m / s)))
-    print(f"  punto fisso / (m/s) = {rapporto:.6f}   sqrt(1.5) = "
-          f"{np.sqrt(1.5):.6f}")
-    assert abs(rapporto - np.sqrt(1.5)) < 1e-4, (
-        "il punto fisso non e' sqrt(3/2): l'analisi nell'intestazione di "
-        "tools.py non descrive piu' il codice")
-    print("  [ok]")
-
-
 def test_fattore_chi():
     """Il fattore di de-bias coincide con la mediana campionaria misurata."""
     print("\n=== test_fattore_chi ===")
@@ -174,9 +128,8 @@ def test_i_due_sigma_concordano():
 
 
 if __name__ == '__main__':
-    for f in (test_fattore_chi, test_punto_fisso_sqrt_1p5,
-              test_snr_non_distorto, test_sigma_non_distorto,
-              test_legacy_era_distorto, test_i_due_sigma_concordano):
+    for f in (test_fattore_chi, test_snr_non_distorto, test_sigma_non_distorto,
+              test_i_due_sigma_concordano):
         try:
             f()
         except AssertionError as e:

@@ -1,43 +1,11 @@
 #!/usr/bin/env python
 """
-DBSI Adaptive CLI — the production fit of one session, from the shell.
+DBSI Adaptive CLI — the production fit of one session.
 
-Same fit as the notebooks.
 Inputs are the fixed starting point of the toolbox: preprocessed DWI (topup,
 eddy, N4), bval/bvec, brain mask and the thermal noise map (--noise).
 Outputs adapt to the acquisition scheme (2-ISO or 3-ISO).
 
-- Stage A's (AD,RD) grid (`--n-ad`, `--n-rd`, `--anisotropy-ratio`) is
-  deliberately coarse whatever the protocol: Stage A only detects fibers and
-  directions; the tensor is estimated afterwards (Stage C for single fibers,
-  crossing FF re-solve + MRDS for crossings).
-- `--n-dirs` defaults to protocol-derived (autoconfigured) sizing.
-- Calibration is data-driven on a sample of this dataset's own voxels:
-  lambda_iso by GCV on the fiber-subtracted residual, capped by the
-  discrepancy principle; lambda_aniso by ridge-dof GCV; n_iso fixed by
-  quadrature (6). `--protocol-calibration` imposes a protocol calibration
-  instead. See the dbsi_toolbox.calibration module docstring.
-
-OUTPUT LAYOUT 
------------------------
-Saving now goes through `dbsi_toolbox.save_output_maps`, the single
-saving entry point shared with the analysis notebooks, instead of an
-inline loop private to this script. Consequences:
-
-- files are named `NN_<channel>.nii.gz` (channel index prefix), NOT
-  `dbsi_<channel>.nii.gz` as before;
-- `nonrestricted_fraction` is not written in 3-ISO mode, where it is
-  hindered + water by construction;
-- `fiber_valid.nii.gz`, the validity mask for the fiber-tensor channels,
-  and `toolbox_report/` (run_report.txt + the dictionary A as image, .npz
-  and column table), recording what produced the maps, are written as part
-  of the normal run;
-- the R2 / RMSE fit-quality maps are ordinary output channels now, always
-  computed by the fit, so `--compute-r2` is gone.
-
-The output layout: at most TWO fiber populations, each
-with its own fraction/AD/RD/FA/direction, plus the FF-weighted tensor —
-plus the R2/RMSE fit-quality maps — 27 channels. See `DBSI_Adaptive.output_map_names`.
 """
 
 import argparse
@@ -69,8 +37,7 @@ def build_parser():
                         help="Thermal noise map (sigma per voxel) in the SAME scale and grid as --dwi: "
                              "the dwidenoise -noise map divided by the N4 bias field (dwibiascorrect "
                              "-bias). Used for the Rician correction and every sigma-normalised "
-                             "quantity. REQUIRED (v1.7.1): the b=0 temporal sigma also contains "
-                             "physiological variability and is not a substitute.")
+                             "quantity.")
     parser.add_argument("--out", required=True)
     parser.add_argument("--skip-calibration", action="store_true")
     parser.add_argument("--protocol-calibration", dest="protocol_calibration", default=None,
@@ -87,13 +54,11 @@ def build_parser():
     parser.add_argument("--n-dirs", type=int, default=None,
                         help="Number of hemisphere directions for Stage A. Default: protocol-derived.")
     parser.add_argument("--n-ad", type=int, default=None,
-                        help=f"Number of AD grid steps for Stage A's detection dictionary. Default: {_D['n_ad']} (deliberately coarse).")
+                        help=f"Number of AD grid steps for Stage A's detection dictionary. Default: {_D['n_ad']}.")
     parser.add_argument("--n-rd", type=int, default=None,
-                        help=f"Number of RD grid steps for Stage A's detection dictionary. Default: {_D['n_rd']} (deliberately coarse).")
+                        help=f"Number of RD grid steps for Stage A's detection dictionary. Default: {_D['n_rd']}.")
     parser.add_argument("--anisotropy-ratio", type=float, dest="anisotropy_ratio", default=None,
-                        help=f"Minimum AD/RD ratio for admissible Stage A pairs. Default: {_D['anisotropy_ratio']} "
-                             "(raised from 1.15: drops the near-isotropic ratio-1.83 grid column "
-                             "that leaks isotropic signal into fiber_fraction; safe band [2.0, 2.16]).")
+                        help=f"Minimum AD/RD ratio for admissible Stage A pairs. Default: {_D['anisotropy_ratio']}.")
     _um = lambda v: ' '.join(f'{x * 1e3:g}' for x in v)
     parser.add_argument("--iso-thresholds", type=float, nargs=2, metavar=("RF_HF", "HF_WF"),
                         dest="iso_thresholds", default=None,
@@ -116,25 +81,23 @@ def build_parser():
                         help="Reject a voxel's fibers when they reduce the Stage D residual "
                              "by less than this many noise variances (dRSS/sigma^2). Default: "
                              "off. The statistic is always written to "
-                             "fiber_detection_stat.nii.gz. See DBSI_Adaptive.")
+                             "fiber_detection_stat.nii.gz.")
     parser.add_argument("--two-vs-one-threshold", type=float,
                         dest="two_vs_one_threshold", default=None,
                         help="Crossing vs single fiber by model selection: the crossing is kept "
                              "only where it lowers the Stage D residual by at least this many noise "
-                             f"variances. Default: {_D['two_vs_one_threshold']}. See DBSI_Adaptive.")
+                             f"variances. Default: {_D['two_vs_one_threshold']}.")
     parser.add_argument("--no-two-vs-one", action="store_true", dest="no_two_vs_one",
                         help="Switch the two-vs-one test off: the population count is decided by "
-                             "min_peak_ratio alone, as before 1.9.0.")
+                             "min_peak_ratio alone.")
     parser.add_argument("--crossing-dir-refine", action=argparse.BooleanOptionalAction,
                         dest="crossing_dir_refine", default=None,
                         help="Cone search on each crossing population's direction. Default: "
                              f"{'on' if _D['crossing_dir_refine'] else 'off'}; --no-crossing-dir-refine "
-                             "keeps the crossing directions on Stage A's grid nodes, as before 1.9.0.")
+                             "keeps the crossing directions on Stage A's grid nodes.")
     parser.add_argument("--crossing-ff-kappa", type=float, dest="crossing_ff_kappa", default=None,
                         help=f"Crossing fiber fraction re-solved before the crossing tensors are "
-                             f"fitted, with ridge kappa x (sigma/S0)^2. Default: {_D['crossing_ff_kappa']}. "
-                             "0 keeps Stage A's crossing fraction (held fixed, it put "
-                             "~75%% of real crossings on the RD floor).")
+                             f"fitted, with ridge kappa x (sigma/S0)^2. Default: {_D['crossing_ff_kappa']}.")
     parser.add_argument("--no-uncertainty", dest="no_uncertainty", action="store_true",
                         help="Skip the uncertainty maps (per-voxel Fisher standard error of every "
                              "continuous map, written to toolbox_report/uncertainty_maps/). ON by "
@@ -163,14 +126,11 @@ def build_parser():
                              "Pass this to fall back to a single unmodulated Stage A solve.")
     parser.add_argument("--n-calibration-voxels", type=int, dest="n_calibration_voxels", default=1000,
                         help="Number of brain-mask voxels sampled for data-driven calibration and "
-                             "n_iso selection. Default: 1000 (matches DBSI_Adaptive.fit() default; "
-                             "raised from 500 in v1.3.1 — a seed sweep showed lambda_aniso is "
-                             "sample-invariant but lambda_iso still jitters by 2-3 grid nodes at "
-                             "500 voxels).")
+                             "n_iso selection. Default: 1000 (matches DBSI_Adaptive.fit() default;)")
     parser.add_argument("--n-iso-method", choices=["quadrature", "bootstrap", "svd_floor", "fixed"],
                         dest="n_iso_method", default="quadrature",
                         help="How to set n_iso when --n-iso is not given. 'quadrature' (default "
-                             "since 1.3.9): fixed at 6 by grid convergence -- n_iso is a "
+                             ": fixed at 6 by grid convergence -- n_iso is a "
                              "discretisation parameter, not a model order. 'bootstrap': "
                              "bias-variance selection per dataset (pre-1.3.9 default). "
                              "'svd_floor': SVD information limit + empirical floor. "

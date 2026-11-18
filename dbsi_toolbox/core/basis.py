@@ -2,7 +2,6 @@
 DBSI Basis Functions: Stage A Detection Dictionary + Stage B Inputs
 ===========================================================================
 
-
 The exhaustive (direction x AD/RD-pair) dictionary built here
 (`build_design_matrix_exhaustive`, `generate_exhaustive_diffusivity_pairs`)
 now serves ONLY as Stage A's detection dictionary: identifying which
@@ -14,8 +13,8 @@ direction(s).
 
 Because Stage A's only job is angular detection, NOT diffusivity
 recovery, its (AD, RD) grid can 
-be much coarse: a coarse grid still reliably anchors which
-direction(s) are active while keeping the NNLS solve fast.
+be a coarse grid that still reliably anchors to the active
+direction(s) while keeping the NNLS solve fast.
 
 References
 ----------

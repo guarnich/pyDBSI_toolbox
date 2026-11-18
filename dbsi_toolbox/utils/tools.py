@@ -4,7 +4,7 @@ import nibabel as nib
 from scipy.stats import chi2
 
 # ─────────────────────────────────────────────────────────────────────────────
-# NOISE ESTIMATION — bias of the pre-v1.3.5 estimator
+# NOISE ESTIMATION 
 # ─────────────────────────────────────────────────────────────────────────────
 # `estimate_snr_robust` returned an SNR biased HIGH by x1.82 and a sigma biased
 # LOW by x0.55 on a 2-b0 acquisition (the minimum this toolbox accepts, and what

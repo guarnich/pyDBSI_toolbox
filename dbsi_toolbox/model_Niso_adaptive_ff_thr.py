@@ -4,12 +4,13 @@ DBSI Adaptive Model — Stage A detection, Stage B/C tensors, Stage D fractions
 
 INPUT (fixed)
 -------------
-A preprocessed DWI (topup, eddy, N4 bias correction), its bvals/bvecs, a brain
-mask, and the thermal noise map of dwidenoise divided by the N4 bias field
-(`noise_map`, required). The noise map is sigma for every step: the Rician
-correction (S^2 - 2 sigma^2, per voxel), the calibration of the lambdas, the
-crossing ridge, the detection statistic and the uncertainty maps. The b=0
-volumes give S0 only (at least one is needed).
+A DWI denoised with MP-PCA (dwidenoise) and then preprocessed (topup, eddy, N4
+bias correction), its bvals/bvecs, a brain mask, and the thermal noise map of
+dwidenoise divided by the N4 bias field (`noise_map`, required). The noise map
+is sigma for every step: the Rician correction (exact inversion of the Rician
+mean, per voxel, v1.12.0), the calibration of the lambdas, the crossing ridge,
+the detection statistic and the uncertainty maps. The b=0 volumes give S0 only
+(at least one is needed).
 
 PIPELINE
 --------
@@ -649,6 +650,10 @@ _STAGEC_ANISO_RATIO = 1.1
 # tensor low (validated: raw -> AD 1.72/FF 0.56/RF 0.09 vs corrected ->
 # AD 1.32/FF 0.73 on a GT-1.70 fiber; both NNLS solvers agree, so it is the
 # input signal, not the solver). Stage A detection still uses data_corr.
+# NOTE (v1.12.0): that validation used the SECOND-moment correction, which
+# over-subtracts on denoised input. With the exact first-moment inversion now
+# the default, Stage C on data_corr may no longer be biased: to be re-tested,
+# not changed here.
 
 # Stage D — final constrained compartment-fraction re-solve (ON by default;
 # disable via iso_resolve=False). For EVERY fitted voxel, the reported
@@ -2433,6 +2438,7 @@ class DBSI_Adaptive:
         self.sure_crosscheck_report_ = None
         self.n_iso_source_ = None
         self.rician_clamp_ = None
+        self.rician_correction_ = None
         self.fiber_detection_stat_ = None
         self.fiber_detection_ = None
         self.two_vs_one_stat_ = None
@@ -2508,6 +2514,9 @@ class DBSI_Adaptive:
             rule=cal.get('aggregation', {}).get('rule'),
             lambda_iso_cap_rule=cal.get('aggregation', {}).get('lambda_iso_cap_rule'),
             protocol=cal['protocol'], strict=bool(strict),
+            # v1.12.0: the correction the lambdas were calibrated under; a
+            # calibration written before carries none and used the second moment
+            rician_correction=mo.get('rician_correction', 'clamp'),
             content={k: v for k, v in cal.items() if k != '_source'})
         return m
 
@@ -2519,7 +2528,7 @@ class DBSI_Adaptive:
            calibrate_concentration_gate=False,
            concentration_gate_percentile=_CONCENTRATION_GATE_PERCENTILE,
            _calibration_only=False, _lambda_aniso_grid=None, _lambda_iso_grid=None,
-           _rician_correction='clamp', noise_map=None):
+           _rician_correction='first_moment', noise_map=None):
         """
         Fit the v3 hybrid two-stage adaptive DBSI model (+ MRDS
         multi-fiber extension) to 4D diffusion MRI data.
@@ -2566,6 +2575,7 @@ class DBSI_Adaptive:
         self.n_iso_columns_res_ = None
         self.n_iso_columns_wat_ = None
         self.rician_clamp_ = None
+        self.rician_correction_ = None
         self.fiber_detection_stat_ = None
         self.fiber_detection_ = None
         self.two_vs_one_stat_ = None
@@ -2825,19 +2835,26 @@ class DBSI_Adaptive:
         # ── Rician bias correction, voxel by voxel with sigma_map ──────────
         print("\n3. Applying Rician Bias Correction...")
         data_corr = np.zeros_like(data, dtype=np.float32)
-        # per voxel (v1.7.1): 2 sigma^2 col sigma del voxel; costante senza mappa
-        # EXPERIMENTAL modes (branch rician-primo-momento, 2026-11-18): the input
-        # of the production pipeline is MP-PCA denoised, so S ~ E[M] (first
-        # moment) and 2 sigma^2 over-subtracts. 'sigma2' = sqrt(S^2 - sigma^2)
-        # (high-SNR first moment, DESIGNER), 'pi2' = sqrt(S^2 - pi/2 sigma^2)
-        # (exact only at A=0), 'first_moment' = exact inversion of the Rician
-        # mean (Koay, Ozarslan & Basser 2009), 0 below the floor sigma*sqrt(pi/2).
+        # DEFAULT 'first_moment' (v1.12.0). The input is MP-PCA denoised by
+        # contract, so each value is ~ E[M], the FIRST moment of the Rice
+        # distribution, not a single noisy draw. The exact inversion solves
+        # E[M](A)/sigma = S/sigma for A (Koay, Ozarslan & Basser 2009; table +
+        # np.interp, `_rician_mean_inverse`), 0 at or below the floor
+        # sigma*sqrt(pi/2). Per voxel with the sigma of the noise map (v1.7.1).
+        # Until v1.11.1 the default was 'clamp' = sqrt(max(S^2 - 2 sigma^2, 0)),
+        # the SECOND moment: right for raw single measurements, but on denoised
+        # data it over-subtracts (-37% at A = sigma, -11% at 2 sigma, -5% at
+        # 3 sigma). Measured on the 13-scenario phantom with real dwidenoise at
+        # SNR 26: RF bias in WM -0.006/-0.008 -> ~0, tensor unchanged.
+        # Kept for comparison only: 'clamp', 'signed' (clamp without the
+        # truncation), 'sigma2' = sqrt(S^2 - sigma^2) (high-SNR first moment,
+        # DESIGNER), 'pi2' = sqrt(S^2 - pi/2 sigma^2) (exact only at A = 0).
         _sub = {'clamp': 2.0, 'signed': 2.0, 'sigma2': 1.0, 'pi2': np.pi / 2,
                 'first_moment': np.pi / 2}.get(_rician_correction)
         if _sub is None:
             raise ValueError("_rician_correction: 'clamp', 'signed', 'sigma2', 'pi2' or "
                              f"'first_moment', not {_rician_correction!r}")
-        # same expression as before for the default, so 'clamp' stays bit-identical
+        # same expression as up to v1.11.1, so 'clamp' reproduces those fits bit for bit
         noise_floor = (_sub * sigma_map[xs, ys, zs] ** 2)[:, None]
         masked_sq = data[xs, ys, zs].astype(np.float64)**2
         valid_mask = masked_sq > noise_floor
@@ -2859,6 +2876,9 @@ class DBSI_Adaptive:
         data_corr[xs, ys, zs] = corrected
 
         # ── Quante misure la correzione AZZERA, e in quanti voxel ───────────
+        # (Scritto per la 'clamp'; con 'first_moment' si azzera solo sotto il
+        # pavimento vero sigma*sqrt(pi/2), quindi molto meno: 1.26% -> 0.39%
+        # delle misure sul fantoccio a SNR 26.)
         # `S^2 - 2 sigma^2` e' non distorto per A^2 ma puo' essere NEGATIVO, e qui
         # viene troncato a ESATTAMENTE 0. Non e' cosmetico: Stage D legge la
         # frazione restricted dal plateau ad alto b, e i valori troncati sono
@@ -2890,9 +2910,19 @@ class DBSI_Adaptive:
             max_clamped_in_one_voxel=int(_per_vox.max()) if _per_vox.size else 0,
             n_volumes=int(masked_sq.shape[1]),
         )
-        if _rician_correction != 'clamp':
-            self.rician_clamp_['correction'] = _rician_correction
-        print(f"   Rician clamp: {100*self.rician_clamp_['fraction_of_measurements']:.2f}% "
+        self.rician_clamp_['correction'] = _rician_correction
+        self.rician_correction_ = _rician_correction
+        _pc_corr = (None if self.protocol_calibration_ is None
+                    else self.protocol_calibration_.get('rician_correction', 'clamp'))
+        if _pc_corr is not None and _pc_corr != _rician_correction:
+            # the lambdas were chosen on a signal corrected differently: a small
+            # mismatch, declared rather than refused (recalibrate to remove it)
+            self.rician_clamp_['calibration_correction'] = _pc_corr
+            print(f"   [WARNING] the protocol calibration was computed with the "
+                  f"'{_pc_corr}' Rician correction, this fit uses '{_rician_correction}'. "
+                  f"Recalibrate the protocol for full consistency.")
+        print(f"   Rician correction '{_rician_correction}': "
+              f"{100*self.rician_clamp_['fraction_of_measurements']:.2f}% "
               f"of measurements truncated to exactly 0 "
               f"({100*self.rician_clamp_['fraction_of_voxels_any']:.1f}% of voxels "
               f"affected, {100*self.rician_clamp_['fraction_of_voxels_over_10pct']:.1f}% "
@@ -3841,7 +3871,8 @@ class DBSI_Adaptive:
                        iso_range=list(self.iso_range), iso_grid=iso_grid,
                        iso_thresholds=list(self.iso_thresholds),
                        iso_centroids=list(self.iso_centroids),
-                       iso_centroid_nrf=self.iso_centroid_nrf),
+                       iso_centroid_nrf=self.iso_centroid_nrf,
+                       rician_correction=self.rician_correction_),
         ))
 
     # ------------------------------------------------------------------

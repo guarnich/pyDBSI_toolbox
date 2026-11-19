@@ -5,19 +5,16 @@ DBSI Core Solvers
 ARCHITECTURE: TWO STAGES, DIFFERENT PURPOSES
 ---------------------------------------------------
 
-STAGE A — "How many fiber populations, and in which directions?"
-This is fundamentally a SPARSE detection problem: a voxel contains a
+STAGE A 
+SPARSE detection problem: a voxel contains a
 handful of distinct fiber populations at most. The exhaustive
-(direction x AD/RD-pair) dictionary is well suited to this question
-BECAUSE its richness is being used for what richness is good at.
+(direction x AD/RD-pair) dictionary is well suited to this question.
 
-STAGE B — "Given these directions, what are AD and RD?"
+STAGE B 
 Once the directions are fixed, this becomes a small, well-conditioned regression:
 at most a handful of orientation unknowns are now constants, and we
 are fitting 2 diffusivities (or 2 per population) against the full
-set of b-values/directions in the protocol. Since
-there is no longer a non-linear stage to refine it: Stage B's
-closed-form estimate IS the final AD/RD.
+set of b-values/directions in the protocol.
 
 """
 
@@ -126,9 +123,7 @@ def compute_regularization_matrix(AtA, n_aniso_cols, lambda_aniso, lambda_iso):
 # 
 # A candidate direction is only counted as a detected population
 # if its aggregated weight exceeds the weight of EVERY one of its k
-# nearest geometric neighbours in the SAME dictionary (a local maximum on
-# the weight-over-sphere function), not merely high in the global
-# ranking. A true fiber's smeared neighbour is, by construction, always
+# nearest geometric neighbours in the SAME dictionary. A true fiber's smeared neighbour is, by construction, always
 # lower-weighted than the true peak itself, so it is never a local
 # maximum and is correctly excluded. A genuine second, angularly
 # well-separated fiber population has its own local neighbourhood and
@@ -181,33 +176,14 @@ def select_dominant_directions(w_aniso, n_dirs, n_pairs, neighbor_idx,
     This function deliberately DISCARDS the per-pair breakdown of
     w_aniso and looks only at total weight per direction (summed over
     all n_pairs (AD,RD) pairs sharing that direction), because Stage A's
-    only job is angular detection — see module docstring on why the
-    per-pair centroid from Stage A is not trusted.
+    only job is angular detection.
 
     Detection is by LOCAL-MAXIMA peak-finding over the dictionary's
     k-nearest-neighbour graph (`build_direction_neighbor_graph`), then
     each local-maximum peak is scored by its ANGULAR-BASIN MASS (Voronoi
     assignment: every direction's weight is added to the nearest peak's
     basin), and peaks are accepted greedily in descending basin mass with
-    angular NON-MAXIMUM SUPPRESSION (a candidate within `min_separation`
-    of an already-accepted, stronger peak is suppressed as smearing skirt,
-    not a distinct population).
-
-    WHY BASIN MASS, NOT PEAK HEIGHT (fixed 2026-07-21) -------------------
-    The regularized Stage A NNLS + the (direction x AD/RD-pair) dictionary
-    SMEAR a single fiber's weight across several neighbouring columns.
-    Thresholding on a single direction's peak HEIGHT then rejects a
-    genuine but spread SECOND fiber (esp. a low-FA / demyelinated one):
-    on the tumor-like complex voxel the true 2nd fiber's peak height was
-    only ~3% of total (below min_weight_fraction=5%) while its angular
-    BASIN MASS was ~20% — clearly a real population. Thresholding on basin
-    mass recovers it. The NMS separation criterion keeps the original
-    protection against grid-quantisation smearing producing false N_POP>=2
-    (skirt peaks near the true one are suppressed), replacing the previous
-    reliance on peak-height alone.
-
-    Column ordering must match `core.basis.build_design_matrix_exhaustive`:
-    pair-major, direction-minor (for p in pairs: for d in dirs: column).
+    angular NON-MAXIMUM SUPPRESSION.
 
     Parameters
     ----------
@@ -239,11 +215,7 @@ def select_dominant_directions(w_aniso, n_dirs, n_pairs, neighbor_idx,
         mass is at least this fraction of the DOMINANT population's basin
         mass. Discriminates a genuine second fiber (carries a substantial
         share of the dominant's weight) from a single fiber's smearing
-        skirt that noise pushed past `min_separation` (carries less). Set
-        from an empirical single-fiber-vs-crossing ratio sweep: the two
-        distributions overlap, so 0.35 trades ~7% false crossings on single
-        fibers for recovering the true 2nd fiber in ~40-80% of crossing
-        voxels (SNR 30-20). Default 0.35.
+        skirt that noise pushed past `min_separation` (carries less). Default 0.35.
     min_dominant_concentration : float
         Minimum share of the TOTAL anisotropic weight that the dominant
         basin must hold for ANY fiber population to be reported. A real
@@ -252,13 +224,9 @@ def select_dominant_directions(w_aniso, n_dirs, n_pairs, neighbor_idx,
         from isotropic (esp. restricted) leakage on a fiber-FREE voxel is
         DIFFUSE (dominant basin only ~0.2-0.24, spread across many similar
         peaks) and would otherwise be mis-read as a crossing (npop>=2,
-        since every diffuse basin passes the relative test). Below this
+        since every diffuse basin passes the relative test). Default 0.35: Below this
         concentration the whole anisotropic block is treated as leakage and
-        NO population is returned (npop=0). Set from an empirical
-        pure-iso-vs-fiber concentration sweep (SNR30: clean gap pure-iso
-        p95~0.40 vs real-fiber p05~0.39; SNR15: overlap). 0.35 balances a
-        ~89% cut in pure-iso false crossings against keeping low-SNR fiber
-        detection. Default 0.35.
+        NO population is returned (npop=0).
 
     Returns
     -------
@@ -293,9 +261,8 @@ def select_dominant_directions(w_aniso, n_dirs, n_pairs, neighbor_idx,
 
     # ── Local-maxima peak-finding ────────────────────────────────────
     # A candidate counts as a peak if its weight exceeds ALL k geometric
-    # nearest neighbours'. Ties break toward the lower index (well-defined
-    # at exact zero). NOTE: the min-mass filter is applied LATER on basin
-    # mass, not here on peak height (a spread fiber's peak can be tiny).
+    # nearest neighbours'. 
+
     is_peak = np.zeros(n_dirs, dtype=np.bool_)
     n_peaks = 0
     for d in range(n_dirs):
@@ -349,6 +316,7 @@ def select_dominant_directions(w_aniso, n_dirs, n_pairs, neighbor_idx,
     # `min_dominant_concentration` of the total anisotropic weight, the
     # whole block is leakage -> report NO population (npop=0), preventing
     # the diffuse-leakage-as-crossing false positive.
+
     max_basin = 0.0
     for pk in range(n_peaks):
         if basin_mass[pk] > max_basin:
@@ -372,7 +340,7 @@ def select_dominant_directions(w_aniso, n_dirs, n_pairs, neighbor_idx,
             break
         used[best_pk] = True
         # peaks are consumed in descending mass order; once below the
-        # mass threshold, every remaining peak is too -> stop.
+        # mass threshold, stop.
         if basin_mass[best_pk] < threshold:
             break
         # Relative threshold: a non-dominant population must carry at least
@@ -416,10 +384,7 @@ def dominant_basin_concentration(w_aniso, n_dirs, n_pairs, neighbor_idx,
     `select_dominant_directions` thresholds (max_basin / total_weight), but
     returned as a continuous scalar in [0, 1] for use as a per-voxel
     diagnostic channel and as the modulation variable for a per-voxel
-    lambda_aniso adaptation. It is factored out here (rather than returned
-    from `select_dominant_directions`) so it can be computed even for voxels
-    that never enter the direction-selection path (e.g. below fiber_threshold)
-    and without perturbing that function's tuned return signature.
+    lambda_aniso adaptation.
 
     Interpretation (the discriminator Plan A rests on):
       - A REAL fiber -- even a demyelinated / low-FA one -- concentrates its
@@ -427,15 +392,13 @@ def dominant_basin_concentration(w_aniso, n_dirs, n_pairs, neighbor_idx,
       - DIFFUSE anisotropic weight absorbed from isotropic (esp. restricted)
         signal on a fiber-free voxel spreads across many near-equal basins:
         low concentration (~0.2-0.25).
+
     Unlike n_pop (a binary/quantised detection count), concentration separates
-    a weak-but-real fiber from leakage continuously, which is why it is the
-    right lever for a continuous per-voxel regularization (npop-gating was
-    falsified: it crushed the demyelinated fiber, confusing it with GM).
+    a weak-but-real fiber from leakage continuously.
 
     The peak-finding, basin-assignment and column-ordering conventions are
-    IDENTICAL to `select_dominant_directions` (pair-major, direction-minor;
-    local-maxima over the k-NN graph; Voronoi basin mass). Returns 0.0 when
-    the anisotropic block carries negligible weight or has no local maximum.
+    IDENTICAL to `select_dominant_directions`.
+    Returns 0.0 when the anisotropic block carries negligible weight or has no local maximum.
 
     Parameters
     ----------
@@ -537,14 +500,6 @@ def estimate_AD_RD_conditioned(bvals, bvecs, sig_norm, fiber_dir,
     Stage B: closed-form weighted-least-squares estimate of (AD, RD)
     for a SINGLE dominant fiber direction, given the isotropic
     compartment fractions/centroids already estimated.
-
-    This is the same WLS construction validated as the v1/v2 analytical
-    initialisation (`_estimate_AD_RD_2iso` / `_estimate_AD_RD_3iso` in
-    `model_Niso_adaptive_ff_thr.py`), but in v3 it is the FINAL estimate
-    rather than an initial guess for a subsequent non-linear refinement
-    — there is no longer a non-linear stage. Unifying the 2-ISO/3-ISO
-    cases into one function via the `use_3iso` flag avoids duplicating
-    this analytical derivation a third time across the codebase.
 
     The fiber direction itself comes from Stage A
     (`select_dominant_directions`) — Stage B does NOT search over
@@ -652,7 +607,7 @@ def estimate_AD_RD_conditioned(bvals, bvecs, sig_norm, fiber_dir,
 def _stagec_scan(sig_norm, bvals, c2, iso_forward, iso_gram, iso_aty, yty,
                  ad_array, rd_array, aniso_ratio,
                  best_res, best_ad, best_rd, w_out):
-    """Scan an (AD, RD) grid: for each admissible pair build the reduced Gram
+    """Scan an (AD, RD) grid: for each admissible pair build the reduced Gram matrix
     of [fiber_col | iso_forward], NNLS-solve, keep the minimum-residual weights.
     Updates w_out (length 1+n_iso) with the best weights found. Helper for
     `stagec_varpro_single_fiber`."""
@@ -713,37 +668,6 @@ def stagec_varpro_single_fiber(sig_norm, bvals, bvecs, fiber_dir,
     fiber's tensor AND all compartment fractions, given the Stage-A fiber
     direction.
 
-    WHY THIS EXISTS
-    ---------------
-    The raw v3 pipeline estimates the compartment fractions (Stage A NNLS over
-    the OVER-COMPLETE anisotropic dictionary: fiber_fraction = sum of all ~468
-    anisotropic weights) and the fiber tensor (Stage B closed-form given those
-    fractions) in two DECOUPLED steps. On a concentrated single fiber that
-    coexists with a restricted isotropic compartment the two are MUTUALLY
-    biased: the many near-fiber anisotropic columns absorb restricted/hindered
-    iso signal -> fiber_fraction inflated and restricted_fraction driven to ~0;
-    the closed-form Stage B, fed those biased fractions, then UNDER-estimates AD
-    (~1.1 vs a true 1.7), which makes the fiber column blunter/more isotropic
-    and locks the inflation in. Synthetic single-fiber validation (FF_true 0.55,
-    RF_true 0.10, AD 1.7, RD swept, SNR 30/50): the raw pipeline gave FF up to
-    0.94, RF 0.00, AD ~1.1; this joint re-solve recovers FF 0.55-0.57, RF
-    0.07-0.10, AD 1.64-1.85, RD within noise -- across all RD.
-
-    The fix is to fit the fiber tensor and fractions JOINTLY by directly
-    minimising the reconstruction residual. Because the fractions enter the
-    forward model LINEARLY and only (AD, RD) enter non-linearly (the direction
-    is fixed to Stage A's detection), this is a 2-D separable least squares
-    (VARPRO): scan (AD, RD) on a coarse grid, and for each candidate solve the
-    NON-NEGATIVE linear problem for [fiber_weight | iso_weights] on the REDUCED
-    dictionary [fiber_col(AD,RD,dir) | iso_grid] -- ONE physically-anchored
-    fiber column competing fairly with the isotropic columns, instead of the
-    over-complete anisotropic block. A short local refine (half-spacing, 5x5)
-    around the best grid node sharpens (AD, RD). An earlier ALTERNATING scheme
-    (fractions <-> closed-form Stage B tensor) was tried and FALSIFIED: it
-    inherits the closed-form's downward AD bias and converges to the same wrong
-    fixed point (AD stuck ~1.0, RF ~0.01). Only the residual-minimising search
-    recovers the truth, hence VARPRO.
-
     Parameters
     ----------
     sig_norm : array (N,)
@@ -795,31 +719,6 @@ def stagec_varpro_single_fiber(sig_norm, bvals, bvecs, fiber_dir,
         sig_norm, bvals, c2, iso_forward, iso_gram, iso_aty, yty,
         ad_grid, rd_grid, aniso_ratio, best_res, best_ad, best_rd, w_out)
 
-    # Local refine: _STAGEC_N_REFINE successive 5x5 bisections around the best node.
-    #
-    # Until v1.3.3 this was a SINGLE 5x5 pass at half the coarse spacing, so the
-    # returned (AD, RD) could only ever land on a lattice of half the coarse step.
-    # Measured on real data: 100.0% of single-fiber voxels sat exactly on that
-    # lattice with ZERO intermediate values -- AD quantised to 0.077e-3, RD to
-    # 0.043e-3. The quantisation propagates to whole-brain summaries: the median RD
-    # snaps to a lattice value, which is why the cross-protocol CoV of RD read
-    # 0.00% across five protocols. That zero was the grid, not the measurement, and
-    # reporting it as reproducibility would have been a false claim.
-    #
-    # Iterating the bisection is much cheaper than densifying the coarse grid for
-    # the same resolution: each pass is one more 5x5 scan (25 evaluations) and
-    # halves the step, whereas reaching 1/8 of the coarse step by densification
-    # would cost (14*8) x (12*8) = 10752 evaluations in place of 14x12 = 168.
-    # Three passes cost ~+26% of this routine and give ~1/8 of the coarse step.
-    #
-    # `_STAGEC_N_REFINE = 1` reproduces the old behaviour bit for bit, because the
-    # first pass halves the coarse step exactly as before — useful for bisecting a
-    # regression against v1.3.3.
-    #
-    # NOTE, and it matters: this does NOT address the floor. A voxel whose optimum
-    # lies below _TENSOR_RD_FLOOR still lands exactly on it, because every downward
-    # candidate clamps. ~31% of fiber-valid voxels are in that state. Resolution and
-    # identifiability are different problems; this fixes only the first.
     da = (ad_grid[1] - ad_grid[0]) if ad_grid.shape[0] > 1 else 0.1e-3
     dr = (rd_grid[1] - rd_grid[0]) if rd_grid.shape[0] > 1 else 0.1e-3
     ad_loc = np.empty(5)

@@ -80,7 +80,7 @@ def generate_exhaustive_diffusivity_pairs(ad_min=0.5e-3, ad_max=2.2e-3, n_ad=3,
     """
     DEFAULTS ALIGNED TO THE MODEL: `anisotropy_ratio=2.0` was
     introduced to remove, because it leaks isotropic signal into
-    fiber_fraction. Now a bare call reproduces the model: 3x3, ratio 2.0, 5 admissible pairs.
+    fiber_fraction.
 
     Generate the parametric (AD, RD) grid for the exhaustive anisotropic
     dictionary.
@@ -105,8 +105,7 @@ def generate_exhaustive_diffusivity_pairs(ad_min=0.5e-3, ad_max=2.2e-3, n_ad=3,
         Number of RD steps.
     anisotropy_ratio : float
         Minimum AD/RD ratio for a pair to be physically admissible as an
-        anisotropic basis element. Typical range 1.1-1.2 (see
-        `autoconfigure_dictionary`).
+        anisotropic basis element.
 
     Returns
     -------
@@ -233,8 +232,6 @@ def generate_anchored_isotropic_grid(d_min=0.1e-3, d_max=3.0e-3, n_steps=12,
     that threshold, offset by a small epsilon to the side that the
     production compartment-classification rule assigns to the INTENDED compartment.
   
-    Anchoring does NOT remove the separate, genuine transition-zone
-    bias documented in the methodological supplement.
     Anchoring only ensures the grid's own bookkeeping does not ADD a
     spurious, avoidable misclassification on top of that genuine
     physical ambiguity.

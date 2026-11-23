@@ -156,7 +156,7 @@ from .utils.autoconfig import autoconfigure_dictionary
 
 FIBER_THRESHOLD = 0.15      # dimensionless — minimum FF for AD/RD estimation
 
-_N_ISO_REF_STEPS = 48.      # for n_iso bootstrap
+_N_ISO_REF_STEPS = 48      # for n_iso bootstrap
 
 THRESH_RES = 0.3e-3          # mm^2/s — restricted / hindered boundary (default)
 THRESH_WAT = 3.0e-3          # mm^2/s — hindered  / free-water boundary (default)
@@ -254,7 +254,7 @@ _DEFAULT_N_ISO_STEPS = 31    # Legacy fixed default - not used.
 _QUADRATURE_N_ISO = 6
 
 _ISO_GRID_D_MAX_EXTENDED = 5.0e-3
-
+_DEFAULT_MIN_PEAK_RATIO = 0.35
 MAX_FIBER_POPULATIONS = 2
 
 _C_FF = 0             # fiber_fraction -- TOTAL anisotropic fraction (pop1+pop2)
@@ -351,13 +351,13 @@ def _default_direction_peak_k(n_dirs):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PROTOCOL ANALYSIS UTILITY (unchanged from v1/v2)
+# PROTOCOL ANALYSIS UTILITY 
 # ─────────────────────────────────────────────────────────────────────────────
 
 def analyse_protocol(bvals):
     """
     Analyse the diffusion acquisition scheme and determine which isotropic
-    model is appropriate. Unchanged from v1/v2.
+    model is appropriate.
     """
     bvals = np.asarray(bvals, dtype=np.float64)
     b_max = float(np.max(bvals))

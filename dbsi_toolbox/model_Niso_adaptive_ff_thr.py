@@ -7,8 +7,7 @@ INPUT (fixed)
 A DWI denoised with MP-PCA (dwidenoise) and then preprocessed (topup, eddy, N4
 bias correction), its bvals/bvecs, a brain mask, and the thermal noise map of
 dwidenoise divided by the N4 bias field (`noise_map`, required). The noise map
-is sigma for every step: the Rician correction (exact inversion of the Rician
-mean, per voxel, v1.12.0), the calibration of the lambdas, the crossing ridge,
+is sigma for every step: the Rician correction, the calibration of the lambdas, the crossing ridge,
 the detection statistic and the uncertainty maps. The b=0 volumes give S0 only
 (at least one is needed).
 
@@ -24,13 +23,13 @@ are trusted from Stage A, not its (AD, RD).
 STAGE B/C — tensors.
   - n_pop == 1: direction refined by a two-level cone search, then Stage C
     (`stagec_varpro_single_fiber`) re-solves tensor and fractions jointly on the
-    Rician-corrected signal (v1.12.0; on the raw input until v1.11.1).
+    Rician-corrected signal.
   - n_pop == 2: the crossing FF is re-solved on the detected support with a
     light ridge kappa * (sigma/S0)^2 (`crossing_ff_resolve`), then a bounded
     joint Levenberg-Marquardt fits both tensors (`estimate_AD_RD_mrds`). The
     directions leave the Stage A dictionary grid by a cone search per
-    population (`crossing_dir_refine`, v1.9.0, on by default).
-  - two_vs_one_threshold (v1.9.0, default 12): instead of `min_peak_ratio`,
+    population (`crossing_dir_refine` on by default).
+  - two_vs_one_threshold (default 12): instead of `min_peak_ratio`,
     every voxel with a separated secondary peak is fitted both ways and the
     crossing is kept only where it lowers the Stage D residual by at least the
     threshold, in noise variances.
@@ -49,7 +48,7 @@ derived channels, R2/RMSE, and the per-voxel Fisher standard errors
 KNOWN LIMITS
 ------------
 Per-population AD in crossings is not quantitative (fiber/hindered and AD/RD
-trade-offs, Cramer-Rao sd ~0.6e-3): report the FF-weighted AD there. The angle
+trade-offs): report the FF-weighted AD there. The angle
 between the two populations includes the grid quantisation of the second.
 
 MULTI-FIBER SCOPE: EXACTLY 2, FIXED
@@ -99,9 +98,7 @@ Output Channels (27)
     26 : NNLS_IT — Stage A solver iterations
 
 Per-voxel standard errors of the continuous channels are written separately,
-to toolbox_report/uncertainty_maps/. The `_C_*` module constants are the
-single source of truth for these indices -- index through them, never through
-a literal.
+to toolbox_report/uncertainty_maps/.
 
 References
 ----------
@@ -139,8 +136,8 @@ from .core.solvers import (
     compute_cone_refinement_schedule,
     measure_hemisphere_spacing,
     estimate_AD_RD_mrds,  # MRDS multi-fiber Stage B
-    refine_crossing_directions_cone,  # v1.9.0 — crossing directions off the grid
-    crossing_ff_resolve,          # v1.7.0 — crossing FF re-solved before the LM
+    refine_crossing_directions_cone, 
+    crossing_ff_resolve,          
 )
 from .calibration.data_driven import (fiber_subtracted_residual,
                                       select_lambdas_data_driven,
@@ -159,30 +156,11 @@ from .utils.autoconfig import autoconfigure_dictionary
 
 FIBER_THRESHOLD = 0.15      # dimensionless — minimum FF for AD/RD estimation
 
-# Passi della griglia isotropa di RIFERIMENTO usata (a) per sottrarre la fibra
-# prima del bootstrap di n_iso e (b) come riferimento del bias dentro il
-# bootstrap. Deve essere piu' ricca di ogni candidato, altrimenti il bias di
-# un candidato fine sarebbe zero per costruzione.
-_N_ISO_REF_STEPS = 48
+_N_ISO_REF_STEPS = 48.      # for n_iso bootstrap
 
 THRESH_RES = 0.3e-3          # mm^2/s — restricted / hindered boundary (default)
 THRESH_WAT = 3.0e-3          # mm^2/s — hindered  / free-water boundary (default)
-# Sources of the defaults (checked against the papers, 2026-11-03): 0.3 um^2/ms as
-# the restricted / non-restricted boundary in Wang et al. 2015 (Brain 138:1223) and
-# Wang Q et al. 2019 (NeuroImage: Clinical 22:101767); the three classes RF <= 0.3,
-# HF 0.3-3, WF >= 3 in Ye et al. 2020 (Ann Clin Transl Neurol 7:695). Not a
-# consensus: tumour studies use RF <= 1.0, HF 1.0-1.5, non-restricted > 1.5
-# (Han et al. 2023, Neuro-Oncol Adv 5:vdad050; Zhu et al. 2026, JMRI).
-#
-# CONFIGURABLE (v1.10.0): `iso_thresholds` and `iso_centroids` of DBSI_Adaptive. The
-# reported RF/HF/WF are the weights of the Stage D centroids, NOT bins of a spectrum,
-# so the two are set together: thresholds alone would leave a centroid in the wrong
-# class (Han's 1.0 boundary would put the HF centroid 1.0 in RF). The thresholds
-# still bin Stage A's spectrum (the iso signal given to Stage B/C, the grid anchors);
-# the centroids are the estimator of the reported fractions. Each centroid must sit
-# in its class: c_RF <= t_RF < c_HF < t_WF <= c_WF (c_WF may sit ON t_WF, as 3.0 does).
-# Inside the numba kernels the configuration travels as one float64 array, laid out
-# by the _CFG_* indices below.
+
 _CFG_T_RES, _CFG_T_WAT, _CFG_C_RF, _CFG_C_HF, _CFG_C_WF, _CFG_C_NRF = range(6)
 
 
@@ -253,15 +231,7 @@ def _resolve_iso_classes(iso_thresholds, iso_centroids, iso_centroid_nrf):
         iso_centroid_nrf = c_nrf
     return (t_res, t_wat), (c_rf, c_hf, c_wf), iso_centroid_nrf
 
-# 3-ISO is now the DEFAULT for any multi-shell protocol (>=2 shells, b_max
-# >= 2000). Lowered from (b_max>=3000 AND >=3 shells) on the strength of the
-# iso-block identifiability analysis + the Stage D fixed-3 estimator: an SVD/
-# CRLB/Monte-Carlo study showed the 3 iso components (RF/HF/WF) are supported
-# with low variance down to b_max ~ 2000, and the constrained fixed-centroid
-# estimator recovers them near-GT (unlike the old free anchored spectrum). The
-# 2-ISO merge (RF + NRF) is now only a single-shell fallback -- and it was shown
-# to be LESS accurate on RF than 3-ISO even where it applies. See project
-# identifiability analysis.
+
 B_THRESH_3ISO = 2000.0       # s/mm^2 — minimum b_max to activate 3-ISO model
 MIN_SHELLS_3ISO = 2          # minimum distinct non-zero b-value shells for 3-ISO
 
@@ -272,88 +242,21 @@ _STAGE_A_RD_MIN = 0.05e-3
 _STAGE_A_RD_MAX = 1.2e-3
 _STAGE_A_DEFAULT_N_AD = 3
 _STAGE_A_DEFAULT_N_RD = 3
-# Anisotropy floor for the (AD, RD) detection grid: a pair enters the
-# anisotropic block only if AD >= RD * ratio. Raised 1.15 -> 2.0 (2026-07-27)
-# as the structural, root-cause complement to the FF-leakage work. On the
-# coarse default grid (AD=[0.5,1.35,2.2], RD=[0.05,0.625,1.2] e-3 mm^2/s) the
-# admissible AD/RD ratios are {44, 27, 10, 3.52, 2.16, 1.83}. The interval
-# [1.15, 1.5) contains NO pair, so raising the ratio through it is a no-op
-# (verified end-to-end: identical maps). Raising to 2.0 removes exactly ONE
-# column -- the near-isotropic (AD=2.2, RD=1.2) pair (ratio 1.83), which is a
-# direct source of isotropic->fiber leakage. On the 8-class heterogeneous
-# synthetic brain this lifted tissue discrimination 81.2% -> 85.6%, cut GM FF
-# leakage 0.51 -> 0.39 and Edema 0.43 -> 0.34, and did NOT harm the
-# demyelinated fiber (its AD/RD ratio 1.5/0.7 = 2.14 is above the floor):
-# WM_demyel FF 0.60 -> 0.52 (closer to GT 0.45), detection npop 0.45 -> 0.80.
-# SAFE BAND [2.0, 2.16]: the next column (AD=1.35, RD=0.625, ratio 2.16)
-# survives up to 2.16 and is needed for demyelinated / low-FA fibers; at 2.2
-# it is lost. This is COMPLEMENTARY, not a cure: Tumor's restricted-signal
-# leakage (a different mechanism) is untouched (FF ~0.50 either way) and is
-# the target of the per-voxel concentration modulation (Plan A). Kept
-# constructor-overridable. See Simulations/pyDBSI_pervoxel_prototype for the
-# sweep harness.
+
 _STAGE_A_DEFAULT_ANISOTROPY_RATIO = 2.0
 _STAGE_A_DEFAULT_LAMBDA_BASE = 0.005
 
 # Default isotropic spectrum range.
 _DEFAULT_ISO_MIN = 0.0
 _DEFAULT_ISO_MAX = 3.0e-3
-_DEFAULT_N_ISO_STEPS = 31    # Legacy fixed default — see select_n_iso_svd.
+_DEFAULT_N_ISO_STEPS = 31    # Legacy fixed default - not used.
 
-# n_iso DI QUADRATURA (default dalla 1.3.9, `n_iso_method='quadrature'`).
-# n_iso non e' un ordine di modello: Stage D ricalcola le frazioni riportate su
-# 3 centroidi FISSI, quindi la griglia le tocca solo per via indiretta (via il
-# tensore di Stage C). Si fissa per convergenza, non si seleziona per soggetto.
-# Misurato su dati veri (Codes_fixed_20260923/06_convergenza_niso, 3000 voxel,
-# lambda congelati, n_iso 4..40). Riferimento = media delle due densita' piu' fini
-# con <=5% di NNLS non convergenti (n_iso 12 e 16); scarto peggiore su tutte le
-# quantita', in unita' di tolleranza dichiarata (FA 0.01, AD 0.03e-3, frazioni 0.01):
-#     n_iso  colonne  rapporto max fra atomi  scarto peggiore  NNLS non conv.
-#       4       9           1.92               1.11 (FA)         0%
-#       6      11           1.67               0.49 (HF)         0%
-#       8      10           1.75               1.12 (FA)         0%
-#      10      12           1.54               0.28 (FA)         0%
-#      12      14           1.43               riferimento      0.8%
-#      40      42           1.11               0.67 (HF)        40%
-# Le frazioni restano entro 0.6 tolleranze a OGNI densita'. Il tensore segue il
-# rapporto massimo fra atomi adiacenti, non n_iso (Spearman AD -0.96, FA -0.84),
-# ed e' per questo che 8 va peggio di 6. Si sceglie 6 perche': entro tolleranza,
-# 0% NNLS non convergenti (crescono con le colonne: 40% a n_iso=40), il piu'
-# veloce, ed e' la griglia su cui sono stati calibrati i lambda congelati di
-# coorte -- la penalita' L2 su lambda_iso non e' invariante per cambio di griglia.
-# NON 4: e' cio' che il ripiego SVD restituisce sempre, e fallisce su FA.
 _QUADRATURE_N_ISO = 6
 
 _ISO_GRID_D_MAX_EXTENDED = 5.0e-3
 
-# Maximum number of fiber populations Stage A/B reports per voxel. FIXED at 2,
-# deliberately: it is the practical ceiling for the angular sampling of the
-# clinical protocols this toolbox targets, and a third population was never
-# resolvable on real data (the pop3 output channels came back 100% NaN on every
-# run). It was briefly a per-instance parameter with an opt-in value of 3; that
-# option is gone, along with the pop3 output block it fed. See module docstring
-# "MULTI-FIBER SCOPE".
 MAX_FIBER_POPULATIONS = 2
 
-# ── OUTPUT CHANNEL LAYOUT ────────────────────────────────────────────────────
-# Single source of truth for the channel indices: the njit kernels, the class,
-# `output_map_names` and `fit_quality` both index
-# through these names, so the layout is defined in exactly one place.
-#
-# NaN/0 CONVENTION, by block:
-#   0-4   compartment fractions   -- 0 means "compartment absent" (0 is the
-#                                    correct physical value; they stay summable)
-#   5     n_fiber_populations     -- THREE-STATE, see `output_map_names`
-#   6-19  per-population block    -- NaN means "this population is absent"
-#   20-22 FF-weighted aggregates  -- NaN where no fiber tensor was estimated
-#   23-26 diagnostics             -- NaN outside fitted voxels
-#
-# v1.7.0: `mean_iso_adc` is no longer an output. It was the mean of Stage A's
-# over-complete iso spectrum, which Stage D does not use: not coherent with the
-# reported fractions and not comparable between branches (inspection
-# 2026-09-30). It survives as an INTERNAL scratch channel (_C_ADC_ISO, after the
-# public ones) because the 'recovered' fit-quality reconstruction -- used only
-# when Stage D is off -- needs it; `fit` drops it before returning.
 _C_FF = 0             # fiber_fraction -- TOTAL anisotropic fraction (pop1+pop2)
 _C_RF = 1             # restricted_fraction
 _C_HF = 2             # hindered_fraction      (NaN in 2-ISO)
@@ -384,330 +287,54 @@ _N_CHANNELS_INTERNAL = 28
 # MRDS multi-fiber Stage B defaults (see core.solvers.estimate_AD_RD_mrds).
 _MRDS_INIT_N_ITER = 3        # short, deliberately non-converged alternating warm start
 _MRDS_LM_MAX_ITER = 25
-# Cone over the crossing directions (v1.9.0): LM iterations per candidate, warm
-# started from the current solution, and the default of the option. ON by default
-# from 1.9.0: crossings orientated at random, SNR 26, median angular error 10.2/8.9
-# -> 5.1/5.0 deg (pop 1/2); on real data (BR 000148) the crossing directions move
-# by 8.3 deg median. Where the grid node happens to sit on the true direction the
-# cone cannot gain and may follow the noise (weak population: 1.2 -> 5.2 deg).
+
 _MRDS_CONE_LM_ITER = 10
 _DEFAULT_CROSSING_DIR_REFINE = True
 
-# TWO-VS-ONE POPULATION TEST (v1.9.0). How many populations a voxel has was
-# decided by `min_peak_ratio` alone: a second fiber is accepted when its angular
-# basin holds >= 0.35 of the dominant's mass, a cut set by hand where the
-# single-fiber and crossing distributions overlap. Measured on the 1.8.1
-# simulations (P3 battery, SNR 15/26/40): 40-55% of single fibers with high RD or
-# low FF got a false second population and ~half of unbalanced crossings
-# (0.45/0.20, true ratio 0.44) were read as one fiber, at EVERY SNR -- the cut,
-# not the noise. The test replaces the cut with the model selection the original
-# MRDS uses: every voxel with a separated secondary peak (candidate ratio 0) is
-# fitted both as a crossing and as a single fiber, and the crossing is kept only
-# if it lowers the Stage D residual by at least `two_vs_one_threshold` noise
-# variances:
-#     stat21 = (RSS_1pop - RSS_2pop) / sigma_voxel^2
-# on the Stage D model (fixed iso centroids, fitted tensors and directions,
-# corrected signal), BEFORE the fiber threshold -- otherwise a weak single fiber
-# removed by the threshold turns the comparison into 2-vs-0. With the crossing
-# directions on the grid (crossing_dir_refine off) the 2-population model starts
-# handicapped and stat21 is negative on single fibers; with the cone the null
-# behaves (median 1-5, p95 7-18). Emulated at threshold 12 with the cone:
-# populations right 57->73.5 / 69->85 / 73->90 % at SNR 15/26/40, FF MAE down,
-# RD MAE up at SNR 15-26 (heterogeneous crossings demoted at low SNR).
-# ON by default from 1.9.0 (threshold 12), after the real-data check on BR 000148
-# (P3, 2026-10-28; tissue from DTI FA/MD): crossings in GM 34.6 -> 13.7%, removed
-# fibers almost all in GM (DTI FA 0.13); crossings ADDED in coherent-looking WM
-# (DTI FA 0.6-0.8: 7.7 -> 17.3%) sit in the centrum semiovale with the second
-# population at ~85 deg and 18% share, while the midline corpus callosum does not
-# change (1.2% -> 1.2%): real crossings, not single-fiber misfit. Cost: fit x1.3.
-# Off with two_vs_one_threshold=None. Needs Stage D: with iso_resolve=False the
-# DEFAULT turns itself off, an explicit threshold is an error.
-_DEFAULT_TWO_VS_ONE_THRESHOLD = 12.0
+_DEFAULT_TWO_VS_ONE_THRESHOLD = 12.0  # in noise variances: keep the crossing only if it lowers the Stage D residual by at least this much.
 _TWO_VS_ONE_CANDIDATE_RATIO = 0.0     # any separated secondary peak is a candidate
 
-# Local-maxima peak-finding neighbourhood size for `select_dominant_directions`
-# (see core.solvers module notes just above that function). Re-validated
-# 2026-07-15 (post sign-bug and detection-fix, k in {4,6,8,10,12}, n_dirs=62,
-# 30 seeds/condition, SNR=30): k=6 dominates or ties k=8+ on both axes
-# (single-fiber correct-N_POP=1 rate identical at 73.3%; crossing
-# sensitivity higher at every tested angle: 30/60/90deg = 46.7/93.3/96.7%
-# for k=6 vs 43.3/90.0/93.3% for k=8). k=4 trades single-fiber accuracy
-# (63.3%) for a further sensitivity gain that mostly saturates by k=6.
-# 30-degree crossing sensitivity (~45-65% across all k) is NOT much
-# improved by k alone -- at this dictionary's ~25 deg mean node spacing, a
-# 30 deg crossing separates the two true peaks by close to one grid
-# spacing, so their neighbourhoods overlap almost by construction; a
-# denser Stage A dictionary (larger n_dirs), not a larger/smaller k, is
-# the lever for that regime. See project re-validation sweep.
-#
-# CAVEAT ADDED 2026-07-16: the k=6 default above was only validated at
-# n_dirs=62. A separate synthetic check (90 deg crossing, tilted 25 deg
-# out of the hemisphere's equatorial boundary, SNR=30, n_iso=4,
-# lambda_aniso=1.0/lambda_iso=0.001 fixed) found k=6 gives COMPLETE
-# detection failure (0/27 replicates correctly reporting N_POP=2) at
-# n_dirs=12 -- the fixed k=6 neighbourhood becomes half the entire
-# dictionary at that density, so essentially every candidate suppresses
-# every other one. Progressively smaller k restored detection (k=4: 0/27,
-# k=3: 7/27, k=2: 27/27). This motivated switching the default from a
-# fixed constant to a n_dirs-scaled formula (see
-# `_default_direction_peak_k` below): k=max(2, min(6, n_dirs // 5))
-# reproduced 26-27/27 correct detection at n_dirs in {12, 20, 30, 40} in
-# that same check. This is a MUCH smaller validation than the k-sweep
-# above (one crossing angle, one SNR, one phantom) -- treat the scaled
-# default as a reasonable interim fix for very coarse dictionaries, not
-# as thoroughly validated as the original k=6-at-n_dirs=62 result.
-# Explicit `direction_peak_k=` still overrides this scaling entirely.
+
 _DEFAULT_DIRECTION_PEAK_K = None  # None => n_dirs-scaled (see _default_direction_peak_k)
 
-# Minimum angular separation (deg) between two ACCEPTED fiber populations in
-# `select_dominant_directions`'s greedy basin-mass selection (non-maximum
-# suppression). A candidate peak closer than this to an already-accepted,
-# stronger peak is treated as that fiber's grid/regularization smearing skirt,
-# not a distinct population. 35 deg comfortably separates true crossings
-# (typically resolvable only down to ~30-45 deg at clinical SNR — see the
-# module 'MULTI-FIBER SCOPE' note) while absorbing the ~15-30 deg smearing
-# halo a single fiber leaves on neighbouring dictionary columns.
 _DEFAULT_MIN_SEPARATION_DEG = 35.0
 
-# Minimum ratio of a secondary population's angular-basin mass to the DOMINANT
-# population's basin mass for it to be accepted as a distinct fiber (rather
-# than a single fiber's smearing skirt that noise shifted past the separation
-# angle). Set from an empirical single-fiber-vs-crossing ratio sweep whose
-# distributions overlap: 0.35 keeps false crossings on single fibers to ~7%
-# while recovering the true 2nd fiber in ~40-80% of crossing voxels at SNR
-# 30-20. See `core.solvers.select_dominant_directions`.
-_DEFAULT_MIN_PEAK_RATIO = 0.35
-
-# Minimum share of TOTAL anisotropic weight the dominant angular basin must
-# hold for ANY fiber population to be reported (concentration gate in
-# `select_dominant_directions`). A real fiber concentrates its weight in one
-# basin (~0.4-0.6 of total at SNR>=30); diffuse anisotropic weight from
-# isotropic (esp. restricted) leakage on a fiber-FREE voxel spreads across many
-# near-equal basins (dominant ~0.2-0.24) and would otherwise be mis-read as a
-# crossing (npop>=2). Empirical pure-iso-vs-fiber concentration sweep: at SNR30
-# a clean gap (pure-iso p95~0.40, real-fiber p05~0.39); at SNR15 the two
-# OVERLAP (noise diffuses real fibers down to ~0.25-0.36), so no gate perfectly
-# separates there. 0.35 is the chosen balance: cuts the pure-iso false crossing
-# by ~89% (npop 2.0->0.22) while KEEPING low-SNR (SNR15) fiber detection
-# (npop~1.0 vs 0.78 at 0.38). Raise toward 0.38 for max specificity at the cost
-# of low-SNR sensitivity. Below the gate -> npop=0.
-#
-# SPENTO DI DEFAULT dalla 1.4.0 (0.0 = il gate non rifiuta mai; resta la soglia
-# `fiber_threshold` sulla frazione di fibra). La storia sopra e' stata smentita:
-#   - sul fantoccio un crossing a 90 gradi VERO ha concentrazione 0.421 e un
-#     voxel tipo tumore 0.414: il gate non puo' distinguerli, perche' un crossing
-#     ad angolo largo e' angolarmente diffuso PER COSTRUZIONE. Col nullo MC vero
-#     la detezione crolla sopra i 60 gradi: il gate rifiuta i crossing che il
-#     dizionario sa risolvere e ammette quelli che non sa risolvere;
-#   - sui dati veri (Codes_fixed_20260923/07_gate_su_dati_veri, 4000 voxel,
-#     tutto congelato tranne il gate) il gate congelato 0.4535 toglieva la fibra
-#     al 19.5% dei voxel; quei voxel, rifiutati, lasciano un residuo di 1.80
-#     sigma, e ammessi scendono a 1.03 sigma (il 97% diventa crossing). La
-#     riduzione e' 0.57x, contro 0.87-0.94x attese dai soli gradi di liberta'.
-#     A OGNI gradino dello sweep (0.30 -> 0.55) i voxel persi passano da ~1.0 a
-#     ~1.8 sigma: non esiste un punto di lavoro;
-#   - calibrato per sessione, era il parametro piu' legato all'SNR (Spearman
-#     -0.86 su 40 soggetti) e la causa radice del divario BR/BT.
-# Resta disponibile: `min_dominant_concentration=<valore>` oppure
-# `fit(calibrate_concentration_gate=True)` per il nullo MC. Attenzione: se il
-# nullo MC e' troppo rado ripiega sul valore del costruttore, che ora e' 0.0 --
-# cioe' "nessun gate"; il messaggio "FELL BACK" lo dichiara.
 _DEFAULT_MIN_DOMINANT_CONCENTRATION = 0.0
-# Ma spegnerlo lascia aperto il problema che il gate doveva risolvere, e lo
-# lascia GRANDE a SNR clinico: sul tessuto isotropo sintetico (P3, SNR 26) il
-# 38-62% dei voxel riceve una fibra falsa, quasi sempre come crossing. Lo
-# strumento giusto non guarda la forma dei pesi di Stage A ma se le fibre
-# spiegano piu' del rumore: `fiber_detection_threshold` (v1.6.1, spento finche'
-# batteria e dati veri non scelgono la soglia), vedi _fiber_detection_pass.
 
-# Plan A (Point 2) — per-voxel concentration-modulated lambda_aniso defaults.
-# ON by default (disable via lambda_aniso_conc_mod=False): when a voxel's
-# dominant-basin angular concentration is low (diffuse anisotropic weight, i.e.
-# isotropic->fiber leakage) the anisotropic regularization is boosted and the
-# voxel re-solved, suppressing the spurious fiber_fraction; concentrated
-# (genuine-fiber) voxels are left untouched. Ramp: c>=c_hi -> no boost;
-# c<=c_lo -> full boost (xgain on lambda_aniso); linear between. Endpoints
-# bracket the observed FIRST-PASS concentration bands on the validation brain
-# (leakage Tumor ~0.23 / GM ~0.27; demyelinated fiber ~0.35; healthy ~0.47-0.51)
-# so leakage is boosted hard while a demyelinated fiber gets only a mild,
-# still-detectable boost. See `_apply_conc_modulation` and
-# Simulations/pyDBSI_pervoxel_prototype.
-#
-# End-to-end ramp sweep (8-class heterogeneous brain, ratio=2.0, SNR30; FF of
-# Tumor[GT0]/GM[GT0.10]/demyel[GT0.45], tissue discrimination, leakage metric):
-#   config              discr  Tumor  GM   demyel  leak
-#   mod OFF (baseline)  0.856  0.50   0.39 0.52    0.267
-#   A c_hi0.40 g12      0.906  0.08   0.14 0.30    0.057   <- max leak-suppression
-#   B c_hi0.34 g12      0.863  0.10   0.16 0.42    0.068
-#   D c_hi0.36 g8       0.887  0.13   0.18 0.40    0.080   <- DEFAULT (balanced)
-# The DEFAULT (config D) is the balanced operating point: it keeps ~3x of the
-# leakage fix (Tumor 0.50->0.13, leak 0.267->0.080) and +3.1pp discrimination
-# while PRESERVING the demyelinated fiber (FF 0.40, vs GT 0.45 -- baseline
-# actually OVER-estimated it at 0.52). The gentler gain (8, not 12) is also the
-# conservative choice against low-SNR over-correction (where genuine fibers
-# diffuse toward the leakage concentration band). Config A (c_hi=0.40, gain=12)
-# is the aggressive alternative -- best discrimination and leak suppression, but
-# it over-corrects the demyelinated fiber (FF 0.30) -- pass those values
-# explicitly if fiber-fraction fidelity on low-FA fibers is not the priority.
-# VALIDATED (2026-07-27): SPARES crossings (Sc1 FF0.80 untouched 0.82->0.82 at
-# SNR30, 0.73->0.72 at SNR15 -- the exact case a scalar high lambda_aniso
-# collapsed to 0.42; a crossing stays concentrated ~0.42 and escapes the boost)
-# and suppresses pure-iso/pure-restr leakage at SNR30 AND SNR15. At SNR15 it
-# CORRECTS the low-SNR over-estimation instead of collapsing fibers (demyel
-# 0.75->0.47~=GT). Weak-fiber edge (FF 0.12-0.20, incl. demyelinated) at SNR15
-# and SNR10: NO false negatives -- detection rate stays 1.0, weak fibers are
-# pulled toward GT, never zeroed. KNOWN LIMIT (fundamental, not a bug): at low
-# SNR a weak/demyelinated fiber's concentration overlaps the leakage band
-# (SNR15: weak-demyel ~0.29 vs fiber-free ~0.29), so the modulation cannot
-# preferentially preserve a weak fiber's FF -- it suppresses it like leakage.
-# mod-OFF cannot separate them either; the lever simply adds no discriminating
-# power where the low-SNR signal has none.
-# Default flipped ON (2026-07-27) on the strength of this validation (crossings
-# spared, leakage suppressed at SNR30/15, low-SNR over-estimation corrected, no
-# weak-fiber false negatives). REAL-DATA confirmation is still pending; disable
-# per-call with lambda_aniso_conc_mod=False (or --disable-conc-modulation on the
-# CLI) if a dataset shows unexpected fiber_fraction suppression.
 _DEFAULT_LAMBDA_ANISO_CONC_MOD = True
 _DEFAULT_CONC_MOD_C_LO = 0.24
 _DEFAULT_CONC_MOD_C_HI = 0.36
 _DEFAULT_CONC_MOD_GAIN = 8.0
 
-# Stage C — constrained joint (VARPRO) mono-fiber re-solve of tensor+fractions.
-# ON by default (disable via stagec_refine=False). For n_pop==1 voxels, after
-# Stage A detection, the fiber tensor (AD, RD) and all compartment fractions are
-# re-fitted JOINTLY by minimising the reconstruction residual over a reduced
-# dictionary [fiber_col(AD,RD,dir) | iso_grid] -- fixing the decoupled-stage
-# mutual bias (fiber_fraction inflation + restricted collapse + AD under-
-# estimation). See `core.solvers.stagec_varpro_single_fiber`. (AD, RD) search
-# grid + admissibility ratio: coarse grid then a local refine in the helper.
-#
-# VALIDATED (2026-07-28, 8-class heterogeneous brain, SNR30): decisively fixes
-# the HIGH-FA fiber_fraction inflation that was the bias's worst case --
-# WM_sano FF 0.72->0.57 (GT 0.55), restricted 0.00->0.09 (GT 0.10), AD
-# 1.15->1.65 (GT 1.70). Correct BY CONSTRUCTION on non-inflated fibers (demyel
-# FF left at 0.40, it was never inflated) and on crossings (n_pop>=2 untouched).
-# KNOWN RESIDUALS (accepted, shipped ON): (1) minor AD overshoot on some
-# moderate-FA single fibers; (2) low-FA AD stays under-estimated -- a
-# fundamental identifiability limit, not fixable by tuning; (3) the crude
-# nearest-centroid discrimination proxy dips ~3pp because an ACCURATE WM_sano
-# sits nearer its neighbours in [FF,RF,NRF] space -- the fractions themselves
-# are net MORE accurate. Real-data confirmation still pending; opt out with
-# stagec_refine=False (or --disable-stagec on the CLI).
+
 _DEFAULT_STAGEC_REFINE = True
 
-# Run the MRDS-lite cone refinement BEFORE Stage C and hand Stage C the refined
-# direction. The two used to sit in mutually exclusive branches, so with Stage C
-# on by default the cone never ran and a single fiber's direction stayed on
-# Stage A's discrete grid. They address orthogonal problems -- the cone fixes
-# angular quantisation, Stage C fixes the fraction/tensor bias -- so they
-# compose.
-#
-# VALIDATED 2026-09-19 (`experiments/exp_cone_multiproto.py`, out of the repository): 3 protocols
-# (n_dirs 36/62/78, i.e. 22.8/17.2/15.4 deg grid spacing) x 3 SNR (20/30/50),
-# 200 synthetic single-fiber voxels each, AD and RD swept per voxel, true
-# directions uniform on the hemisphere so they fall between grid nodes. Paired,
-# mean absolute error, refined vs unrefined:
-#
-#   AD  improves in 9/9 conditions, median -18.5% (worst case -5.2%)
-#   RD  improves in 9/9,            median -10.1%
-#   RF  improves in 9/9,            median  -8.7%
-#   FF  improves in 7/9,            median  -8.8% (worst case +2.1%)
-#   angular error 7.21-10.82 deg -> 1.78-5.60 deg, always
-#
-# Runtime cost is within measurement noise. The gain scales with grid spacing
-# (P4-like -20.5%, P3-like -16.7%, P1-like -12.9%), which is the mechanism
-# working as expected. It does NOT scale the way first predicted with SNR: at
-# SNR 20 it drops to -7.8% against -22.8% at SNR 30, because the baseline AD
-# error is noise-dominated there (21.2% vs 16.9%) and removing a fixed
-# systematic term buys proportionally less.
-#
-# Single-fiber voxels only: crossings use Stage A's raw grid directions either
-# way. Synthetic only -- not yet confirmed on real data.
+
 _DEFAULT_STAGEC_DIR_REFINE = True
 _STAGEC_AD_MIN = 0.6e-3
 _STAGEC_AD_MAX = 2.6e-3
 _STAGEC_N_AD = 14
-_STAGEC_RD_MIN = 0.15e-3   # Leva 1: physiological RD floor (was 0.05e-3) — fiber-compartment
-                           # perpendicular diffusivity below ~0.1e-3 is non-physiological and lets
-                           # noise push RD->0 -> FA->1 on real data. Caps reported FA at ~0.9.
+_STAGEC_RD_MIN = 0.15e-3   
 _STAGEC_RD_MAX = 1.1e-3
 _STAGEC_N_RD = 12
 _STAGEC_ANISO_RATIO = 1.1
-# Stage C reuses the model's iso_grid. A dedicated fine geomspace iso grid was
-# tried (to give denser restricted-band resolution) and REVERTED: it did not
-# improve the low-FA / AD cases and slightly lowered discrimination (0.856 ->
-# 0.831 on the validation brain). The residual low-FA AD under-estimation is a
-# fundamental identifiability limit (a low-FA fiber is nearly isotropic, so
-# (AD,RD) are weakly constrained), not an iso-grid coverage issue.
-# Stage C SIGNAL (v1.12.0): the Rician-CORRECTED data_corr, like every other
-# stage. History: from July to v1.11.1 Stage C fitted the RAW input, because
-# the correction of the time, sqrt(max(S^2 - 2 sigma^2, 0)), over-subtracts on
-# denoised data and biased the tensor low (then: raw -> AD 1.72 vs corrected
-# -> AD 1.32 on a GT-1.70 fiber). With the exact first-moment inversion that
-# reason is gone, and the raw signal keeps the Rician floor inside the fit,
-# which INFLATES the AD where the high-b signal is low. Phantom, 13 scenarios,
-# real dwidenoise, single-fiber ADw MAE raw -> corrected: 0.219 -> 0.138
-# (SNR 15), 0.120 -> 0.094 (26), 0.057 -> 0.044 (40) e-3 mm^2/s; edema ADw
-# bias +0.280 -> +0.048 at SNR 26; on exact E[M] input the corrected fit is
-# near exact (MAE 0.004 vs 0.059). RD slightly better; FA, fractions and the
-# population census unchanged. The clamp + corrected combination still shows
-# the July bias (WM AD -0.02/-0.05). The kernel argument keeps its old name
-# `data_raw`: it is "the signal Stage C sees" (`fit(_stagec_signal=...)`).
 
-# Stage D — final constrained compartment-fraction re-solve (ON by default;
-# disable via iso_resolve=False). For EVERY fitted voxel, the reported
-# fractions are re-estimated by NNLS over [detected fibers | a few FIXED iso
-# centroids] on the RICIAN-CORRECTED signal, replacing the over-complete Stage A
-# spectrum (whose free anchored grid smears weight and mis-bins RF/HF/WF). The
-# identifiability analysis showed 3 iso components are supported down to
-# b_max~2000, and the fixed-3 estimator recovers RF/HF/WF near-GT with low
-# variance (incl. the high-RF of tumor-like voxels, exactly) where the anchored
-# spectrum failed. CORRECTED signal here (opposite to Stage C's RAW): the
-# restricted fraction is read from the high-b plateau, which the raw Rician
-# noise floor mimics -> corrected de-confounds it. Iso centroids: RF/HF/WF for
-# 3-ISO, RF/NRF for the (single-shell) 2-ISO fallback.
 _DEFAULT_ISO_RESOLVE = True
 
-# v1.7.0 — crossing FF re-solved before the MRDS LM (see core.solvers,
-# crossing_ff_resolve). Ridge = kappa * (sigma / S0_voxel)^2. kappa 65 centres
-# healthy crossing FF on P3, HCP-like and a 2-shell protocol at SNR 26 and 15;
-# 30 keeps more demyelination contrast at SNR 15 (P3: 0.20 vs 0.15 of a true
-# 0.40) for healthy-crossing FF +0.04..+0.06 (1.6.x: -0.11..-0.17) and has the
-# best worst case across protocols. 0 = Stage A's FF held fixed (Stage D keeps
-# it). Needs Stage D: without it kappa is ignored.
+
 _DEFAULT_CROSSING_FF_KAPPA = 30.0
 
-# v1.7.1 — the thermal noise map is REQUIRED (decision 2026-10-05): the b=0
-# temporal sigma also holds pulsation and motion (1.3-2.2x the thermal noise on
-# real P3 data, differently per subject), and every sigma-normalised step --
-# the Rician correction first -- would inherit a subject-dependent bias. Set to
-# True ONLY for synthetic tests/simulations or to reproduce pre-1.7.1 results;
-# the run report records it (sigma_source 'b0_temporal').
 _ALLOW_B0_SIGMA = False
 
 _NOISE_MAP_HELP = (
-    "noise_map is required (v1.7.1): the thermal noise sigma per voxel, on the grid and in the "
-    "intensity scale of the DWI passed to fit. With MRtrix: 'dwidenoise in out -noise noise.nii.gz', "
-    "'dwibiascorrect ants ... -bias bias.nii.gz', then 'mrcalc noise.nii.gz bias.nii.gz -div -finite "
-    "noise.nii.gz bias.nii.gz -div 0 -if noise_N4.nii.gz'. The b=0 temporal sigma is not a substitute: "
-    "it also contains physiological variability (README, 'Noise').")
+    "MP-PCA noise_map is required: the thermal noise sigma per voxel, on the grid and in the "
+    "intensity scale of the DWI passed to fit.")
 _ISO_RESOLVE_D_3ISO = (0.15e-3, 1.0e-3, 3.0e-3)   # RF, HF, WF centroids (default)
 _ISO_RESOLVE_D_2ISO = (0.15e-3, 1.5e-3)            # RF, NRF centroids (single-shell, default)
 # Not from the literature: a modelling choice. 0.15 is the middle of the default RF
 # band, 1.0 sits in HF (~ the geometric mean of 0.3 and 3.0), 3.0 is free water at
 # 37 C; 1.5 represents HF+WF together when they cannot be separated.
 
-# Monte-Carlo null calibration of the concentration gate (see
-# calibration.data_driven.calibrate_concentration_gate_mc). When calibration
-# runs, the gate is set to this percentile of the dominant-basin concentration
-# a fiber-FREE (pure-isotropic) voxel produces under THIS
-# protocol/dictionary/lambdas/SNR — data-driven and protocol-general, replacing
-# the fixed default above. NOTE: the pure-iso and real-fiber concentration
-# distributions OVERLAP, so a too-high percentile enters the signal body and
-# suppresses REAL fibers: an empirical percentile sweep (SNR30) found the 99th
-# gives gate~0.54 and collapses true detection (T1 npop 1.7->0.22), while
-# 85-95th keep full detection AND suppress pure-iso (npop~0.07). 90th (gate
-# ~0.39) reproduces the hand-validated 0.35 behaviour, now data-driven.
 _CONCENTRATION_GATE_PERCENTILE = 90.0
 _CONCENTRATION_GATE_N_MC = 400
 

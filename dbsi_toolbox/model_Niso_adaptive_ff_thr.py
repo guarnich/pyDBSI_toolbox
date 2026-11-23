@@ -3273,7 +3273,9 @@ class DBSI_Adaptive:
             # confrontabili senza leggere il codice.
             fit_quality_reference=dict(r2_reference='raw_signal',
                                        fractions_fitted_on='rician_corrected',
-                                       monofiber_tensor_fitted_on='raw',
+                                       monofiber_tensor_fitted_on=(
+                                           'raw' if (self.stagec_refine and _stagec_signal == 'raw')
+                                           else 'rician_corrected'),
                                        iso_centroids=('stage_d_fixed' if self.iso_resolve
                                                       else 'recovered_from_mean_iso_adc')),
             # Quanto la correzione Rician ha TRONCATO. Vedi il blocco della

@@ -754,26 +754,6 @@ def iso_fraction_resolve(sig_norm, bvals, bvecs, fdirs, fad, frd, n_fib,
     = sum(fiber weights)/sum and bins the iso weights on the THRESH_RES /
     THRESH_WAT diffusivity boundaries.
 
-    WHY (see project design note): the raw v3 fractions come from the OVER-
-    COMPLETE Stage A dictionary (fiber block ~468 collinear columns, iso block a
-    fine anchored grid). That free spectrum SMEARS weight across near-collinear
-    columns and the subsequent binning mis-attributes it -- restricted collapses,
-    hindered inflates (validated: anchored HF 0.64 vs GT 0.50, RF 0.16 vs 0.20;
-    fixed-3 recovers RF/HF/WF to ~GT with far lower variance, and recovers the
-    high-RF of tumor-like / restricted-heavy voxels exactly). A few well-placed
-    columns is a well-conditioned, low-variance estimator; the identifiability
-    analysis showed 3 iso components are supported down to b_max ~ 2000.
-
-    SIGNAL: this re-solve MUST be run on the RICIAN-CORRECTED signal
-    (data_corr), NOT the raw magnitude: the restricted fraction is read from the
-    high-b plateau, and the raw Rician noise floor E[|noise|]->sigma*sqrt(pi/2)
-    is ALSO a high-b plateau -> on raw it is mistaken for restricted (false RF in
-    CSF/water). The correction (exact first-moment inversion since v1.12.0)
-    de-confounds them. (Until v1.11.1 the fiber TENSOR estimate
-    `stagec_varpro_single_fiber` used the RAW signal instead, because the
-    second-moment correction of the time distorted the high-b decay shape;
-    since v1.12.0 it uses the corrected signal too.)
-
     Parameters
     ----------
     sig_norm : array (N,)
@@ -834,119 +814,23 @@ def iso_fraction_resolve(sig_norm, bvals, bvecs, fdirs, fad, frd, n_fib,
 # When the true fiber orientation falls between two dictionary nodes (which
 # it will, for the majority of voxels, on any finite grid), Stage B's
 # closed-form regression computes cos^2(angle to the WRONG axis), which
-# biases the AD estimate systematically. Project validation (synthetic,
-# Verona-protocol reconstruction, 25-30 trial pairs per condition) measured
-# this directly: at n_dirs=62 (the protocol's autoconfigured value), median
-# AD relative error was 6.8-7.0% using the raw grid direction, vs 2.7% for
-# an oracle fit at the TRUE direction — i.e. roughly 60% of the total AD
-# error at this n_dirs was attributable to angular grid quantisation alone,
-# not noise. The gap closed monotonically with n_dirs (down to ~0.3
-# percentage points at n_dirs=250) but only at a steep, unnecessary
-# computational cost (Stage A's design matrix and NNLS solve scale with
-# n_dirs x n_pairs columns).
+# biases the AD estimate systematically. 
 #
 # This module implements the idea from Coronado-Leija et al. (2017,
 # Medical Image Analysis, "Multi-Resolution Discrete-Search" / MRDS)
 # SCOPED DOWN to what actually matters for this toolbox's architecture:
 # refining the SINGLE dominant fiber direction's angular precision. The
 # parts of the original MRDS that do NOT apply here are deliberately left
-# out (see rationale recorded in project discussion):
-#   - No F-test / multi-population model selection: this toolbox decides how
-#     many populations a voxel has in `select_dominant_directions` (basin
-#     mass + a data-driven concentration gate), not by nested model
-#     comparison, so the F-test has no role to play here.
-#     STALE JUSTIFICATION REMOVED (2026-09-19): this bullet used to argue
-#     that refining a second population's orientation "would have no effect
-#     on any output", because only the dominant direction was stored. That
-#     stopped being true when the MRDS multi-fiber extension added the
-#     dir2_x/y/z output channels -- population 2's direction IS stored and
-#     IS used, by Stage D and by the fit-quality reconstruction. Not
-#     refining it remains a deliberate scope limit (the crossing branch uses
-#     Stage A's raw grid directions, see the MRDS multi-fiber section), but
-#     the reason is cost and lack of validation, not irrelevance.
+# out:
+#   - No multi-population model selection: this toolbox decides how
+#     many populations a voxel has in `select_dominant_directions`, not by nested model
+#     comparison.
 #   - No iterative NNLS re-solving across resolution stages: the original
 #     MRDS re-solves compartment SIZES at each resolution stage via a
 #     small linear system. Here, Stage A's NNLS has ALREADY determined the
 #     fractions (f_fib, f_res, f_hin, f_wat) and centroids for this voxel;
 #     the refinement search only needs to re-evaluate ONE quantity (the
 #     angle-dependent Stage B regression), which is far cheaper.
-#   - No spatial regularisation / Simultaneous Denoising and Fitting: out
-#     of scope for this addition; voxels remain fit independently.
-#
-# VALIDATION SUMMARY (project synthetic testing, Verona-like protocol,
-# n_dirs=62, single dominant fiber, SNR=28)
-# -----------------------------------------------------------------------
-#   Grid direction only (current baseline):      AD err ~6.8-7.0%, RD err ~4-5%
-#   Two-level cone refinement (this module):      AD err ~2.6-2.8%, RD err ~4.0-4.3%
-#   Oracle (true direction, upper bound):          AD err ~2.7%,    RD err ~3.6-4.6%
-# A further test at a DELIBERATELY SMALLER n_dirs=30 (half the Verona
-# autoconfigured value, i.e. a much cheaper Stage A dictionary) plus this
-# refinement reached AD err ~2.8% -- BETTER than the current n_dirs=62
-# WITHOUT refinement (6.8-7.0%), at roughly half the anisotropic Stage A
-# NNLS cost. This means the refinement, once enabled, allows the coarse
-# n_dirs autoconfiguration heuristic (`utils/autoconfig.py`,
-# max_dirs_per_shell x 1.3) to be treated purely as a DETECTION-resolution
-# starting point (does this cone land near the right general orientation
-# and avoid confusing nearby crossing populations?), not as the source of
-# final angular precision -- that responsibility now belongs to this
-# module. The 1.3x heuristic itself is NOT removed by this change (it
-# remains a reasonable, literature-unconnected starting point per project
-# discussion) but its role in the pipeline is now qualitatively different.
-#
-# NOT YET VALIDATED: real (non-synthetic) HCP/Verona data; multi-fiber
-# crossing configurations (only single dominant fiber tested); the
-# interaction between refinement and the isotropic block's own centroid
-# estimates (refinement here holds Stage A's isotropic fractions/centroids
-# fixed, exactly as Stage B already does).
-#
-# WHERE THIS ACTUALLY RUNS (read before trusting the numbers above)
-# -----------------------------------------------------------------------
-# The validation summary above compares refinement against the CLOSED-FORM
-# Stage B, which was the single-fiber estimator when this module was
-# written. It no longer is: Stage C (`stagec_varpro_single_fiber`) took that
-# role and is ON by default, and in the kernel the two sit in mutually
-# exclusive branches -- `if stagec_enabled: ... elif
-# enable_direction_refinement: ...` -- so with the default configuration this
-# refinement did not run at all, and a single fiber's stored direction was
-# Stage A's raw grid node.
-#
-# RESOLVED 2026-09-19: `stagec_dir_refine` (now default ON) composes the two
-# instead. The cone refines the direction and Stage C is then fitted at the
-# refined one. Validated across 3 protocols x 3 SNR -- AD error improves in
-# 9/9 conditions, median -18.5% -- see `_DEFAULT_STAGEC_DIR_REFINE` in
-# model_Niso_adaptive_ff_thr.py for the full table. The elif branch below is
-# still what runs when Stage C is explicitly disabled.
-#
-# DATA-DRIVEN PARAMETERISATION (no fixed "magic number" cone angles or
-# candidate counts)
-# -----------------------------------------------------------------------
-# The search cone's angular scale is tied directly to the ACTUAL measured
-# nearest-neighbour spacing of the specific Stage A Fibonacci dictionary in
-# use (computed once per protocol from `fiber_dirs`, not assumed) rather
-# than a hardcoded degree value -- this ties the refinement's search
-# radius to the dictionary's own known blind-spot size, so a denser or
-# sparser n_dirs automatically gets a correspondingly narrower or wider
-# initial search cone.
-#
-# The number of candidates per resolution level, and the second level's
-# cone angle, are BOTH derived from a single user-facing quantity,
-# `target_resolution_rad` (default corresponds to ~1 degree): assuming a
-# geometric ("equal ratio") zoom across the two levels balances the
-# angular reduction evenly,
-#
-#     intermediate_angle = sqrt(cone1_half_angle * target_resolution)
-#     n1 = ceil( (cone1_half_angle / intermediate_angle)^2 )
-#     cone2_half_angle   = intermediate_angle
-#     n2 = ceil( (cone2_half_angle   / target_resolution)^2 )
-#
-# (the squared ratio reflects solid-angle, not linear-angle, coverage --
-# doubling the linear angular ratio requires ~4x the candidates to keep
-# the same point density over a 2D cone cross-section). This reproduces,
-# almost exactly, the candidate counts (~20-25 per level) that were
-# empirically found to close the AD accuracy gap to within noise of the
-# oracle in project validation -- i.e. the formula is not an independent
-# untested guess, it was checked against the same experiments that
-# established the overall approach works.
 #
 # References
 # ----------
@@ -954,13 +838,14 @@ def iso_fraction_resolve(sig_norm, bvals, bvecs, fdirs, fad, frd, n_fib,
 #     of individual axon bundle properties by a Multi-Resolution
 #     Discrete-Search method. Medical Image Analysis, 42, 26-43.
 
+
+
 @njit(cache=True, fastmath=FASTMATH)
 def compute_cone_refinement_schedule(grid_spacing_rad, target_resolution_rad):
     """
     Derive the two-level cone search schedule (angles + candidate counts)
     from the Stage A dictionary's own measured angular spacing and a
-    single target final angular resolution -- see module docstring for
-    the geometric ("equal-ratio zoom") rationale. No independently
+    single target final angular resolution. No independently
     hardcoded angles or candidate counts.
 
     Parameters
@@ -980,10 +865,7 @@ def compute_cone_refinement_schedule(grid_spacing_rad, target_resolution_rad):
     """
     cone1_half_angle = grid_spacing_rad
     if target_resolution_rad >= cone1_half_angle:
-        # The dictionary is already finer than the requested target --
-        # no refinement is meaningfully possible/needed; collapse to a
-        # single trivial level (n1=1 candidate = the coarse direction
-        # itself), n2=0 signals "skip level 2" to the caller.
+       
         return cone1_half_angle, 1, 0.0, 0
 
     intermediate_angle = np.sqrt(cone1_half_angle * target_resolution_rad)
@@ -1036,16 +918,11 @@ def refine_fiber_direction_cone(bvals, bvecs, sig_norm, coarse_dir,
     """
     Two-level Fibonacci-cone refinement of Stage A's coarse dominant
     direction, scoring each candidate direction with Stage B's own
-    closed-form regression + reconstructed SSE — no NNLS re-solve. See
-    module docstring ("MRDS-LITE") for full rationale and validation
-    summary.
+    closed-form regression + reconstructed SSE. 
 
     The isotropic fractions/centroids (f_res, f_hin, f_wat, D_res, D_hin,
     D_wat) and the fiber fraction f_fib are held FIXED at Stage A's
-    values throughout — exactly as the unrefined `estimate_AD_RD_conditioned`
-    already does; refinement only searches over direction (and, as a
-    byproduct of re-running the Stage B regression at each candidate,
-    over AD/RD).
+    values; refinement only searches over direction.
 
     Parameters
     ----------
@@ -1070,7 +947,6 @@ def refine_fiber_direction_cone(bvals, bvecs, sig_norm, coarse_dir,
         Refined diffusivities at best_dir (NaN if no candidate, including
         the coarse direction itself, produced a valid closed-form fit).
     """
-    # Tangent basis around coarse_dir
     if abs(coarse_dir[0]) < 0.9:
         t0, t1, t2 = 1.0, 0.0, 0.0
     else:
@@ -1092,9 +968,7 @@ def refine_fiber_direction_cone(bvals, bvecs, sig_norm, coarse_dir,
     best_RD = np.nan
     found = False
 
-    # Always evaluate the coarse direction itself first, as candidate
-    # zero -- guarantees refinement never performs WORSE than the
-    # unrefined baseline (monotonic-improvement floor).
+    # Always evaluate the coarse direction itself first, as candidate zero
     AD0, RD0 = estimate_AD_RD_conditioned(
         bvals, bvecs, sig_norm, coarse_dir,
         f_fib, f_res, f_hin, f_wat, D_res, D_hin, D_wat, use_3iso
@@ -1209,14 +1083,11 @@ def measure_hemisphere_spacing(fiber_dirs):
     """
     Measure the actual nearest-neighbour angular spacing (radians) of a
     given Stage A Fibonacci hemisphere dictionary. Called ONCE per
-    protocol (not per voxel, not Numba — plain NumPy is fine here since
-    it runs a handful of times per `fit()` call, not per voxel).
+    protocol.
 
     Used to derive the cone refinement schedule
     (`compute_cone_refinement_schedule`) directly from the ACTUAL
-    dictionary in use, rather than assuming a theoretical spacing formula
-    — this stays correct even if `n_dirs` or the hemisphere generator
-    itself changes in the future.
+    dictionary in use.
 
     Parameters
     ----------
@@ -1228,10 +1099,6 @@ def measure_hemisphere_spacing(fiber_dirs):
         Mean nearest-neighbour angular spacing across all directions.
     """
     n = len(fiber_dirs)
-    # AXIAL distance (|dot|), as in `build_direction_neighbor_graph`: near the
-    # equator a node's true nearest neighbour can be the reflection of a node on
-    # the far side of the hemisphere. Raw dot overestimated the spacing there
-    # (and hence the level-1 cone) until v1.5.1.
     dots = np.abs(fiber_dirs @ fiber_dirs.T)
     np.fill_diagonal(dots, -2.0)  # exclude self-match
     nearest_cos = np.clip(np.max(dots, axis=1), -1.0, 1.0)
@@ -1267,84 +1134,6 @@ def compute_fiber_fa(AD, RD):
 
 # ────────────────────────────────────────────────────────────────────────────
 # MRDS MULTI-FIBER STAGE B — joint (AD, RD) for simultaneous populations
-#
-# WHY THIS EXISTS
-# -------------------
-# Stage A already detects up to MAX_FIBER_POPULATIONS directions per voxel
-# (`select_dominant_directions`), but prior to this addition only the
-# DOMINANT direction was ever passed to Stage B; a second detected
-# population was discarded before reaching the output. This module adds
-# joint (AD, RD) estimation for 2-3 SIMULTANEOUS fiber populations, given
-# their Stage-A-detected directions and fractions.
-#
-# METHOD SELECTION — WHY JOINT NONLINEAR, NOT ALTERNATING-TO-CONVERGENCE
-# -----------------------------------------------------------------------------
-# A synthetic sweep (2-fiber crossings at 30/60/90 deg, fraction splits
-# 45/45 and 63/27, SNR=30, 3-shell Verona-like protocol, isotropic
-# compartment present, 20 noise seeds/condition) compared:
-#
-#   ALTERNATING (reuse the single-fiber closed-form WLS per population,
-#   holding the other population's CURRENT estimate fixed, iterate to
-#   convergence): found to be NUMERICALLY UNSTABLE, not just slow --
-#   median AD-of-minority-population relative error on one representative
-#   noisy realisation INCREASED from 24.8% at 4 iterations to 79.4% at 40
-#   iterations (oscillation, not convergence, in this poorly-separated
-#   block-coordinate-descent problem). No monotonic-improvement guarantee,
-#   unlike the existing single-fiber MRDS-lite cone refinement.
-#
-#   JOINT NONLINEAR LEAST-SQUARES (this module): bounded Levenberg-Marquardt
-#   over all 2*n_pop diffusivity parameters simultaneously, INITIALISED from
-#   a SHORT (2-3 iteration, deliberately NOT converged) alternating pass.
-#   Matched a scipy.optimize.least_squares reference to within numerical
-#   noise across the sweep (median mean-abs-relative-error 10.75% vs
-#   scipy's 10.51%; max per-parameter difference 1.15e-3 mm^2/s across 120
-#   trials). Post-JIT-warmup: ~0.04 ms/voxel single-threaded.
-#
-#   CORRECTED 2026-07-15: the update step below had a sign error
-#   (`p_new = p + delta` where `delta = (JtJ+lam*D)^-1 Jt r` with J the
-#   Jacobian of the RESIDUAL, not the model) that made the LM step always
-#   move in the ascent direction. Practical effect, confirmed by direct
-#   reproduction: the inner accept/reject loop rejected every trial step
-#   regardless of lambda, so `improved` was always False and the solver
-#   exited after the FIRST outer iteration on essentially every voxel --
-#   silently returning `alternating_init_nfiber`'s deliberately
-#   under-converged 3-iteration warm start as if it were the converged
-#   joint fit, with no error or flag. The scipy-agreement numbers above
-#   cannot have been measured against this exact function in this state;
-#   they either predate the sign flip or were produced by a differently
-#   configured comparison. The fix (`p_new = p - delta`) has been verified
-#   on a synthetic 2-population crossing: reproduces the exact ground
-#   truth (cost ~1e-32) in 8 iterations, versus zero cost improvement over
-#   1 iteration before the fix. See project re-validation sweep
-#   (post-fix) for updated accuracy numbers replacing the ones above.
-#
-# CRITICAL: INITIALISATION MUST BREAK SYMMETRY BETWEEN POPULATIONS.
-# Identical starting (AD, RD) for every population causes the joint solver
-# to stall on a subset of populations (confirmed: in a 3-fiber test,
-# population 1 converged to 0% error while populations 2-3 did not move AT
-# ALL from an identical starting point -- a degenerate-Jacobian symmetry
-# stall, not slow convergence). `alternating_init_nfiber`'s short,
-# population-differentiating pass exists specifically to prevent this.
-#
-# SCOPE — WHAT THIS MODULE DOES NOT DO (read before relying on it)
-# -----------------------------------------------------------------------
-# - Does NOT estimate the fractions. The crossing FF it receives is re-solved
-#   beforehand on the detected support (`crossing_ff_resolve`, ridge
-#   kappa * (sigma/S0)^2), and Stage D re-solves the final fractions with the
-#   tensors fitted here. MEASURED 2026-09-30 (experiments/crossing_asymmetry/,
-#   outside the repository since 2026-10-12; P3, SNR 26, FF 0.6): given the true fractions the LM is unbiased (RD bias
-#   +0.01e-3, 0% on the floor); given Stage A's shrunk FF (x0.70) RD went to the
-#   floor in 91% of crossings -- the reason the FF is re-solved first. Per-
-#   population AD stays not quantitative (Cramer-Rao sd ~0.6e-3).
-# - Does NOT refine direction itself: directions passed in are Stage A's raw
-#   discrete-grid detections. Since v1.9.0 the caller can hand the LM result to
-#   `refine_crossing_directions_cone` (option `crossing_dir_refine`), which
-#   moves each population off its grid node and re-fits the tensors.
-# - Validated (synthetic): 2-fiber crossings at 30/60/90 deg, symmetric and
-#   2.3:1 splits; ONE 3-fiber configuration at well-separated (60 deg
-#   apart) angles and roughly balanced fractions (comparable 4-16% errors).
-#   NOT validated: 3-fiber with unbalanced fractions or narrow angular
-#   separation; real (non-synthetic) data.
 #
 # References
 # ----------
@@ -1430,12 +1219,10 @@ def _stageB_single_given_residual(bvals, bvecs, direction, f_fib,
 @njit(cache=True, fastmath=FASTMATH)
 def alternating_init_nfiber(bvals, bvecs, directions, fractions, iso_signal,
                             sig_norm, n_iter=3, AD0=1.6e-3, RD0=0.4e-3):
-    """Cheap per-population initial guess for `estimate_AD_RD_nfiber_joint`,
-    via a SHORT (default 3-iteration) alternating pass. Deliberately not
+    
+    """Cheap per-population initial guess for `estimate_AD_RD_nfiber_joint`. Deliberately not
     run to convergence -- its only job is to break the symmetry between
-    populations before handing off to the joint LM solve (see module
-    docstring: identical initial values for every population cause the
-    joint solver to stall).
+    populations before handing off to the joint LM solve.
 
     Parameters
     ----------
@@ -1493,12 +1280,7 @@ def estimate_AD_RD_nfiber_joint(bvals, bvecs, sig_norm, directions, fractions,
     Joint (AD, RD) estimation for n_pop (2 or 3) SIMULTANEOUS fiber
     populations via bounded Levenberg-Marquardt, given FIXED directions
     and fractions (from Stage A) and a fixed isotropic-compartment
-    signal. See module docstring for the empirical comparison against
-    the (rejected) alternating-only approach.
-
-    MUST be called with population-DIFFERENTIATED AD_init/RD_init (e.g.
-    from `alternating_init_nfiber`) -- identical initial values for every
-    population cause the solver to stall on a subset of populations.
+    signal.
 
     Parameters
     ----------
@@ -1517,9 +1299,7 @@ def estimate_AD_RD_nfiber_joint(bvals, bvecs, sig_norm, directions, fractions,
     AD_out, RD_out : array (n_pop,)
         Bounded to [_TENSOR_AD_FLOOR, _TENSOR_AD_CEIL] (AD) /
         [_TENSOR_RD_FLOOR, _TENSOR_RD_CEIL] (RD), the same constants
-        `estimate_AD_RD_conditioned` uses for the single-fiber case. NOTE: the
-        docstring used to state the RD lower bound as 0.05e-3 while the code
-        applied 0.15e-3 — the two had drifted apart.
+        `estimate_AD_RD_conditioned` uses for the single-fiber case.
     """
     N = len(bvals)
     n_pop = directions.shape[0]
@@ -1578,17 +1358,6 @@ def estimate_AD_RD_nfiber_joint(bvals, bvecs, sig_norm, directions, fractions,
         improved = False
         for _try in range(10):
             A = JTJ + lam * np.diag(np.diag(JTJ) + 1e-12)
-            # NOTE: J here is the Jacobian of the RESIDUAL r = sig_norm -
-            # model (dr/dp), not of the model itself -- confirmed by
-            # direct differentiation: J[i,2k] = frac*e*b*cos2 =
-            # -d(model)/d(AD_k) = +d(r)/d(AD_k). For that convention the
-            # Gauss-Newton/LM normal equations (JtJ + lam*D) delta = Jtr
-            # give the step in the ASCENT direction; the minimising step
-            # is p_new = p - delta, not p + delta. (Verified empirically:
-            # with the old `p + delta` sign, cost never decreases and the
-            # solver silently no-ops after 1 iteration on every voxel,
-            # always returning the un-refined alternating-init warm
-            # start.)
             delta = np.linalg.solve(A, JTr)
             p_new = p - delta
             for i in range(n_par):
@@ -1626,10 +1395,7 @@ def estimate_AD_RD_mrds(bvals, bvecs, sig_norm, directions, fractions,
     """
     Full MRDS multi-fiber Stage B: `alternating_init_nfiber` (cheap,
     symmetry-breaking warm start) followed by
-    `estimate_AD_RD_nfiber_joint` (bounded LM refine). Single entry point
-    for the fitting kernel to call once Stage A has detected n_pop >= 2
-    populations in a voxel; for n_pop == 1, continue using the existing
-    `estimate_AD_RD_conditioned` (+ optional MRDS-lite cone refinement).
+    `estimate_AD_RD_nfiber_joint`.
 
     Returns
     -------
@@ -1660,21 +1426,6 @@ def _mrds_sse(bvals, bvecs, sig_norm, directions, fractions, iso_signal, AD, RD)
         sse += d * d
     return sse
 
-
-# CROSSING DIRECTIONS (v1.9.0). Until 1.8.x a crossing kept Stage A's grid nodes
-# as directions (~16.6 deg apart on P3): measured on the 1.8.1 simulations (P3,
-# battery), median angular error ~4.5 deg in every crossing scenario and FLAT in
-# the SNR (4.4 / 4.3 deg at SNR 26 / 40), against 1.4 deg for single fibers, which
-# go through the cone. A tensor fitted along a wrong direction also turns broader
-# (RD up, AD down), so the error is not only angular.
-# Same two-level cone as the single fiber, one population at a time with the
-# others held fixed, but every candidate is scored by the residual of the JOINT
-# fit: the LM re-fits all the (AD, RD) from the current solution (warm start) and
-# the candidate is kept only if the residual decreases. Candidate zero is the
-# current direction, so the refinement can never do worse than the grid node.
-# A candidate closer than `min_separation_cos` to another population is skipped:
-# without it the two cones (each up to ~21 deg) could pull two populations that
-# Stage A found 35+ deg apart onto the same fiber.
 @njit(cache=True, fastmath=FASTMATH)
 def _crossing_cone_level(bvals, bvecs, sig_norm, dirs, fractions, iso_signal,
                          AD_b, RD_b, best, k, half_angle, n, min_separation_cos,
@@ -1734,8 +1485,7 @@ def refine_crossing_directions_cone(bvals, bvecs, sig_norm, directions, fraction
 
     The populations are visited in turn, `n_sweeps` times: refining one while
     the other still sits on its grid node leaves part of the error, which the
-    second sweep removes (noiseless P3 crossing, 7/6 deg from the truth: one
-    sweep 1.7/3.8 deg). Each level is centred on the current best direction.
+    second sweep removes. Each level is centred on the current best direction.
 
     Returns (directions, AD, RD), each a new array; with no improving candidate
     they equal the inputs.
@@ -1758,23 +1508,6 @@ def refine_crossing_directions_cone(bvals, bvecs, sig_norm, directions, fraction
     return dirs, AD_b, RD_b
 
 
-# CROSSING FIBER FRACTION, RE-SOLVED BEFORE THE MRDS LM (v1.7.0, default).
-# Stage A's crossing FF is shrunk by the heavy anisotropic penalty that Stage A
-# needs for SPARSE direction detection, and before 1.7.0 the LM below held it
-# fixed: the tensor compensated by turning more anisotropic, RD onto the floor
-# (75% of synthetic healthy crossings at SNR 26, 75% of real ones), AD low.
-# Here FF is re-solved by NNLS over the DETECTED support only -- for each detected
-# direction its grid node and the 6 nearest nodes (axially), every admissible
-# (AD, RD) pair -- plus the full iso grid unpenalised, with a light ridge on the
-# anisotropic block. The ridge is set per voxel by the caller as
-# kappa * (sigma / S0)^2: the ridge that centres healthy crossing FF was found
-# constant across protocols (P3, HCP-like, 2-shell) and proportional to the noise
-# variance (x3 from SNR 26 to 15), i.e. sigma^2 / tau^2 with a fixed prior scale
-# on the weights. Validation: experiments/crossing_asymmetry/ (outside the
-# repository) and branch `ispezione-crossing` (ff_corretta, scala_ridge_fine, scala_kappa,
-# exp_ms_crossing, fantoccio_spaziale, batteria_modo10) and notebook 11 on a
-# healthy subject (crossings on the RD floor 75% -> 20%, i.e. 10-12% per
-# population like single fibers; crossing/neighbouring-single RD ratio 0.63 -> 1.00).
 @njit(cache=True)
 def crossing_ff_resolve(sig_norm, bvals, bvecs, fiber_dirs, directions, n_pop,
                         diff_pairs, iso_grid, ridge, iso_sig_out):

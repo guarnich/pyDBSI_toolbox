@@ -276,12 +276,12 @@ _C_DIR2 = 17          # dir2_x, dir2_y, dir2_z = 17, 18, 19
 _C_ADW = 20           # ── FF-weighted over the populations present ──
 _C_RDW = 21
 _C_FAW = 22
-_C_CONC = 23          # dominant_basin_concentration (diagnostic)
+_C_CONC = 23          # dominant_basin_concentration 
 _C_R2 = 24            # fit_r2   -- goodness of fit of the reconstructed signal
 _C_RMSE = 25          # fit_rmse -- residual RMSE, as a fraction of S0
-_C_NNLS_IT = 26       # nnls_iterations -- Stage A solver iterations (diagnostic)
+_C_NNLS_IT = 26       # nnls_iterations -- Stage A solver iterations 
 _N_CHANNELS = 27      # PUBLIC channels: what `fit` returns and what is saved
-_C_ADC_ISO = 27       # INTERNAL scratch: mean of Stage A's iso spectrum (see above)
+_C_ADC_ISO = 27       
 _N_CHANNELS_INTERNAL = 28
 
 # MRDS multi-fiber Stage B defaults (see core.solvers.estimate_AD_RD_mrds).
@@ -421,20 +421,6 @@ def _apply_conc_modulation(w, AtA_reg, Aty, n_aniso_cols, n_dirs, n_pairs,
     the isotropic signal (which inflates fiber_fraction), while leaving genuine
     fibers — which concentrate their weight — essentially untouched.
 
-    Rationale for a CONTINUOUS ramp rather than a binary gate: the concentration
-    of a demyelinated / low-FA fiber (~0.36 on the validation brain) sits BELOW
-    that of a healthy fiber (~0.48) and only modestly ABOVE diffuse leakage
-    (~0.25) — the distributions overlap at the tails. A hard threshold at any
-    single value therefore either misses leakage or crushes the demyelinated
-    fiber (the npop binary gate was falsified for exactly this reason). A
-    continuous ramp instead applies FULL boost only to clearly-diffuse voxels
-    (c <= c_lo), NONE to clearly-concentrated ones (c >= c_hi), and a
-    proportional, gentle boost to the ambiguous middle — so a demyelinated
-    fiber loses only a little anisotropic weight (stays detectable) while
-    leakage is strongly suppressed. Voxels with almost no anisotropic weight
-    (e.g. CSF: high concentration but negligible FF) sit above c_hi and are
-    never modulated, so this cannot manufacture leakage where there was none.
-
     The boost is applied by adding `(g - 1) * lambda_aniso` to the anisotropic
     block's diagonal of a LOCAL copy of `AtA_reg` (the isotropic block and the
     shared matrix are left untouched), then re-running the same NNLS.
@@ -493,16 +479,8 @@ def _single_fiber_2iso(arr, x, y, z, dominant_dir, sig_norm, bvals, bvecs, b0_th
                        cone1_half_angle, n1_cone, cone2_half_angle, n2_cone,
                        data_raw, stagec_iso_grid, iso_forward, iso_gram,
                        stagec_ad_grid, stagec_rd_grid, stagec_aniso_ratio, iso_cfg):
-    """Single-fiber Stage B/C for one voxel, written into `arr` at (x, y, z): cone on
-    the direction, then Stage C (or the closed-form Stage B without it). The body of the
-    kernels' n_pop == 1 branch, COPIED here (v1.9.0) so that the two-vs-one test can fit
-    the single-fiber alternative of a crossing candidate from the same Stage A. A copy, not
-    a move: with the kernels calling this helper the fit moved by 1 float32 ulp (~6e-8,
-    17 channels, same machine): fastmath optimises the helper differently from the inlined
-    code. Keep the two in step when editing either. (With both crossing options off the
-    1.9.0 kernels reproduce 1.8.1 up to 1 ulp in ~1% of crossing voxels, measured
-    2026-10-28: the added branches alone change fastmath's code.)
-    2-ISO."""
+    
+    """Single-fiber Stage B/C for one voxel: cone on the direction, then Stage C (or the closed-form Stage B without it)."""
 
     if stagec_enabled:
         # Refine the direction first, then hand the refined one to
@@ -515,13 +493,7 @@ def _single_fiber_2iso(arr, x, y, z, dominant_dir, sig_norm, bvals, bvecs, b0_th
                 cone1_half_angle, n1_cone, cone2_half_angle, n2_cone
             )
         # ── STAGE C: joint (VARPRO) tensor+fraction re-solve ──
-        # Replaces the raw over-complete-block fractions AND the
-        # decoupled Stage B tensor with a residual-minimising joint
-        # fit on [fiber_col(AD,RD,dir) | iso_grid]. Fixes the
-        # fiber_fraction inflation + restricted collapse + AD
-        # under-estimation (see stagec_varpro_single_fiber).
-        # `data_raw` is the Stage C signal: data_corr by default since
-        # v1.12.0 (see the note above _DEFAULT_ISO_RESOLVE).
+        
         sig_raw = data_raw[x, y, z]
         s0_raw = 0.0
         cnt_raw = 0

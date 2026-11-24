@@ -1413,9 +1413,6 @@ def _iso_resolve_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso, 
             out[x, y, z, _C_WF] = wat
 
 
-# Serial on purpose (since v1.6.3): with prange this pass stopped the fit on the Linux
-# workstation with SystemError, an exception state from the parallel region and not an
-# arithmetic bug. Serial it costs ~4 s on a whole brain. Do not make it parallel again.
 @njit(cache=True, fastmath=FASTMATH)
 def _fiber_detection_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso,
                           sigma_map, threshold, out, stat_out):
@@ -1428,7 +1425,7 @@ def _fiber_detection_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3i
         stat = (RSS_iso_only - RSS_fibers+iso) / sigma_voxel^2,
         sigma_voxel = sigma_map[x, y, z] / S0_voxel,
 
-    i.e. how much the fibers reduce the residual, in units of the noise variance,
+    how much the fibers reduce the residual, in units of the noise variance,
     written to `stat_out`. If `threshold` > 0 and stat < threshold the fiber is
     rejected: n_pop -> NaN, fiber channels -> NaN, FF -> 0 and the iso fractions
     from the iso-only fit. Default OFF (threshold 0: computed, never applied).
@@ -1542,7 +1539,7 @@ def _stage_d_rss(yv, bvals, bvecs, A_iso, arr, x, y, z, n_fib):
 def _two_vs_one_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, sigma_map,
                      threshold, out, alt, stat_out):
     """
-    Two-vs-one population test (v1.9.0, see _DEFAULT_TWO_VS_ONE_THRESHOLD).
+    Two-vs-one population test.
 
     `out` holds the crossing fit of every candidate voxel, `alt` the single-fiber
     fit of the same voxels from the same Stage A (both written by the kernel). On

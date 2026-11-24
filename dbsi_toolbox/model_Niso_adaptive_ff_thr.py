@@ -1010,15 +1010,11 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                 val += At[r, c] * sig_norm[c]
             Aty[r] = val
 
-        # The solver's iteration count is NOT discarded: written out below as
-        # `nnls_iterations`. Hitting _NNLS_MAX_ITER means Stage A did not
-        # converge in this voxel, which until v1.3.2 was undetectable — every
-        # call site dropped the counter. Written here, before any early exit, so
-        # the diagnostic exists even for voxels that leave the loop early.
+        
         w, _nnls_it = nnls_coordinate_descent(AtA_reg, Aty, 0.0)
         out[x, y, z, _C_NNLS_IT] = _nnls_it
 
-        # Plan A: per-voxel concentration-modulated lambda_aniso (on by default;
+        # Per-voxel concentration-modulated lambda_aniso (on by default;
         # skipped when conc_mod_enabled is False).
         if conc_mod_enabled:
             w = _apply_conc_modulation(
@@ -1085,8 +1081,8 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
         out[x, y, z, _C_NRF] = f_hin + f_wat
         out[x, y, z, _C_ADC_ISO] = mean_iso_adc
 
-        # Per-voxel angular concentration (diagnostic + Plan A modulation lever);
-        # see the 2-ISO kernel note. Computed for every fitted voxel.
+        # Per-voxel angular concentration (diagnostic +  modulation lever);
+        
         out[x, y, z, _C_CONC] = dominant_basin_concentration(
             w_aniso, n_dirs, n_pairs, neighbor_idx, fiber_dirs
         )
@@ -1109,7 +1105,7 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
 
                 if stagec_enabled:
                     # Refine the direction first, then hand the refined one to
-                    # Stage C (see _DEFAULT_STAGEC_DIR_REFINE).
+                    # Stage C.
                     if stagec_dir_refine and enable_direction_refinement:
                         dominant_dir, _, _ = refine_fiber_direction_cone(
                             bvals, bvecs, sig_norm, dominant_dir,
@@ -1118,8 +1114,7 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                             cone1_half_angle, n1_cone, cone2_half_angle, n2_cone
                         )
                     # ── STAGE C: joint (VARPRO) tensor+fraction re-solve (3-ISO
-                    # binning RES/HIN/WAT). `data_raw` is the Stage C signal:
-                    # data_corr by default since v1.12.0. ──
+                    # binning RES/HIN/WAT).
                     sig_raw = data_raw[x, y, z]
                     s0_raw = 0.0
                     cnt_raw = 0
@@ -1170,9 +1165,7 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                         out[x, y, z, _C_ADC_ISO] = wd_sc / sum_iso_sc if sum_iso_sc > 1e-10 else 0.0
                 elif enable_direction_refinement:
                     # the refined direction is what AD/RD were fitted at, so it
-                    # is also what gets stored (it used to be discarded, and the
-                    # coarse grid node written to dir1 instead -- leaving the
-                    # stored direction inconsistent with the stored tensor).
+                    # is also what gets stored.
                     dominant_dir, AD_est, RD_est = refine_fiber_direction_cone(
                         bvals, bvecs, sig_norm, dominant_dir,
                         f_fib, f_res, f_hin, f_wat,
@@ -1214,9 +1207,7 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                                      + f_hin * np.exp(-bvals[i] * D_hin_c)
                                      + f_wat * np.exp(-bvals[i] * D_wat_c))
 
-                # v1.7.0: crossing FF re-solved on the detected support (light ridge
-                # kappa * (sigma/S0)^2) BEFORE the LM, instead of holding Stage A's
-                # heavily penalised FF fixed -- see core.solvers.crossing_ff_resolve.
+                
                 # The population shares keep Stage A's split; Stage D re-solves the
                 # final fractions with the tensors fitted here.
                 if crossing_ff_kappa > 0.0 and f_fib > 1e-10:
@@ -1236,8 +1227,7 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                     bvals, bvecs, sig_norm, directions, fractions, iso_signal,
                     init_n_iter=_MRDS_INIT_N_ITER, lm_max_iter=_MRDS_LM_MAX_ITER
                 )
-                # v1.9.0: the crossing directions leave the grid nodes (see
-                # core.solvers.refine_crossing_directions_cone).
+                
                 if crossing_dir_refine and enable_direction_refinement:
                     directions, AD_out, RD_out = refine_crossing_directions_cone(
                         bvals, bvecs, sig_norm, directions, fractions, iso_signal,
@@ -1263,13 +1253,7 @@ def _fit_voxels_3iso_v3(data, coords, AtA_reg, At, bvals, bvecs,
                 out[x, y, z, _C_DIR2 + 1] = directions[1, 1]
                 out[x, y, z, _C_DIR2 + 2] = directions[1, 2]
                 if two_vs_one:
-                    # v1.9.0: the single-fiber alternative of this crossing candidate, from the
-                    # SAME Stage A (a second kernel pass would redo Stage A, ~40% of its cost):
-                    # Stage A's state (locals: out[_C_FF] now holds the crossing's re-solved FF),
-                    # then a copy of the n_pop == 1 branch. Verified: with the test off the fit
-                    # is bit-identical to the two-pass version (same machine); with it on the
-                    # decisions are identical and 6/4992 crossing voxels move by 1 float32 ulp.
-                    # See _two_vs_one_pass.
+                    
                     alt_out[x, y, z, _C_FF] = f_fib
                     alt_out[x, y, z, _C_RF] = f_res
                     alt_out[x, y, z, _C_HF] = f_hin
@@ -1298,21 +1282,7 @@ def _iso_resolve_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso, 
     re-solves [fibers | fixed iso centroids] via `iso_fraction_resolve`, and
     OVERWRITES the fraction channels (0,1,2,3,4 and the pop-2 fraction 15).
     The fiber TENSORS/directions are kept as estimated (Stage C / MRDS);
-    only the fractions are re-estimated here (on corrected). See
-    `core.solvers.iso_fraction_resolve` for the why (raw-tensor / corrected-
-    fraction split, fixed-3 vs the over-complete spectrum).
-
-    FIBER THRESHOLD ON THE FINAL STATE (v1.8.0). `fiber_threshold` decides in
-    Stage A whether a voxel gets a fiber, on Stage A's FF; the FF reported is
-    this pass's. Where the re-solved FF is <= fiber_threshold the fiber is
-    REMOVED (n_pop -> NaN, fiber channels -> NaN) and the fractions are re-solved
-    on the iso centroids alone, exactly as for a voxel Stage A gave no fiber, so
-    "a tensor is reported only where FF > fiber_threshold" holds for the output.
-    Measured on 1.7.1 (P3 phantom, SNR 26): 38% of the (false) fibers in
-    isotropic tissue and 17% of true weak fibers (FF 0.2) had final FF < 0.15.
-    Not applied on the kappa-0 crossing path (crossing_resolve False), where the
-    reported crossing FF is Stage A's own.
-    """
+    only the fractions are re-estimated here (on corrected).  """
     n_voxels = coords.shape[0]
     n_iso = iso_d.shape[0]
     for idx in prange(n_voxels):
@@ -1370,7 +1340,7 @@ def _iso_resolve_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso, 
             f_fib /= tot
             if n_fib == 0 or f_fib > fiber_threshold or (n_fib >= 2 and not crossing_resolve):
                 break
-            # final FF at or below the threshold: no fiber (see docstring)
+            # final FF at or below the threshold: no fiber 
             out[x, y, z, _C_NPOP] = np.nan
             for c in (_C_AD1, _C_RD1, _C_FA1, _C_DIR1, _C_DIR1 + 1, _C_DIR1 + 2,
                       _C_FF2, _C_AD2, _C_RD2, _C_FA2, _C_DIR2, _C_DIR2 + 1, _C_DIR2 + 2):
@@ -1384,8 +1354,7 @@ def _iso_resolve_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso, 
         wat = 0.0
         for j in range(n_iso):
             wj = w_out[n_fib + j] / tot
-            # class by POSITION (v1.10.0): iso_d is (RF, HF, WF) or (RF, NRF), each
-            # centroid validated inside its class; NRF is accumulated in `hin`.
+            
             if j == 0:
                 res += wj
             elif j == 1:
@@ -1394,22 +1363,14 @@ def _iso_resolve_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso, 
                 wat += wj
 
         if n_fib >= 2 and crossing_resolve:
-            # crossing_ff_kappa > 0: the crossing tensors were fitted with a
-            # re-solved FF, so Stage D re-solves the crossing fractions too (total
-            # and pop-2), as for single fibers.
+            
             out[x, y, z, _C_FF] = f_fib
             w1n = w_out[0] / tot
             w2n = w_out[1] / tot
             if w1n > 1e-6 and w2n > 1e-6:
                 out[x, y, z, _C_FF2] = w2n
             else:
-                # The re-solve gave one population NO weight (0.7% of real
-                # crossings, notebook 11). Reporting n_pop=2 with a zero-weight
-                # population would put a tensor and a direction the data do not
-                # support into the pop-2 maps: the voxel becomes a single fiber.
-                # If it is population 1 that vanished, population 2 moves into its
-                # slot. The surviving tensor is the one fitted jointly with the
-                # other population (no Stage C re-fit).
+                
                 if w1n <= 1e-6 and w2n > 1e-6:
                     out[x, y, z, _C_AD1] = out[x, y, z, _C_AD2]
                     out[x, y, z, _C_RD1] = out[x, y, z, _C_RD2]
@@ -1421,10 +1382,7 @@ def _iso_resolve_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso, 
                 for c in (_C_FF2, _C_AD2, _C_RD2, _C_FA2, _C_DIR2, _C_DIR2 + 1, _C_DIR2 + 2):
                     out[x, y, z, c] = np.nan
         elif n_fib >= 2:
-            # crossing_ff_kappa = 0: the reported crossing FF is Stage A's (biased
-            # low: 0.07-0.21 on synthetic P3 crossings, the cause of crossing RD on
-            # the floor, see core/solvers.py MRDS section). Stage D gives only the
-            # iso split, rescaled to (1 - FF); FF and the pop-2 fraction untouched.
+           
             ff_keep = out[x, y, z, _C_FF]
             if np.isnan(ff_keep):
                 ff_keep = f_fib
@@ -1448,41 +1406,14 @@ def _iso_resolve_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso, 
 def _fiber_detection_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3iso,
                           sigma_map, threshold, out, stat_out):
     """
-    Detection test for the fiber populations Stage A reported (v1.6.1).
+    Detection test for the fiber populations Stage A reported.
 
     For every voxel with a fiber, on the Stage D model (fixed iso centroids,
-    fitted tensors and directions, Rician-corrected signal):
+    fitted tensors and directions, Rician-corrected signal), how much the fibers reduce the residual, 
+    in units of the noise variance.
+    
+    Default OFF.
 
-        stat = (RSS_iso_only - RSS_fibers+iso) / sigma_voxel^2,
-        sigma_voxel = sigma_map[x, y, z] / S0_voxel   (thermal sigma map since v1.7.1)
-
-    i.e. how much the fibers reduce the residual, in units of the noise
-    variance. Written to `stat_out` for every such voxel. If `threshold` > 0
-    and stat < threshold, the fiber is REJECTED: n_pop -> NaN, fiber channels
-    -> NaN, FF -> 0 and the iso fractions from the iso-only fit.
-
-    WHY. Measured on synthetic ISOTROPIC tissue (P3 protocol, frozen P3
-    lambdas, gate off): at SNR 26, 38-62% of GM-like / hindered / tumour-like
-    voxels got a fiber, almost all as a CROSSING with FF 0.16-0.18 (Stage A
-    noise spread over two peaks, just above fiber_threshold); 88-90% at SNR 15;
-    ~0 at SNR 40. The concentration gate cannot separate them from true
-    crossings (concentration anti-correlates with resolvability). This
-    statistic can: its null distribution is SNR-invariant (median 4-6, p95
-    11-14 at SNR 15, 26 and 40) because it is noise-normalised, while true
-    fibers score p05 74 (single fiber FF 0.25) and 17.5 (90-degree crossing,
-    FF 0.30) at SNR 26. It is the F-test MRDS uses for model selection, which
-    this toolbox had left out. The statistic is always computed and written
-    (fiber_detection_stat.nii.gz); the threshold is OFF by default.
-
-    DECIDED OFF for v1.7.0 (2026-10-01). Battery 05 (synthetic, v1.6.2): threshold
-    15 adoptable at SNR 30 and 15 (false fibers 0.067 -> 0.044 / 0.22 -> 0.20, no
-    true fiber lost, FF MAE 0.053 -> 0.047). Notebook 09 (healthy-tissue mix of a
-    real P3 subject, v1.6.4): threshold 15 would remove 15% of fiber voxels (2.9%
-    of single fibers, 28.5% of crossings, mostly FF 0.15-0.3), but failed its
-    pre-declared control (73% < 80% of the voxels the old gate rejected kept;
-    weak premise: that control rested on a residual inflated by the pre-1.5.2
-    reconstruction). And the crossing FF re-solve of 1.7.0 changes the crossing
-    tensors, hence this statistic: the threshold is to be decided on 1.7.0 output.
     """
     n_voxels = coords.shape[0]
     n_iso = iso_d.shape[0]
@@ -1492,13 +1423,7 @@ def _fiber_detection_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3i
         for i in range(N):
             A_iso[i, j] = np.exp(-bvals[i] * iso_d[j])
     AtA_iso = A_iso.T @ A_iso
-    # SERIAL since v1.6.3. On the workstation (Linux) the parallel version stopped
-    # the fit with ZeroDivisionError -> SystemError ("returned a result with an
-    # error set"), while the same pass in pure Python on the same data found no
-    # zero divisor at all (2026-10-01): an exception state from the parallel
-    # region, not a bug in the arithmetic. Serial it costs ~0.15 s per 6000
-    # fiber voxels (~4 s on a whole brain), and any real exception surfaces with
-    # its own message.
+   
     for idx in range(n_voxels):
         x, y, z = coords[idx]
         npop = out[x, y, z, _C_NPOP]
@@ -1538,7 +1463,7 @@ def _fiber_detection_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3i
         r_f = yv - A @ w_f
         r_i = yv - A_iso @ w_i
         sig2 = (sigma_map[x, y, z] / s0) ** 2
-        if not (sig2 > 0.0):      # S0 infinito o sigma nullo: statistica non definita
+        if not (sig2 > 0.0):      
             continue
         stat = (np.sum(r_i * r_i) - np.sum(r_f * r_f)) / sig2
         stat_out[x, y, z] = stat
@@ -1551,7 +1476,7 @@ def _fiber_detection_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, use_3i
             res = 0.0
             hin = 0.0
             wat = 0.0
-            for j in range(n_iso):        # class by position, as in _iso_resolve_pass
+            for j in range(n_iso):        
                 if j == 0:
                     res += w_i[j] / tot
                 elif j == 1:
@@ -1607,8 +1532,7 @@ def _two_vs_one_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, sigma_map,
 
         stat21 = (RSS_1pop - RSS_2pop) / sigma_voxel^2,
 
-    written to `stat_out`; where stat21 < threshold the voxel's channels are
-    replaced by the single-fiber fit. Run BEFORE Stage D, so that neither model
+    written to `stat_out`. Run BEFORE Stage D, so that neither model
     has been through the fiber threshold yet. Serial, like the detection pass.
     """
     n_voxels = coords.shape[0]
@@ -1656,9 +1580,7 @@ def _two_vs_one_pass(data_corr, coords, bvals, bvecs, b0_thr, iso_d, sigma_map,
 
 def _package_provenance():
     """Where this code came from: install path, and the git state if the
-    package is being run out of a checkout. Everything is best-effort — an
-    installed wheel has no git, and that is not an error, it just means the
-    version string is all the provenance there is."""
+    package is being run out of a checkout."""
     import os
     from . import __version__ as _v          # deferred: __init__ imports us
     info = {'toolbox_version': _v,
@@ -1680,14 +1602,7 @@ def _package_provenance():
 
 
 def _solver_diagnostics(results, mask):
-    """Did the solver converge, and how often did it stop on a bound?
-
-    Both questions used to be unanswerable from the outputs. Non-convergence
-    was invisible because every NNLS call site discarded the iteration counter;
-    bound activity was invisible because a clamped value is indistinguishable
-    from an estimated one. Neither is rare on real data, and a voxel sitting
-    exactly on a bound is a voxel whose tensor the data did not determine — so
-    averaging over it reports the bound, not the tissue.
+    """Solver convergence and stop on a bound?
 
     Percentages are over the voxels where the relevant quantity exists: the
     fitted mask for the solver counters, and the voxels where that population
@@ -1707,8 +1622,8 @@ def _solver_diagnostics(results, mask):
                    nnls_not_converged_pct=round(
                        100.0 * float(np.mean(it >= _NNLS_MAX_ITER - 1)), 3))
 
-    # A bound is "active" when the value sits on it to within a relative 1e-6:
-    # these are exact assignments, not near misses, so the test is tight.
+    # A bound is "active" when the value sits on it to within a relative 1e-6.
+    
     def _on(ch, bound):
         v = results[..., ch][mask]
         v = v[np.isfinite(v)]
@@ -1728,10 +1643,7 @@ def _solver_diagnostics(results, mask):
         if val is not None:
             out[nome] = val
 
-    # The same floor, split by BRANCH. rd_pop1_at_floor_pct mixes the single
-    # fibers with the dominant population of the crossings, two estimators with
-    # different failure modes (crossing tensors: re-solved FF + MRDS LM; on a
-    # healthy P3 subject ~10-12% per population on the floor, like single fibers).
+    
     npop = results[..., _C_NPOP]
     rd1 = results[..., _C_RD1]
     rd2 = results[..., _C_RD2]
@@ -1750,10 +1662,8 @@ def _solver_diagnostics(results, mask):
 
 def _population_census(results, mask):
     """Voxel counts for the three states of `n_fiber_populations`, over the
-    fitted mask. The three states are not interchangeable (see
-    `output_map_names`), so a run report that collapsed them would hide the
-    thing worth noticing: on angularly poor protocols a large share of
-    single-fiber voxels never resolves a direction at all."""
+    fitted mask. The three states are not interchangeable, so a run report that collapsed them would hide the
+    thing worth noticing."""
     npop = results[..., _C_NPOP]
     m = np.asarray(mask, bool)
     n = int(m.sum())
@@ -1772,21 +1682,18 @@ def _population_census(results, mask):
 def _fill_derived_channels(out):
     """
     Final vectorised pass: fill the channels that are DERIVED from the fitted
-    ones, so that no downstream consumer has to re-derive them (and so they
-    cannot silently disagree with the fractions they are built from).
+    ones.
 
     * `fiber_fraction_pop1` = fiber_fraction (total) - fiber_fraction_pop2.
       Stage A computes the pop-1 share explicitly but the kernels never stored
       it, and Stage D then revises the TOTAL for single-fiber voxels while
-      leaving the pop-2 fraction alone -- so the only value consistent with the
-      final output is this difference, taken here, after every in-place stage.
+      leaving the pop-2 fraction alone.
     * `*_weighted` = the fiber tensor averaged over the populations present,
       weighted by their fractions. For a single-fiber voxel this is just the
       pop-1 tensor; for a crossing it is the one number that summarises both.
-      `fiber_fa_weighted` is the FA OF the weighted tensor (an intrinsic
-      per-fiber anisotropy), NOT the average of the two FAs.
+      `fiber_fa_weighted` is the FA OF the weighted tensor, NOT the average of the two FAs.
 
-    Must run AFTER Stage C, Stage D and the RF bias correction. In-place.
+    Must run AFTER Stage C, Stage D and the RF bias correction.
     """
     ff_t = out[..., _C_FF].astype(np.float64)
     ff2 = np.nan_to_num(out[..., _C_FF2].astype(np.float64), nan=0.0)
